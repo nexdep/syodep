@@ -12,7 +12,7 @@ members = [
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-repository = "https://example.invalid/syodep"
+repository = "https://github.com/nexdep/syodep"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

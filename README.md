@@ -88,9 +88,17 @@ no document logic. Details in `docs/architecture.md`.
 - `docs/packaging.md` – build/packaging/release pipeline
 - `docs/development-log.md` – milestone-by-milestone log
 - `docs/roadmap.md` – phases and planned features
+- `AGENTS.md` – ground rules and verify steps for AI agents / contributors
 
-## License and clean-room note
+## License
 
-Sioyek is GPLv3 and serves as product inspiration only. syodep contains no
-Sioyek code, assets, or file structure; Sioyek-derived *ideas* are recorded
-as conceptual inspiration in `docs/architecture.md`.
+syodep is released under the [MIT License](LICENSE).
+
+Note on dependencies: binaries embed [MuPDF](https://mupdf.com/), which is
+licensed under the AGPLv3 — distributed builds of syodep must therefore
+comply with the AGPL's terms (source availability), even though syodep's
+own code is MIT.
+
+Clean-room note: Sioyek is GPLv3 and serves as product inspiration only.
+syodep contains no Sioyek code, assets, or file structure; Sioyek-derived
+*ideas* are recorded as conceptual inspiration in `docs/architecture.md`.
