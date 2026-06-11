@@ -8,6 +8,8 @@
 // All document/navigation logic lives in the Rust core.
 #pragma once
 
+#include <cstdint>
+
 #include <QHash>
 #include <QImage>
 #include <QOpenGLWidget>
