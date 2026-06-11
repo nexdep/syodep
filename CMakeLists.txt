@@ -75,7 +75,14 @@ if(WIN32)
         RESULT_VARIABLE _cargo_result)
     string(REGEX MATCH "native-static-libs: ([^\r\n]*)" _match "${_cargo_stderr}")
     if(_cargo_result EQUAL 0 AND _match)
-        separate_arguments(SYODEP_NATIVE_LIBS WINDOWS_COMMAND "${CMAKE_MATCH_1}")
+        separate_arguments(_raw_libs WINDOWS_COMMAND "${CMAKE_MATCH_1}")
+        # rustc emits linker-flag tokens like `/defaultlib:msvcrt`; CMake
+        # would treat them as file paths, so reduce them to library names.
+        set(SYODEP_NATIVE_LIBS "")
+        foreach(_lib IN LISTS _raw_libs)
+            string(REGEX REPLACE "^[/-][Dd][Ee][Ff][Aa][Uu][Ll][Tt][Ll][Ii][Bb]:" "" _lib "${_lib}")
+            list(APPEND SYODEP_NATIVE_LIBS "${_lib}")
+        endforeach()
         message(STATUS "Rust native static libs: ${SYODEP_NATIVE_LIBS}")
     else()
         # Fallback guess; kept in sync manually if the query ever fails.
