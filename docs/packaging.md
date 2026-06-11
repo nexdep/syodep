@@ -16,8 +16,11 @@ builds (`-DSYODEP_RUST_PROFILE=dev` to override) because debug MuPDF
 rendering is unusably slow.
 
 Platform link extras: Linux needs `fontconfig`/`freetype` (system font
-discovery); Windows links `ws2_32 userenv bcrypt ntdll advapi32 secur32
-ncrypt` for the Rust runtime/SQLite.
+discovery). On Windows the exact system-library set is queried from
+`rustc --print=native-static-libs` at configure time, and MuPDF's static
+libs (not bundled into the staticlib there, unlike Linux) are resolved to
+their cargo `OUT_DIR` paths. The Windows shell must be built as Release:
+a debug config links `/MDd` against MuPDF's `/MD` objects and fails.
 
 ## Release pipeline (specification)
 
@@ -47,6 +50,10 @@ The release job (`release-build-windows` in `release.yml`) additionally:
    machine,
 4. zips and uploads `syodep-win64.zip` as a workflow artifact.
 
+On `v*` tag pushes a final job (`publish-release`) creates a GitHub
+release and attaches the zip as `syodep-vX.Y.Z-win64.zip` with generated
+notes. Manual (`workflow_dispatch`) runs stop at workflow artifacts.
+
 ### Still planned
 
 - **Linux AppImage:** build on the oldest supported LTS runner for glibc
@@ -56,8 +63,6 @@ The release job (`release-build-windows` in `release.yml`) additionally:
   the raw binary.
 - **Windows NSIS installer:** silent-install capable script over the
   portable tree produced above.
-- Attaching artifacts to a GitHub release on tag push (currently they are
-  workflow artifacts only).
 
 ## Versioning
 

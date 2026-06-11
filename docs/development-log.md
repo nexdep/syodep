@@ -7,6 +7,36 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-06-11 — Windows link fixes + GitHub releases on tag push
+
+### Implemented
+
+- Fixed the Windows shell link, found by reading CI logs after four
+  distinct failures (all in the top-level `CMakeLists.txt`):
+  1. strip `/defaultlib:` linker-flag tokens from rustc's
+     `native-static-libs` output (CMake treated them as file paths);
+  2. strip ANSI color codes from that output (`CARGO_TERM_COLOR=always`
+     in CI poisons tokens) — note `\x` escapes are invalid in CMake
+     strings, use `string(ASCII 27 …)`;
+  3. resolve `libmupdf.lib`/`libthirdparty.lib` to their cargo `OUT_DIR`
+     paths — on Windows rustc does **not** bundle them into the staticlib
+     (unlike Linux), leaving 382 unresolved `fz_*` symbols;
+  4. configure the Windows CI shell build as Release — a debug config
+     links debug Qt + `/MDd` against MuPDF's `/MD` objects (LNK2038).
+- **`publish-release`** (release.yml): on `v*` tag pushes, downloads the
+  portable zip artifact and publishes it to a GitHub release as
+  `syodep-vX.Y.Z-win64.zip` (`gh release create --generate-notes`,
+  `contents: write` permission). Manual dispatch runs still stop at
+  workflow artifacts.
+
+### Test strategy
+
+CI-only changes, verified by watching runs to green: full CI (all six
+jobs including both Windows jobs), a `workflow_dispatch` release run
+producing a working zip, and a `v*` tag push producing a GitHub release.
+
+---
+
 ## 2026-06-11 — Windows binary in CI/CD
 
 ### Implemented

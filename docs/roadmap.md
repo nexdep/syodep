@@ -54,7 +54,7 @@ Ordered roughly by dependency:
   - ✅ Windows portable zip release artifact (windeployqt, staged smoke test)
   - ⬜ Linux AppImage
   - ⬜ Windows NSIS installer
-  - ⬜ attach artifacts to GitHub releases on tag push
+  - ✅ attach artifacts to GitHub releases on tag push
 - ⬜ Command palette (`:` / `<C-p>`) listing the command registry
 - ⬜ Config hot-reload
 
