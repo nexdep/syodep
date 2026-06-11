@@ -74,7 +74,8 @@ if(WIN32)
         ERROR_VARIABLE _cargo_stderr
         RESULT_VARIABLE _cargo_result)
     # Strip ANSI color codes (CARGO_TERM_COLOR=always in CI poisons tokens).
-    string(REGEX REPLACE "\x1b\\[[0-9;]*m" "" _cargo_stderr "${_cargo_stderr}")
+    string(ASCII 27 _esc)
+    string(REGEX REPLACE "${_esc}\\[[0-9;]*m" "" _cargo_stderr "${_cargo_stderr}")
     string(REGEX MATCH "native-static-libs: ([^\r\n]*)" _match "${_cargo_stderr}")
     if(_cargo_result EQUAL 0 AND _match)
         separate_arguments(_raw_libs WINDOWS_COMMAND "${CMAKE_MATCH_1}")
