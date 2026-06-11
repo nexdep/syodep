@@ -20,7 +20,7 @@
 
 use std::ffi::{c_char, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use syodep_config::keys::parse_sequence;
 use syodep_config::Config;
@@ -409,7 +409,7 @@ fn default_base_dir(xdg_var: &str, unix_fallback: &str) -> PathBuf {
             }
         }
         if let Some(home) = std::env::var_os("HOME") {
-            return Path::new(&home).join(unix_fallback);
+            return std::path::Path::new(&home).join(unix_fallback);
         }
         PathBuf::from(".")
     }

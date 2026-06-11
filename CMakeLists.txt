@@ -78,11 +78,18 @@ if(WIN32)
         separate_arguments(_raw_libs WINDOWS_COMMAND "${CMAKE_MATCH_1}")
         # rustc emits linker-flag tokens like `/defaultlib:msvcrt`; CMake
         # would treat them as file paths, so reduce them to library names.
+        # It also lists MuPDF's own static libs (libmupdf/libthirdparty),
+        # but those are bundled into syodep_ffi.lib already and live in a
+        # cargo OUT_DIR the consumer can't see, so drop them.
         set(SYODEP_NATIVE_LIBS "")
         foreach(_lib IN LISTS _raw_libs)
             string(REGEX REPLACE "^[/-][Dd][Ee][Ff][Aa][Uu][Ll][Tt][Ll][Ii][Bb]:" "" _lib "${_lib}")
+            if(_lib MATCHES "^lib(mupdf|thirdparty)")
+                continue()
+            endif()
             list(APPEND SYODEP_NATIVE_LIBS "${_lib}")
         endforeach()
+        list(REMOVE_DUPLICATES SYODEP_NATIVE_LIBS)
         message(STATUS "Rust native static libs: ${SYODEP_NATIVE_LIBS}")
     else()
         # Fallback guess; kept in sync manually if the query ever fails.
