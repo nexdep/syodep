@@ -63,9 +63,29 @@ set_target_properties(syodep_ffi PROPERTIES
     INTERFACE_INCLUDE_DIRECTORIES "${SYODEP_FFI_INCLUDE_DIR}")
 
 # System libraries required by the Rust staticlib (and bundled MuPDF/SQLite).
+# rustc knows the exact set: `--print=native-static-libs` (builds the crate
+# as a side effect, which the custom command would do anyway).
 if(WIN32)
+    execute_process(
+        COMMAND "${CARGO_EXECUTABLE}" rustc -p syodep-ffi ${CARGO_PROFILE_FLAG}
+                -- --print=native-static-libs
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        OUTPUT_VARIABLE _cargo_stdout
+        ERROR_VARIABLE _cargo_stderr
+        RESULT_VARIABLE _cargo_result)
+    string(REGEX MATCH "native-static-libs: ([^\r\n]*)" _match "${_cargo_stderr}")
+    if(_cargo_result EQUAL 0 AND _match)
+        separate_arguments(SYODEP_NATIVE_LIBS WINDOWS_COMMAND "${CMAKE_MATCH_1}")
+        message(STATUS "Rust native static libs: ${SYODEP_NATIVE_LIBS}")
+    else()
+        # Fallback guess; kept in sync manually if the query ever fails.
+        set(SYODEP_NATIVE_LIBS
+            ws2_32 userenv bcrypt ntdll advapi32 secur32 ncrypt)
+        message(WARNING "could not query native-static-libs from cargo "
+            "(exit ${_cargo_result}); using fallback list")
+    endif()
     set_property(TARGET syodep_ffi PROPERTY INTERFACE_LINK_LIBRARIES
-        ws2_32 userenv bcrypt ntdll advapi32 secur32 ncrypt)
+        ${SYODEP_NATIVE_LIBS})
 else()
     # fontconfig/freetype are required by the core's system-font discovery.
     set_property(TARGET syodep_ffi PROPERTY INTERFACE_LINK_LIBRARIES

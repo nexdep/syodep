@@ -94,8 +94,18 @@ jobs:
         run: cargo build -p syodep-ffi --release
       - name: Configure
         run: cmake -B build -G Ninja
+      # On failure the log tail goes to the job summary for quick triage.
       - name: Build
-        run: cmake --build build
+        shell: pwsh
+        run: |
+          cmake --build build 2>&1 | Tee-Object -FilePath build.log
+          if ($LASTEXITCODE -ne 0) {
+            "## Windows shell build failure (tail)" | Out-File -Append $env:GITHUB_STEP_SUMMARY
+            '~~~' | Out-File -Append $env:GITHUB_STEP_SUMMARY
+            Get-Content build.log -Tail 100 | Out-File -Append $env:GITHUB_STEP_SUMMARY
+            '~~~' | Out-File -Append $env:GITHUB_STEP_SUMMARY
+            exit 1
+          }
       # The exe is a GUI-subsystem binary (WIN32_EXECUTABLE): stdout is
       # invisible, so the smoke test is judged by its exit code only.
       - name: Smoke test (open + render a PDF offscreen)
