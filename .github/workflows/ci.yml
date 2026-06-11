@@ -12,11 +12,15 @@ jobs:
     name: Rust formatting and clippy
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      # clippy --all-targets compiles native deps (MuPDF, font discovery),
+      # which need the fontconfig headers just like the test job.
+      - name: Build dependencies for MuPDF
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
       - name: rustfmt
         run: cargo fmt --all --check
       - name: clippy
@@ -26,7 +30,7 @@ jobs:
     name: Rust tests (Linux)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build dependencies for MuPDF
@@ -40,7 +44,7 @@ jobs:
     name: Rust tests (Windows)
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: cargo test
@@ -50,7 +54,7 @@ jobs:
     name: Qt shell build + smoke test (Linux)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install Qt and build tools
@@ -73,7 +77,7 @@ jobs:
     name: Qt shell build + smoke test (Windows)
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install Qt
@@ -107,6 +111,6 @@ jobs:
     name: Documentation checks
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Required docs exist and commands/config are documented
         run: ./scripts/check-docs.sh

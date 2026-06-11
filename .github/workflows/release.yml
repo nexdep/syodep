@@ -21,7 +21,7 @@ jobs:
     name: Release build (Linux, packaging placeholder)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - name: Install Qt and build tools
         run: |
@@ -44,7 +44,7 @@ jobs:
     name: Release build (Windows portable zip)
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - name: Install Qt
         uses: jurplel/install-qt-action@v4
