@@ -67,12 +67,14 @@ set_target_properties(syodep_ffi PROPERTIES
 # as a side effect, which the custom command would do anyway).
 if(WIN32)
     execute_process(
-        COMMAND "${CARGO_EXECUTABLE}" rustc -p syodep-ffi ${CARGO_PROFILE_FLAG}
-                -- --print=native-static-libs
+        COMMAND "${CARGO_EXECUTABLE}" rustc --color=never -p syodep-ffi
+                ${CARGO_PROFILE_FLAG} -- --print=native-static-libs
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
         OUTPUT_VARIABLE _cargo_stdout
         ERROR_VARIABLE _cargo_stderr
         RESULT_VARIABLE _cargo_result)
+    # Strip ANSI color codes (CARGO_TERM_COLOR=always in CI poisons tokens).
+    string(REGEX REPLACE "\x1b\\[[0-9;]*m" "" _cargo_stderr "${_cargo_stderr}")
     string(REGEX MATCH "native-static-libs: ([^\r\n]*)" _match "${_cargo_stderr}")
     if(_cargo_result EQUAL 0 AND _match)
         separate_arguments(_raw_libs WINDOWS_COMMAND "${CMAKE_MATCH_1}")
