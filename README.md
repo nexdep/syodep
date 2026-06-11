@@ -92,12 +92,13 @@ no document logic. Details in `docs/architecture.md`.
 
 ## License
 
-syodep is released under the [MIT License](LICENSE).
+syodep is released under the
+[GNU Affero General Public License v3.0 or later](LICENSE) (AGPL-3.0-or-later).
 
-Note on dependencies: binaries embed [MuPDF](https://mupdf.com/), which is
-licensed under the AGPLv3 — distributed builds of syodep must therefore
-comply with the AGPL's terms (source availability), even though syodep's
-own code is MIT.
+This matches the license of [MuPDF](https://mupdf.com/), which syodep
+embeds for PDF parsing and rendering: distributing combined builds requires
+AGPL terms anyway, so licensing syodep itself under the AGPL keeps the
+whole work compliant and unambiguous.
 
 Clean-room note: Sioyek is GPLv3 and serves as product inspiration only.
 syodep contains no Sioyek code, assets, or file structure; Sioyek-derived

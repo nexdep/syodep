@@ -15,7 +15,8 @@ for what to build next.
   product inspiration only. A local clone *may* exist at
   `../sioyek-reference` (a sibling of this repo, not part of it); if it
   does, treat it as read-only — never copy code, file structure, or assets
-  from it (GPLv3), and never make syodep depend on it. If it is absent,
+  from it (clean-room policy by project decision, regardless of license
+  compatibility), and never make syodep depend on it. If it is absent,
   simply work without it. Record borrowed *ideas* in the "Sioyek:
   conceptual inspirations" section of `docs/architecture.md`.
 - **Unsafe stays at the edges**: MuPDF only inside `crates/syodep-pdf`
