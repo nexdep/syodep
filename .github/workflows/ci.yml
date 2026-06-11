@@ -92,8 +92,10 @@ jobs:
       # C++ shell failure in the job overview.
       - name: Build Rust core
         run: cargo build -p syodep-ffi --release
+      # Release is required on Windows: the default (debug) C++ config links
+      # debug Qt libs and /MDd, which conflicts with MuPDF's /MD objects.
       - name: Configure
-        run: cmake -B build -G Ninja
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
       # On failure the log tail goes to the job summary for quick triage.
       - name: Build
         shell: pwsh
