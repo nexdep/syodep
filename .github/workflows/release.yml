@@ -1,15 +1,12 @@
-# Release pipeline (placeholder).
+# Release pipeline.
 #
-# Intended final shape (documented in docs/packaging.md):
+# Final shape (documented in docs/packaging.md):
 #   - tag push `v*` triggers this workflow
 #   - Linux: build with system Qt, bundle as AppImage via linuxdeploy
-#   - Windows: build with aqtinstall Qt, produce a portable zip and an
-#     NSIS installer
+#     (still a placeholder, see docs/roadmap.md)
+#   - Windows: build with aqtinstall Qt, produce a portable zip
+#     (implemented below) and an NSIS installer (planned)
 #   - upload all artifacts to a GitHub release
-#
-# Packaging is not implemented yet (milestone: see docs/roadmap.md). This
-# workflow only validates that a release-mode build of both halves succeeds,
-# so the real packaging step lands on a known-good foundation.
 
 name: Release
 
@@ -42,3 +39,53 @@ jobs:
         with:
           name: syodep-linux-unpackaged
           path: build/ui-qt/syodep
+
+  release-build-windows:
+    name: Release build (Windows portable zip)
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.7.3"
+          arch: win64_msvc2019_64
+          cache: true
+      - name: Set up MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+      - name: Build (release)
+        run: |
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build
+      - name: Stage portable tree (windeployqt)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path syodep-win64 | Out-Null
+          Copy-Item build/ui-qt/syodep.exe syodep-win64/
+          windeployqt --release --no-translations syodep-win64/syodep.exe
+          Copy-Item LICENSE, README.md syodep-win64/
+          Copy-Item config/default-config.toml syodep-win64/
+      # Run the smoke test from the staged tree with Qt stripped from PATH,
+      # so a missing bundled DLL fails here instead of on a user's machine.
+      # GUI-subsystem exe: judged by exit code only.
+      - name: Smoke test staged binary
+        shell: pwsh
+        run: |
+          cargo run -p syodep-pdf --features test-support `
+            --example make_fixture -- fixture.pdf 5
+          $env:PATH = ($env:PATH -split ';' | Where-Object { $_ -notlike '*Qt*' }) -join ';'
+          $env:QT_QPA_PLATFORM = "offscreen"
+          $proc = Start-Process -FilePath "syodep-win64/syodep.exe" `
+            -ArgumentList "--smoke-test", "fixture.pdf" -PassThru -Wait
+          if ($proc.ExitCode -ne 0) {
+            Write-Error "staged smoke test failed with exit code $($proc.ExitCode)"
+            exit 1
+          }
+      - name: Zip portable tree
+        shell: pwsh
+        run: Compress-Archive -Path syodep-win64 -DestinationPath syodep-win64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: syodep-win64
+          path: syodep-win64.zip

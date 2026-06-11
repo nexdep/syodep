@@ -62,7 +62,12 @@ QT_QPA_PLATFORM=offscreen ./build/ui-qt/syodep --smoke-test /tmp/f.pdf
 | `rust-test-linux` | full `cargo test --workspace` (config, storage/migrations, core, pdf, ffi) |
 | `rust-test-windows` | same on Windows (MSVC) |
 | `qt-build-linux` | CMake configure + build of the Qt shell, then the offscreen smoke test |
+| `qt-build-windows` | same on Windows (Qt via aqtinstall, MSVC + Ninja); smoke test judged by exit code (GUI-subsystem exe has no stdout) |
 | `docs` | `scripts/check-docs.sh`: required docs exist; every command, default keybinding and config option is documented |
+
+The release workflow additionally smoke-tests the staged Windows portable
+tree with Qt removed from PATH, catching missing bundled DLLs
+(see `docs/packaging.md`).
 
 Release pipeline: see `docs/packaging.md`.
 

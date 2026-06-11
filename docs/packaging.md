@@ -26,26 +26,38 @@ Target artifacts, produced by `.github/workflows/release.yml` on `v*` tags:
 | Artifact | Tooling | Status |
 |---|---|---|
 | Linux AppImage | linuxdeploy + Qt plugin | **planned** (placeholder job exists) |
-| Windows portable zip | `windeployqt` into a folder, zip it | **planned** |
+| Windows portable zip | `windeployqt` into a folder, zip it | **implemented** (`release-build-windows`) |
 | Windows installer | NSIS over the portable tree | **planned** |
 
-The current `release.yml` is an intentional placeholder: it validates a
-clean release-mode build on tag pushes and uploads the raw Linux binary,
-so the packaging steps land on a known-good foundation. Implementing the
-real packaging is a roadmap item (see `docs/roadmap.md`, "Packaging
-milestone").
+### Windows (implemented)
 
-Planned specifics:
+CI (`qt-build-windows` in `ci.yml`) builds the Qt shell on every push/PR:
+Qt 6.7.3 via `jurplel/install-qt-action` (`win64_msvc2019_64`), MSVC
+environment via `ilammy/msvc-dev-cmd`, `cmake -G Ninja`, then the offscreen
+smoke test. The exe is a GUI-subsystem binary, so the smoke test is judged
+by exit code (stdout is invisible on Windows).
 
-- **AppImage:** build on the oldest supported LTS runner for glibc
+The release job (`release-build-windows` in `release.yml`) additionally:
+
+1. builds in Release mode,
+2. stages `syodep-win64/` with `windeployqt --release --no-translations`
+   plus `LICENSE`, `README.md` and the sample config,
+3. re-runs the smoke test from the staged tree **with Qt stripped from
+   PATH**, so an incomplete DLL set fails in CI rather than on a user's
+   machine,
+4. zips and uploads `syodep-win64.zip` as a workflow artifact.
+
+### Still planned
+
+- **Linux AppImage:** build on the oldest supported LTS runner for glibc
   compatibility; bundle Qt platform plugins (xcb, wayland) via linuxdeploy's
-  Qt plugin; desktop file + icon; output `syodep-x86_64.AppImage`.
-- **Windows:** install Qt via `aqtinstall` (pinned version) on
-  `windows-2022`; `cmake --build` with MSVC; `windeployqt --release
-  --no-translations` into `syodep-win64/`; zip for the portable artifact;
-  NSIS script (silent-install capable) for the installer.
-- Both jobs end with the offscreen smoke test against the packaged binary
-  before uploading.
+  Qt plugin; desktop file + icon; output `syodep-x86_64.AppImage`. The
+  current Linux release job only validates a release-mode build and uploads
+  the raw binary.
+- **Windows NSIS installer:** silent-install capable script over the
+  portable tree produced above.
+- Attaching artifacts to a GitHub release on tag push (currently they are
+  workflow artifacts only).
 
 ## Versioning
 

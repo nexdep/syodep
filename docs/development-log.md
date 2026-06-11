@@ -7,6 +7,38 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-06-11 — Windows binary in CI/CD
+
+### Implemented
+
+- **`qt-build-windows`** (ci.yml): builds the Qt shell on `windows-2022`
+  on every push/PR — Qt 6.7.3 via `jurplel/install-qt-action`
+  (`win64_msvc2019_64`), MSVC env via `ilammy/msvc-dev-cmd`,
+  `cmake -G Ninja`, then the offscreen smoke test. The exe is a
+  GUI-subsystem binary, so the smoke test asserts the exit code (stdout is
+  invisible on Windows).
+- **`release-build-windows`** (release.yml): release-mode build, portable
+  tree staged with `windeployqt --release --no-translations` plus LICENSE/
+  README/sample config, smoke test re-run from the staged tree with Qt
+  stripped from PATH (an incomplete DLL bundle fails in CI, not on a user
+  machine), `syodep-win64.zip` uploaded as a workflow artifact.
+
+### Test strategy
+
+CI-only change: no core logic touched, so no new Rust tests. The Windows
+smoke test (build + open + render through the real exe) plus the staged
+PATH-stripped smoke test are the appropriate coverage. Verified by pushing
+and watching the GitHub Actions runs to green, plus a `workflow_dispatch`
+release run producing a working zip.
+
+### Notes / remaining
+
+- Qt version is pinned (6.7.3) in both workflows; bump deliberately.
+- Still planned (docs/packaging.md): Linux AppImage, NSIS installer,
+  attaching artifacts to GitHub releases on tag push.
+
+---
+
 ## 2026-06-11 — Milestone 1: MVP foundation
 
 Everything below landed as one milestone, built bottom-up in small slices
@@ -87,8 +119,8 @@ only, by design (it contains no logic).
 - `visible_pages` FFI is capped at 64 entries by the shell's stack buffer
   (fine until extreme zoom-out; the API already reports the real count).
 - No text selection yet — phase 2 starts with the char-geometry text layer.
-- Windows CI builds the Rust workspace but not yet the Qt shell; add a
-  Windows Qt build job together with the packaging milestone.
+- ~~Windows CI builds the Rust workspace but not yet the Qt shell~~
+  (done: see "Windows binary in CI/CD" entry above).
 
 ---
 

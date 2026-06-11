@@ -47,10 +47,14 @@ Ordered roughly by dependency:
 - ⬜ Bibliography/reference detection
 - ⬜ Async/tiled rendering with GL textures; prefetch neighboring pages
 
-## Infrastructure milestones ⬜
+## Infrastructure milestones 🚧
 
-- ⬜ Packaging: Linux AppImage, Windows portable zip + NSIS installer
-  (spec in `docs/packaging.md`)
+- 🚧 Packaging (spec in `docs/packaging.md`):
+  - ✅ Windows CI build + smoke test on every push/PR
+  - ✅ Windows portable zip release artifact (windeployqt, staged smoke test)
+  - ⬜ Linux AppImage
+  - ⬜ Windows NSIS installer
+  - ⬜ attach artifacts to GitHub releases on tag push
 - ⬜ Command palette (`:` / `<C-p>`) listing the command registry
 - ⬜ Config hot-reload
 

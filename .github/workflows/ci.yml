@@ -69,6 +69,40 @@ jobs:
             --example make_fixture -- fixture.pdf 5
           QT_QPA_PLATFORM=offscreen ./build/ui-qt/syodep --smoke-test fixture.pdf
 
+  qt-build-windows:
+    name: Qt shell build + smoke test (Windows)
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.7.3"
+          arch: win64_msvc2019_64
+          cache: true
+      - name: Set up MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+      - name: Configure
+        run: cmake -B build -G Ninja
+      - name: Build
+        run: cmake --build build
+      # The exe is a GUI-subsystem binary (WIN32_EXECUTABLE): stdout is
+      # invisible, so the smoke test is judged by its exit code only.
+      - name: Smoke test (open + render a PDF offscreen)
+        shell: pwsh
+        run: |
+          cargo run -p syodep-pdf --features test-support `
+            --example make_fixture -- fixture.pdf 5
+          $env:QT_QPA_PLATFORM = "offscreen"
+          $proc = Start-Process -FilePath "build/ui-qt/syodep.exe" `
+            -ArgumentList "--smoke-test", "fixture.pdf" -PassThru -Wait
+          if ($proc.ExitCode -ne 0) {
+            Write-Error "smoke test failed with exit code $($proc.ExitCode)"
+            exit 1
+          }
+
   docs:
     name: Documentation checks
     runs-on: ubuntu-24.04
