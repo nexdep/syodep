@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/syodep-config",
+    "crates/syodep-core",
+    "crates/syodep-pdf",
+    "crates/syodep-storage",
+    "crates/syodep-ffi",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://example.invalid/syodep"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+toml = "0.8"
+rusqlite = { version = "0.32", features = ["bundled"] }
+sha2 = "0.10"
+mupdf = "0.7"
+tempfile = "3"
+
+[profile.release]
+debug = true

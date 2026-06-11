@@ -1,0 +1,14 @@
+[package]
+name = "syodep-config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "TOML configuration and keybinding syntax for syodep"
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+toml = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

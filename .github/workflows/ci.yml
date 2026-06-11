@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust-lint:
+    name: Rust formatting and clippy
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: rustfmt
+        run: cargo fmt --all --check
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  rust-test-linux:
+    name: Rust tests (Linux)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build dependencies for MuPDF
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
+      # Covers config parsing, keymap/input, layout, storage/migrations,
+      # PDF open/render/text extraction and the FFI surface.
+      - name: cargo test
+        run: cargo test --workspace
+
+  rust-test-windows:
+    name: Rust tests (Windows)
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test
+        run: cargo test --workspace
+
+  qt-build-linux:
+    name: Qt shell build + smoke test (Linux)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Qt and build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build qt6-base-dev \
+            libqt6opengl6-dev libgl1-mesa-dev libfontconfig1-dev \
+            libfreetype-dev
+      - name: Configure
+        run: cmake -B build -G Ninja
+      - name: Build
+        run: cmake --build build
+      - name: Smoke test (open + render a PDF offscreen)
+        run: |
+          cargo run -p syodep-pdf --features test-support \
+            --example make_fixture -- fixture.pdf 5
+          QT_QPA_PLATFORM=offscreen ./build/ui-qt/syodep --smoke-test fixture.pdf
+
+  docs:
+    name: Documentation checks
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Required docs exist and commands/config are documented
+        run: ./scripts/check-docs.sh

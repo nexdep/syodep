@@ -1,0 +1,6 @@
+/target
+/build
+*.user
+.cache/
+compile_commands.json
+crates/syodep-ffi/include/syodep_ffi.h

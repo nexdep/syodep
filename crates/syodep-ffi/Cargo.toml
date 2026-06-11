@@ -1,0 +1,21 @@
+[package]
+name = "syodep-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "C ABI for embedding the syodep core in the Qt shell"
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+syodep-config = { path = "../syodep-config" }
+syodep-core = { path = "../syodep-core" }
+syodep-storage = { path = "../syodep-storage" }
+
+[dev-dependencies]
+syodep-pdf = { path = "../syodep-pdf", features = ["test-support"] }
+tempfile = { workspace = true }
+
+[build-dependencies]
+cbindgen = "0.27"

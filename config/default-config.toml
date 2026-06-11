@@ -1,0 +1,37 @@
+# syodep configuration
+#
+# Copy this file to:
+#   Linux:   ~/.config/syodep/config.toml
+#   Windows: %APPDATA%\syodep\config.toml
+#
+# Everything here is optional; missing values fall back to built-in
+# defaults. An invalid file never prevents syodep from starting: the error
+# is shown in the status bar and defaults are used instead.
+# See docs/config.md for the full reference.
+
+[view]
+# Pixels moved per scroll step (j / k).
+scroll_step = 60.0
+# Pixels moved per horizontal scroll step (h / l).
+horizontal_scroll_step = 60.0
+# Gap between pages, in PDF points (1/72 inch at 100% zoom).
+page_gap = 12.0
+# Zoom factor used when opening a document without a saved position...
+default_zoom = 1.0
+# ...unless this is true, in which case the page is fitted to the window width.
+fit_width_on_open = true
+# Multiplicative zoom step for zoom_in / zoom_out.
+zoom_step = 1.1
+# Canvas background color (#rrggbb).
+background = "#1e1e1e"
+
+# Keybindings: "key sequence" = "command".
+# Entries ADD TO or OVERRIDE the defaults; you only need to list changes.
+# Key syntax (see docs/keybindings.md): plain chars ("j", "G", "+"),
+# sequences ("gg", "zw"), special keys in angle brackets ("<Esc>", "<CR>",
+# "<Space>", "<Up>", "<PageDown>", ...), modifiers inside the brackets
+# ("<C-d>" = ctrl+d, "<A-x>" = alt+x, "<C-A-Left>").
+# Command names are listed in docs/commands.md.
+[keys]
+# "J"     = "scroll_half_page_down"   # example override
+# "<C-o>" = "open_file"               # example addition

@@ -1,0 +1,17 @@
+[package]
+name = "syodep-pdf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Safe PDF backend for syodep, wrapping MuPDF"
+
+[features]
+# Exposes a tiny programmatic PDF builder for tests in this and other crates.
+test-support = []
+
+[dependencies]
+mupdf = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

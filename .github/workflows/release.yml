@@ -1,0 +1,44 @@
+# Release pipeline (placeholder).
+#
+# Intended final shape (documented in docs/packaging.md):
+#   - tag push `v*` triggers this workflow
+#   - Linux: build with system Qt, bundle as AppImage via linuxdeploy
+#   - Windows: build with aqtinstall Qt, produce a portable zip and an
+#     NSIS installer
+#   - upload all artifacts to a GitHub release
+#
+# Packaging is not implemented yet (milestone: see docs/roadmap.md). This
+# workflow only validates that a release-mode build of both halves succeeds,
+# so the real packaging step lands on a known-good foundation.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  release-build-linux:
+    name: Release build (Linux, packaging placeholder)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Qt and build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build qt6-base-dev \
+            libqt6opengl6-dev libgl1-mesa-dev libfontconfig1-dev \
+            libfreetype-dev
+      - name: Build (release)
+        run: |
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build
+      - name: TODO AppImage packaging
+        run: echo "AppImage packaging not implemented yet (docs/packaging.md)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: syodep-linux-unpackaged
+          path: build/ui-qt/syodep

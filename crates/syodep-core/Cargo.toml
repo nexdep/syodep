@@ -1,0 +1,16 @@
+[package]
+name = "syodep-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "UI-independent application core for syodep: state, commands, input, layout"
+
+[dependencies]
+syodep-config = { path = "../syodep-config" }
+syodep-pdf = { path = "../syodep-pdf" }
+syodep-storage = { path = "../syodep-storage" }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+syodep-pdf = { path = "../syodep-pdf", features = ["test-support"] }
+tempfile = { workspace = true }

@@ -1,0 +1,73 @@
+# Top-level build: compiles the Rust core (as a static library with a C ABI)
+# via cargo, then the Qt 6 shell against it.
+#
+#   cmake -B build -G Ninja
+#   cmake --build build
+#   ./build/ui-qt/syodep document.pdf
+#
+# The Rust workspace also builds/tests standalone with plain `cargo test`;
+# CMake is only required for the desktop shell.
+
+cmake_minimum_required(VERSION 3.21)
+project(syodep VERSION 0.1.0 LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# --- Rust core (syodep-ffi staticlib + generated header) --------------------
+
+find_program(CARGO_EXECUTABLE cargo REQUIRED
+    HINTS "$ENV{HOME}/.cargo/bin" "$ENV{USERPROFILE}/.cargo/bin")
+
+# Release Rust by default even in Debug C++ builds: debug MuPDF rendering is
+# too slow to be usable. Override with -DSYODEP_RUST_PROFILE=dev if needed.
+set(SYODEP_RUST_PROFILE "release" CACHE STRING "cargo profile for the core")
+if(SYODEP_RUST_PROFILE STREQUAL "dev")
+    set(RUST_TARGET_DIR "${CMAKE_CURRENT_SOURCE_DIR}/target/debug")
+    set(CARGO_PROFILE_FLAG "")
+else()
+    set(RUST_TARGET_DIR "${CMAKE_CURRENT_SOURCE_DIR}/target/${SYODEP_RUST_PROFILE}")
+    set(CARGO_PROFILE_FLAG "--profile=${SYODEP_RUST_PROFILE}")
+endif()
+
+if(WIN32)
+    set(SYODEP_FFI_LIB "${RUST_TARGET_DIR}/syodep_ffi.lib")
+else()
+    set(SYODEP_FFI_LIB "${RUST_TARGET_DIR}/libsyodep_ffi.a")
+endif()
+set(SYODEP_FFI_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/crates/syodep-ffi/include")
+
+file(GLOB_RECURSE SYODEP_RUST_SOURCES CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/crates/*.rs"
+    "${CMAKE_CURRENT_SOURCE_DIR}/crates/*/Cargo.toml"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Cargo.toml")
+
+add_custom_command(
+    OUTPUT "${SYODEP_FFI_LIB}"
+    COMMAND "${CARGO_EXECUTABLE}" build -p syodep-ffi ${CARGO_PROFILE_FLAG}
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    DEPENDS ${SYODEP_RUST_SOURCES}
+    COMMENT "Building Rust core (cargo build -p syodep-ffi, ${SYODEP_RUST_PROFILE})"
+    VERBATIM
+    USES_TERMINAL)
+add_custom_target(syodep_ffi_build DEPENDS "${SYODEP_FFI_LIB}")
+
+add_library(syodep_ffi STATIC IMPORTED GLOBAL)
+add_dependencies(syodep_ffi syodep_ffi_build)
+set_target_properties(syodep_ffi PROPERTIES
+    IMPORTED_LOCATION "${SYODEP_FFI_LIB}"
+    INTERFACE_INCLUDE_DIRECTORIES "${SYODEP_FFI_INCLUDE_DIR}")
+
+# System libraries required by the Rust staticlib (and bundled MuPDF/SQLite).
+if(WIN32)
+    set_property(TARGET syodep_ffi PROPERTY INTERFACE_LINK_LIBRARIES
+        ws2_32 userenv bcrypt ntdll advapi32 secur32 ncrypt)
+else()
+    # fontconfig/freetype are required by the core's system-font discovery.
+    set_property(TARGET syodep_ffi PROPERTY INTERFACE_LINK_LIBRARIES
+        pthread dl m fontconfig freetype)
+endif()
+
+# --- Qt shell ----------------------------------------------------------------
+
+add_subdirectory(ui-qt)
