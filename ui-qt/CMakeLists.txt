@@ -1,6 +1,10 @@
 find_package(Qt6 REQUIRED COMPONENTS Widgets OpenGLWidgets)
 
-qt_standard_project_setup()
+# Manual equivalent of qt_standard_project_setup(), which needs Qt >= 6.3;
+# the AppImage builds against Ubuntu 22.04's Qt 6.2.
+set(CMAKE_AUTOMOC ON)
+set(CMAKE_AUTOUIC ON)
+set(CMAKE_AUTORCC ON)
 
 qt_add_executable(syodep
     src/main.cpp
