@@ -39,8 +39,18 @@ Download `syodep-vX.Y.Z-win64.zip` from the
 [releases page](https://github.com/nexdep/syodep/releases), unzip
 anywhere, run `syodep.exe`. No installation required.
 
-On Linux, build from source for now (AppImage planned, see
-`docs/packaging.md`).
+### Linux (AppImage)
+
+Download `syodep-vX.Y.Z-x86_64.AppImage` from the
+[releases page](https://github.com/nexdep/syodep/releases), then:
+
+```bash
+chmod +x syodep-vX.Y.Z-x86_64.AppImage
+./syodep-vX.Y.Z-x86_64.AppImage document.pdf
+```
+
+Needs glibc ≥ 2.35 (Ubuntu 22.04+, Debian 12+, Fedora 36+, …). If your
+distro lacks `libfuse2`, run with `--appimage-extract-and-run`.
 
 ## Building
 

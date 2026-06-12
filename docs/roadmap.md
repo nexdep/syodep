@@ -52,7 +52,7 @@ Ordered roughly by dependency:
 - 🚧 Packaging (spec in `docs/packaging.md`):
   - ✅ Windows CI build + smoke test on every push/PR
   - ✅ Windows portable zip release artifact (windeployqt, staged smoke test)
-  - ⬜ Linux AppImage
+  - ✅ Linux AppImage (ubuntu:22.04 container build, linuxdeploy + Qt plugin)
   - ⬜ Windows NSIS installer
   - ✅ attach artifacts to GitHub releases on tag push
   - ✅ Scoop bucket (`bucket/syodep.json`, auto-bumped on release)

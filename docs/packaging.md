@@ -28,7 +28,7 @@ Target artifacts, produced by `.github/workflows/release.yml` on `v*` tags:
 
 | Artifact | Tooling | Status |
 |---|---|---|
-| Linux AppImage | linuxdeploy + Qt plugin | **planned** (placeholder job exists) |
+| Linux AppImage | linuxdeploy + Qt plugin | **implemented** (`release-build-linux`) |
 | Windows portable zip | `windeployqt` into a folder, zip it | **implemented** (`release-build-windows`) |
 | Windows installer | NSIS over the portable tree | **planned** |
 
@@ -51,8 +51,30 @@ The release job (`release-build-windows` in `release.yml`) additionally:
 4. zips and uploads `syodep-win64.zip` as a workflow artifact.
 
 On `v*` tag pushes a final job (`publish-release`) creates a GitHub
-release and attaches the zip as `syodep-vX.Y.Z-win64.zip` with generated
-notes. Manual (`workflow_dispatch`) runs stop at workflow artifacts.
+release and attaches the zip as `syodep-vX.Y.Z-win64.zip` and the
+AppImage as `syodep-vX.Y.Z-x86_64.AppImage`, with generated notes.
+Manual (`workflow_dispatch`) runs stop at workflow artifacts.
+
+### Linux AppImage (implemented)
+
+`release-build-linux` runs in an **`ubuntu:22.04` container** on the
+24.04 runner: an AppImage inherits the glibc floor of its build machine,
+and 22.04's glibc 2.35 covers Ubuntu 22.04+, Debian 12+, Fedora 36+ and
+anything newer. Qt (6.2 LTS) comes from the container's apt and is
+bundled; Rust is installed via rustup inside the container.
+
+Packaging uses `linuxdeploy` + `linuxdeploy-plugin-qt` (prebuilt
+binaries, run with `--appimage-extract-and-run` since containers lack
+FUSE) with `packaging/syodep.desktop` and `packaging/syodep.svg`.
+Bundled: the binary, Qt libs, platform plugins (xcb, wayland, plus
+`offscreen` via `EXTRA_PLATFORM_PLUGINS` for headless/smoke-test use).
+Excluded by linuxdeploy's default list and resolved from the host:
+glibc, libGL, fontconfig — exactly the libs that must match the user's
+system.
+
+The job then smoke-tests the actual AppImage (offscreen render of a
+generated PDF), so an incomplete bundle fails in CI, and uploads
+`syodep-x86_64.AppImage`.
 
 ### Scoop (implemented)
 
@@ -72,11 +94,6 @@ comes from `github-actions[bot]`.
 
 ### Still planned
 
-- **Linux AppImage:** build on the oldest supported LTS runner for glibc
-  compatibility; bundle Qt platform plugins (xcb, wayland) via linuxdeploy's
-  Qt plugin; desktop file + icon; output `syodep-x86_64.AppImage`. The
-  current Linux release job only validates a release-mode build and uploads
-  the raw binary.
 - **Windows NSIS installer:** silent-install capable script over the
   portable tree produced above.
 

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=syodep
+Comment=Keyboard-first, Vim-like academic PDF reader
+Exec=syodep %f
+Icon=syodep
+Terminal=false
+Categories=Office;Viewer;
+MimeType=application/pdf;

@@ -7,6 +7,36 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-06-12 — Linux AppImage release
+
+### Implemented
+
+- **`release-build-linux`** (release.yml) now produces
+  `syodep-x86_64.AppImage` instead of an unpackaged binary. It builds in
+  an `ubuntu:22.04` container (the AppImage inherits the build machine's
+  glibc floor — 2.35 covers Ubuntu 22.04+/Debian 12+/Fedora 36+), with
+  distro Qt 6.2 and rustup-installed Rust, then packages with
+  `linuxdeploy` + `linuxdeploy-plugin-qt` (run via
+  `--appimage-extract-and-run`; containers have no FUSE).
+- **`packaging/`**: `syodep.desktop` (Office;Viewer, application/pdf
+  MIME) and a placeholder `syodep.svg` icon, both required by
+  linuxdeploy.
+- The `offscreen` Qt platform plugin is bundled
+  (`EXTRA_PLATFORM_PLUGINS`) so the AppImage itself is smoke-tested in
+  CI (offscreen render of a generated PDF) — same fail-in-CI principle
+  as the Windows staged smoke test.
+- **`publish-release`** attaches `syodep-vX.Y.Z-x86_64.AppImage` to
+  GitHub releases alongside the Windows zip.
+
+### Test strategy
+
+CI-only: the AppImage smoke test exercises open + render through the
+real packaged binary. Additionally verified by downloading the artifact
+from a `workflow_dispatch` run and running the smoke test on a local
+machine with a different userland than the build container.
+
+---
+
 ## 2026-06-12 — Scoop distribution
 
 ### Implemented
