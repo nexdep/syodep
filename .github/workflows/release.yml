@@ -100,6 +100,10 @@ jobs:
     permissions:
       contents: write
     steps:
+      # main, not the tag: the Scoop manifest bump below is committed there.
+      - uses: actions/checkout@v5
+        with:
+          ref: main
       - uses: actions/download-artifact@v4
         with:
           name: syodep-win64
@@ -115,3 +119,20 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --title "syodep $GITHUB_REF_NAME" \
             --generate-notes
+      # Keep `scoop install/update syodep` pointing at the new asset.
+      - name: Bump Scoop manifest
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          HASH=$(sha256sum "syodep-${GITHUB_REF_NAME}-win64.zip" | cut -d' ' -f1)
+          URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/syodep-${GITHUB_REF_NAME}-win64.zip"
+          jq --indent 4 --arg v "$VERSION" --arg h "$HASH" --arg u "$URL" \
+            '.version = $v
+             | .architecture."64bit".url = $u
+             | .architecture."64bit".hash = $h' \
+            bucket/syodep.json > bucket/syodep.json.tmp
+          mv bucket/syodep.json.tmp bucket/syodep.json
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bucket/syodep.json
+          git commit -m "Scoop: bump manifest to ${GITHUB_REF_NAME}"
+          git push origin HEAD:main

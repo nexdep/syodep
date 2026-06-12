@@ -7,6 +7,29 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-06-12 — Scoop distribution
+
+### Implemented
+
+- **`bucket/syodep.json`**: the repo doubles as a Scoop bucket
+  (`scoop bucket add syodep https://github.com/nexdep/syodep`). The
+  manifest points at the GitHub release zip, sets `extract_dir`
+  (`syodep-win64`), `bin`, a Start Menu shortcut, and
+  `checkver`/`autoupdate` metadata. No `persist` entries: user data lives
+  in `%APPDATA%`, not the install dir.
+- **`publish-release`** (release.yml) now bumps the manifest after
+  creating each release: recomputes the zip's SHA256, rewrites
+  `version`/`url`/`hash` with `jq`, commits to `main` as
+  `github-actions[bot]`. The job checks out `main` (not the tag) for this.
+
+### Test strategy
+
+Manifest JSON validated with `jq`; the hash was computed from the actual
+published v0.1.0 asset. The CI bump path only executes on the next `v*`
+tag — verify it then (winget was considered and dropped for now).
+
+---
+
 ## 2026-06-11 — Windows link fixes + GitHub releases on tag push
 
 ### Implemented

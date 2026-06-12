@@ -54,6 +54,22 @@ On `v*` tag pushes a final job (`publish-release`) creates a GitHub
 release and attaches the zip as `syodep-vX.Y.Z-win64.zip` with generated
 notes. Manual (`workflow_dispatch`) runs stop at workflow artifacts.
 
+### Scoop (implemented)
+
+The repo doubles as a Scoop bucket: `bucket/syodep.json` points at the
+release zip (with `extract_dir`, `bin`, a Start Menu shortcut, and
+`checkver`/`autoupdate` metadata). Install:
+
+```powershell
+scoop bucket add syodep https://github.com/nexdep/syodep
+scoop install syodep
+```
+
+The `publish-release` job rewrites the manifest's `version`/`url`/`hash`
+(via `jq`) and commits the bump to `main` after every tag release, so
+`scoop update syodep` always finds the newest asset. The manifest commit
+comes from `github-actions[bot]`.
+
 ### Still planned
 
 - **Linux AppImage:** build on the oldest supported LTS runner for glibc

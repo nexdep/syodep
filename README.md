@@ -24,6 +24,24 @@ Milestone 1 (MVP foundation) is complete:
 
 See `docs/roadmap.md` for what comes next.
 
+## Installing
+
+### Windows (Scoop)
+
+```powershell
+scoop bucket add syodep https://github.com/nexdep/syodep
+scoop install syodep
+```
+
+### Windows (portable zip)
+
+Download `syodep-vX.Y.Z-win64.zip` from the
+[releases page](https://github.com/nexdep/syodep/releases), unzip
+anywhere, run `syodep.exe`. No installation required.
+
+On Linux, build from source for now (AppImage planned, see
+`docs/packaging.md`).
+
 ## Building
 
 Requirements: Rust (stable), CMake ≥ 3.21, Ninja (recommended), Qt 6
@@ -74,6 +92,7 @@ stored in SQLite at `~/.local/share/syodep/syodep.sqlite3` (Linux) or
 | `ui-qt/`                | Thin Qt 6 desktop shell (window, canvas, dialogs)    |
 | `docs/`                 | Architecture, commands, keybindings, config, roadmap… |
 | `config/`               | Documented sample configuration                      |
+| `bucket/`               | Scoop manifest (this repo is also a Scoop bucket)    |
 
 Architecture rule: the Rust core never depends on Qt; the Qt shell contains
 no document logic. Details in `docs/architecture.md`.

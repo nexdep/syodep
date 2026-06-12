@@ -55,6 +55,7 @@ Ordered roughly by dependency:
   - ⬜ Linux AppImage
   - ⬜ Windows NSIS installer
   - ✅ attach artifacts to GitHub releases on tag push
+  - ✅ Scoop bucket (`bucket/syodep.json`, auto-bumped on release)
 - ⬜ Command palette (`:` / `<C-p>`) listing the command registry
 - ⬜ Config hot-reload
 
