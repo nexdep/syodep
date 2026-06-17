@@ -24,7 +24,8 @@ a debug config links `/MDd` against MuPDF's `/MD` objects and fails.
 
 ## Release pipeline (specification)
 
-Target artifacts, produced by `.github/workflows/release.yml` on `v*` tags:
+Target artifacts, produced by `.github/workflows/release.yml` on `v*` tags
+and on pushes to `main` for the rolling continuous prerelease:
 
 | Artifact | Tooling | Status |
 |---|---|---|
@@ -53,6 +54,9 @@ The release job (`release-build-windows` in `release.yml`) additionally:
 On `v*` tag pushes a final job (`publish-release`) creates a GitHub
 release and attaches the zip as `syodep-vX.Y.Z-win64.zip` and the
 AppImage as `syodep-vX.Y.Z-x86_64.AppImage`, with generated notes.
+On `main` pushes, `publish-continuous` updates the rolling prerelease at
+`https://github.com/nexdep/syodep/releases/tag/continuous` with
+`syodep-continuous-win64.zip` and `syodep-continuous-x86_64.AppImage`.
 Manual (`workflow_dispatch`) runs stop at workflow artifacts.
 
 ### Linux AppImage (implemented)
@@ -89,8 +93,9 @@ scoop install syodep
 
 The `publish-release` job rewrites the manifest's `version`/`url`/`hash`
 (via `jq`) and commits the bump to `main` after every tag release, so
-`scoop update syodep` always finds the newest asset. The manifest commit
-comes from `github-actions[bot]`.
+`scoop update syodep` always finds the newest asset. The continuous
+prerelease does not update Scoop metadata. The manifest commit comes from
+`github-actions[bot]`.
 
 ### Still planned
 
@@ -101,3 +106,5 @@ comes from `github-actions[bot]`.
 
 Workspace version lives in `Cargo.toml` (`workspace.package.version`) and
 is mirrored in the top-level `project(syodep VERSION …)`. Tags use `vX.Y.Z`.
+The non-version `continuous` tag is force-updated by CI to point at the
+latest successful `main` build and must not be treated as a semantic version.

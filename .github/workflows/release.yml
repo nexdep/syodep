@@ -1,7 +1,8 @@
 # Release pipeline.
 #
 # Final shape (documented in docs/packaging.md):
-#   - tag push `v*` triggers this workflow
+#   - tag push `v*` triggers a versioned release
+#   - push to `main` updates the rolling `continuous` prerelease
 #   - Linux: build in an ubuntu:22.04 container (glibc 2.35 floor) with
 #     distro Qt, bundle as AppImage via linuxdeploy (implemented below)
 #   - Windows: build with aqtinstall Qt, produce a portable zip
@@ -13,6 +14,8 @@ name: Release
 
 on:
   push:
+    branches:
+      - main
     tags:
       - "v*"
   workflow_dispatch:
@@ -177,3 +180,85 @@ jobs:
           git add bucket/syodep.json
           git commit -m "Scoop: bump manifest to ${GITHUB_REF_NAME}"
           git push origin HEAD:main
+
+  publish-continuous:
+    name: Publish continuous prerelease
+    # Only main pushes update the rolling prerelease. Tag pushes use
+    # publish-release above; manual dispatches stop at workflow artifacts.
+    if: github.ref == 'refs/heads/main'
+    needs: [release-build-windows, release-build-linux]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    concurrency:
+      group: release-continuous
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Check latest main commit
+        id: freshness
+        run: |
+          git fetch origin main --depth=1
+          LATEST_MAIN="$(git rev-parse origin/main)"
+          if [ "$GITHUB_SHA" = "$LATEST_MAIN" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping stale continuous release for $GITHUB_SHA; latest main is $LATEST_MAIN."
+          fi
+      - uses: actions/download-artifact@v4
+        if: steps.freshness.outputs.publish == 'true'
+        with:
+          name: syodep-win64
+      - uses: actions/download-artifact@v4
+        if: steps.freshness.outputs.publish == 'true'
+        with:
+          name: syodep-x86_64-appimage
+      - name: Update rolling continuous release
+        if: steps.freshness.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mv syodep-win64.zip syodep-continuous-win64.zip
+          mv syodep-x86_64.AppImage syodep-continuous-x86_64.AppImage
+
+          BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          {
+            echo "Rolling build from main."
+            echo
+            echo "- Commit: ${GITHUB_SHA}"
+            echo "- Branch: ${GITHUB_REF_NAME}"
+            echo "- Workflow run: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo "- Built at: ${BUILT_AT}"
+          } > continuous-notes.md
+
+          git tag -f continuous "${GITHUB_SHA}"
+          git push origin refs/tags/continuous --force
+
+          if gh release view continuous --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release edit continuous \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "syodep continuous" \
+              --notes-file continuous-notes.md \
+              --prerelease
+          else
+            gh release create continuous \
+              --repo "${GITHUB_REPOSITORY}" \
+              --verify-tag \
+              --title "syodep continuous" \
+              --notes-file continuous-notes.md \
+              --prerelease
+          fi
+
+          RELEASE_ID="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/continuous" --jq .id)"
+          gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" \
+            -f make_latest=false \
+            --silent
+
+          gh release upload continuous \
+            --repo "${GITHUB_REPOSITORY}" \
+            --clobber \
+            syodep-continuous-win64.zip \
+            syodep-continuous-x86_64.AppImage

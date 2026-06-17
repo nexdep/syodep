@@ -55,8 +55,9 @@ QT_QPA_PLATFORM=offscreen ./build/ui-qt/syodep --smoke-test /tmp/f.pdf
 
 Every push must produce a CI build artifact after the full test/docs/lint/smoke
 suite passes. Branch pushes produce ephemeral artifacts named with the commit
-SHA. Public releases are created by `.github/workflows/release.yml` only
-from `vMAJOR.MINOR.PATCH` tags.
+SHA. Main pushes also update the rolling `continuous` prerelease with the
+latest AppImage and Windows zip. Versioned public releases are created by
+`.github/workflows/release.yml` only from `vMAJOR.MINOR.PATCH` tags.
 
 Do not auto-commit version bumps from CI. Development builds derive their
 identity from git metadata. Do not check generated binaries into the repo.

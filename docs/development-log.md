@@ -7,6 +7,30 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-06-17 — Continuous prerelease downloads
+
+### Implemented
+
+- **Rolling release**: `.github/workflows/release.yml` now also runs on
+  pushes to `main` and reuses the existing AppImage and Windows zip builders.
+  After both packages pass their smoke tests, `publish-continuous` updates
+  the `continuous` tag and prerelease with stable asset names for the latest
+  main build.
+- **Release boundary**: `vMAJOR.MINOR.PATCH` tags still create immutable
+  versioned releases and bump the Scoop manifest. The rolling prerelease is
+  marked as a prerelease and does not update Scoop metadata.
+- **Docs**: `AGENTS.md` and `docs/packaging.md` now document the split
+  between branch CI artifacts, the continuous prerelease, and versioned
+  releases.
+
+### Test strategy
+
+Workflow/docs change. Local verification: `git diff --check` and
+`./scripts/check-docs.sh`; the package smoke tests and continuous release
+publish path run in GitHub Actions on the next `main` push.
+
+---
+
 ## 2026-06-17 — Push build artifacts policy
 
 ### Implemented
