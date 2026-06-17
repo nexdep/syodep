@@ -51,6 +51,18 @@ cargo run -p syodep-pdf --features test-support --example make_fixture -- /tmp/f
 QT_QPA_PLATFORM=offscreen ./build/ui-qt/syodep --smoke-test /tmp/f.pdf
 ```
 
+## Build artifacts & releases
+
+Every push must produce a CI build artifact after the full test/docs/lint/smoke
+suite passes. Branch pushes produce ephemeral artifacts named with the commit
+SHA. Public releases are created by `.github/workflows/release.yml` only
+from `vMAJOR.MINOR.PATCH` tags.
+
+Do not auto-commit version bumps from CI. Development builds derive their
+identity from git metadata. Do not check generated binaries into the repo.
+Changes to packaging, release workflows, or version metadata must update the
+dev log and keep `.github/workflows/ci.yml` green.
+
 **Before pushing any commit**: all of the above must pass — the full test
 suite green, lints clean, and documentation consistent with the code
 (`./scripts/check-docs.sh` plus an updated dev log when behavior changed).

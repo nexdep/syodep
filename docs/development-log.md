@@ -7,6 +7,29 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-06-17 — Push build artifacts policy
+
+### Implemented
+
+- **CI push artifacts**: `.github/workflows/ci.yml` now explicitly runs on
+  branch pushes and `v*` tags. A new `build-artifact` job waits for the
+  existing lint, Rust test, Qt smoke-test, and docs jobs, then builds a
+  release-mode Linux binary, packages it as a tarball with `version.txt`,
+  uploads the SHA-256 checksum, and retains the workflow artifact for 14 days.
+- **Release boundary**: public releases remain owned by
+  `.github/workflows/release.yml` on `vMAJOR.MINOR.PATCH` tags; branch pushes
+  produce ephemeral CI artifacts only.
+- **Agent guidance**: `AGENTS.md` now records the branch-artifact/tag-release
+  policy and forbids CI-driven version bump commits or checked-in binaries.
+
+### Test strategy
+
+Docs/workflow-only change. Local verification: `git diff --check` and
+`./scripts/check-docs.sh`; the build artifact path is enforced by the updated
+GitHub Actions dependency graph on the next push.
+
+---
+
 ## 2026-06-16 — Modal caret navigation (text + images)
 
 ### Implemented
