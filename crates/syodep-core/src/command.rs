@@ -33,6 +33,15 @@ pub enum Command {
     ZoomOut,
     FitWidth,
     ZoomReset,
+    // Caret (modal cursor over text + images).
+    /// Enter caret mode, placing the caret on the nearest content.
+    CaretEnter,
+    /// Leave caret mode, returning to scrolling (the caret is remembered).
+    CaretExit,
+    CaretLeft,
+    CaretRight,
+    CaretUp,
+    CaretDown,
     // Application.
     OpenFile,
     Quit,
@@ -59,6 +68,12 @@ pub const ALL_COMMANDS: &[(&str, Command)] = &[
     ("zoom_out", Command::ZoomOut),
     ("fit_width", Command::FitWidth),
     ("zoom_reset", Command::ZoomReset),
+    ("caret_enter", Command::CaretEnter),
+    ("caret_exit", Command::CaretExit),
+    ("caret_left", Command::CaretLeft),
+    ("caret_right", Command::CaretRight),
+    ("caret_up", Command::CaretUp),
+    ("caret_down", Command::CaretDown),
     ("open_file", Command::OpenFile),
     ("quit", Command::Quit),
     ("cancel", Command::Cancel),

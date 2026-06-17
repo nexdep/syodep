@@ -10,13 +10,15 @@
 //! (redraw, quit, show a file dialog). The shell never interprets keys or
 //! touches document state itself.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use syodep_config::keys::Chord;
 use syodep_config::Config;
-use syodep_pdf::Bitmap;
+use syodep_pdf::{Bitmap, ContentLine, Rect};
 use syodep_storage::{Position, Storage};
 
+use crate::caret::{nearest_cell_in_line, Caret, Dir, Mode};
 use crate::command::Command;
 use crate::input::{InputState, KeyOutcome, Keymap, KeymapError};
 use crate::layout::{DocumentLayout, PageSize, ScreenRect, View};
@@ -62,16 +64,28 @@ struct Session {
     document_id: Option<i64>,
     view: View,
     cache: RenderCache,
+    /// Lazily-extracted navigable content, per page. Text is cheap to keep, so
+    /// every visited page stays cached for the life of the session.
+    content: HashMap<usize, Vec<ContentLine>>,
 }
 
 /// Top-level application state. One instance per window.
 pub struct App {
     config: Config,
     keymap: Keymap,
+    /// Keymap used while in caret mode: the normal keymap plus the
+    /// `[caret_keys]` overrides (so `hjkl`/`<Esc>` change meaning there).
+    caret_keymap: Keymap,
     input: InputState,
     storage: Option<Storage>,
     session: Option<Session>,
     viewport: (f32, f32),
+    /// Whether `hjkl` scroll or move the caret.
+    mode: Mode,
+    /// Current caret position, remembered across mode toggles.
+    caret: Option<Caret>,
+    /// Remembered goal column (page-space x) for vertical caret motion.
+    caret_goal_x: f32,
     /// Config/keymap problems collected at startup, for the UI to surface.
     startup_warnings: Vec<String>,
     last_error: Option<String>,
@@ -83,15 +97,29 @@ impl App {
     /// as graceful degradation when the database cannot be opened).
     pub fn new(config: Config, storage: Option<Storage>) -> Self {
         let entries = config.keys.iter().map(|(k, v)| (k.as_str(), v.as_str()));
-        let (keymap, keymap_errors) = Keymap::from_entries(entries);
+        let (keymap, mut keymap_errors) = Keymap::from_entries(entries);
+        // The caret keymap is the normal keymap with the caret-mode overrides
+        // applied, so every normal binding still works in caret mode and only
+        // the overridden keys (hjkl/<Esc>) change meaning. Cloning then
+        // overlaying avoids re-validating (and double-reporting) normal keys.
+        let mut caret_keymap = keymap.clone();
+        let caret_entries = config
+            .caret_keys
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()));
+        keymap_errors.extend(caret_keymap.overlay(caret_entries));
         let startup_warnings = keymap_errors.iter().map(KeymapError::to_string).collect();
         Self {
             config,
             keymap,
+            caret_keymap,
             input: InputState::new(),
             storage,
             session: None,
             viewport: (800.0, 600.0),
+            mode: Mode::Normal,
+            caret: None,
+            caret_goal_x: 0.0,
             startup_warnings,
             last_error: None,
         }
@@ -158,7 +186,12 @@ impl App {
             document_id,
             view,
             cache: RenderCache::default(),
+            content: HashMap::new(),
         });
+        // Caret positions are document-specific; reset to normal mode.
+        self.mode = Mode::Normal;
+        self.caret = None;
+        self.caret_goal_x = 0.0;
         self.last_error = None;
         Ok(())
     }
@@ -213,7 +246,11 @@ impl App {
 
     /// Feed one key press; returns the side effects for the shell.
     pub fn handle_key(&mut self, chord: Chord) -> Effects {
-        match self.input.handle(&self.keymap, chord) {
+        let keymap = match self.mode {
+            Mode::Normal => &self.keymap,
+            Mode::Caret => &self.caret_keymap,
+        };
+        match self.input.handle(keymap, chord) {
             // Redraw on pending input so the status line shows it.
             KeyOutcome::Pending => Effects::redraw(),
             KeyOutcome::Unmatched => Effects::redraw(),
@@ -244,6 +281,15 @@ impl App {
                 };
             }
             Command::Cancel => return Effects::redraw(),
+            Command::CaretEnter => return self.enter_caret_mode(),
+            Command::CaretExit => {
+                self.mode = Mode::Normal;
+                return Effects::redraw();
+            }
+            Command::CaretLeft => return self.caret_move(Dir::Left, count),
+            Command::CaretRight => return self.caret_move(Dir::Right, count),
+            Command::CaretUp => return self.caret_move(Dir::Up, count),
+            Command::CaretDown => return self.caret_move(Dir::Down, count),
             _ => {}
         }
 
@@ -276,7 +322,15 @@ impl App {
             Command::ZoomOut => view.zoom_by(1.0 / zoom_step.powi(n as i32)),
             Command::FitWidth => view.fit_width(),
             Command::ZoomReset => view.set_zoom(1.0),
-            Command::Quit | Command::OpenFile | Command::Cancel => unreachable!("handled above"),
+            Command::Quit
+            | Command::OpenFile
+            | Command::Cancel
+            | Command::CaretEnter
+            | Command::CaretExit
+            | Command::CaretLeft
+            | Command::CaretRight
+            | Command::CaretUp
+            | Command::CaretDown => unreachable!("handled above"),
         }
         self.save_position();
         Effects::redraw()
@@ -319,6 +373,258 @@ impl App {
         Ok(session.doc.page_text(page)?)
     }
 
+    // ---- Caret navigation ----------------------------------------------
+
+    pub fn mode(&self) -> Mode {
+        self.mode
+    }
+
+    pub fn caret(&self) -> Option<Caret> {
+        self.caret
+    }
+
+    /// Ensure page `page`'s navigable content is extracted and cached.
+    /// Extraction failures are treated as "no content" so caret motion simply
+    /// skips the page rather than erroring.
+    fn ensure_content(&mut self, page: usize) {
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+        if session.content.contains_key(&page) {
+            return;
+        }
+        let lines = session.doc.page_content(page).unwrap_or_default();
+        session.content.insert(page, lines);
+    }
+
+    /// Cached content for `page` (empty if absent/uncached).
+    fn content(&self, page: usize) -> &[ContentLine] {
+        self.session
+            .as_ref()
+            .and_then(|s| s.content.get(&page))
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    fn page_line_count(&mut self, page: usize) -> usize {
+        self.ensure_content(page);
+        self.content(page).len()
+    }
+
+    fn line_cell_count(&mut self, page: usize, line: usize) -> usize {
+        self.ensure_content(page);
+        self.content(page).get(line).map_or(0, |l| l.cells.len())
+    }
+
+    fn cell_rect(&mut self, page: usize, line: usize, cell: usize) -> Option<Rect> {
+        self.ensure_content(page);
+        self.content(page)
+            .get(line)
+            .and_then(|l| l.cells.get(cell))
+            .map(|c| c.bbox)
+    }
+
+    fn nearest_cell(&mut self, page: usize, line: usize, goal_x: f32) -> usize {
+        self.ensure_content(page);
+        self.content(page)
+            .get(line)
+            .map_or(0, |l| nearest_cell_in_line(&l.cells, goal_x))
+    }
+
+    /// First page at or after `start` that has navigable content.
+    fn content_page_from(&mut self, start: usize) -> Option<usize> {
+        let count = self.session.as_ref()?.view.layout().page_count();
+        (start..count).find(|&p| self.page_line_count(p) > 0)
+    }
+
+    /// First page strictly after `after` with content.
+    fn next_content_page(&mut self, after: usize) -> Option<usize> {
+        let count = self.session.as_ref()?.view.layout().page_count();
+        ((after + 1)..count).find(|&p| self.page_line_count(p) > 0)
+    }
+
+    /// Last page strictly before `before` with content.
+    fn prev_content_page(&mut self, before: usize) -> Option<usize> {
+        (0..before).rev().find(|&p| self.page_line_count(p) > 0)
+    }
+
+    fn enter_caret_mode(&mut self) -> Effects {
+        if self.session.is_none() {
+            return Effects::default();
+        }
+        self.mode = Mode::Caret;
+        if self.caret.is_none() {
+            let start = self.current_page();
+            if let Some(page) = self.content_page_from(start) {
+                let caret = Caret {
+                    page,
+                    line: 0,
+                    cell: 0,
+                };
+                self.caret = Some(caret);
+                self.update_goal_x(caret);
+            }
+        }
+        self.ensure_caret_visible();
+        self.save_position();
+        Effects::redraw()
+    }
+
+    fn caret_move(&mut self, dir: Dir, count: Option<u32>) -> Effects {
+        if self.session.is_none() {
+            return Effects::default();
+        }
+        // No caret yet (e.g. entered on an empty document): try to place one.
+        let Some(mut caret) = self.caret else {
+            return self.enter_caret_mode();
+        };
+        let steps = count.unwrap_or(1).max(1);
+        let goal_x = self.caret_goal_x;
+        for _ in 0..steps {
+            let moved = match dir {
+                Dir::Right => self.step_right(&mut caret),
+                Dir::Left => self.step_left(&mut caret),
+                Dir::Down => self.step_down(&mut caret, goal_x),
+                Dir::Up => self.step_up(&mut caret, goal_x),
+            };
+            if !moved {
+                break; // reached a document edge
+            }
+        }
+        self.caret = Some(caret);
+        // Horizontal motion sets a new goal column; vertical motion keeps it.
+        if matches!(dir, Dir::Left | Dir::Right) {
+            self.update_goal_x(caret);
+        }
+        self.ensure_caret_visible();
+        self.save_position();
+        Effects::redraw()
+    }
+
+    fn step_right(&mut self, caret: &mut Caret) -> bool {
+        if caret.cell + 1 < self.line_cell_count(caret.page, caret.line) {
+            caret.cell += 1;
+            return true;
+        }
+        if caret.line + 1 < self.page_line_count(caret.page) {
+            caret.line += 1;
+            caret.cell = 0;
+            return true;
+        }
+        if let Some(next) = self.next_content_page(caret.page) {
+            *caret = Caret {
+                page: next,
+                line: 0,
+                cell: 0,
+            };
+            return true;
+        }
+        false
+    }
+
+    fn step_left(&mut self, caret: &mut Caret) -> bool {
+        if caret.cell > 0 {
+            caret.cell -= 1;
+            return true;
+        }
+        if caret.line > 0 {
+            caret.line -= 1;
+            caret.cell = self
+                .line_cell_count(caret.page, caret.line)
+                .saturating_sub(1);
+            return true;
+        }
+        if let Some(prev) = self.prev_content_page(caret.page) {
+            let line = self.page_line_count(prev).saturating_sub(1);
+            caret.page = prev;
+            caret.line = line;
+            caret.cell = self.line_cell_count(prev, line).saturating_sub(1);
+            return true;
+        }
+        false
+    }
+
+    fn step_down(&mut self, caret: &mut Caret, goal_x: f32) -> bool {
+        if caret.line + 1 < self.page_line_count(caret.page) {
+            caret.line += 1;
+            caret.cell = self.nearest_cell(caret.page, caret.line, goal_x);
+            return true;
+        }
+        if let Some(next) = self.next_content_page(caret.page) {
+            caret.page = next;
+            caret.line = 0;
+            caret.cell = self.nearest_cell(next, 0, goal_x);
+            return true;
+        }
+        false
+    }
+
+    fn step_up(&mut self, caret: &mut Caret, goal_x: f32) -> bool {
+        if caret.line > 0 {
+            caret.line -= 1;
+            caret.cell = self.nearest_cell(caret.page, caret.line, goal_x);
+            return true;
+        }
+        if let Some(prev) = self.prev_content_page(caret.page) {
+            let line = self.page_line_count(prev).saturating_sub(1);
+            caret.page = prev;
+            caret.line = line;
+            caret.cell = self.nearest_cell(prev, line, goal_x);
+            return true;
+        }
+        false
+    }
+
+    fn update_goal_x(&mut self, caret: Caret) {
+        if let Some(r) = self.cell_rect(caret.page, caret.line, caret.cell) {
+            self.caret_goal_x = (r.x0 + r.x1) / 2.0;
+        }
+    }
+
+    /// Scroll the minimum amount needed to keep the caret on screen.
+    fn ensure_caret_visible(&mut self) {
+        let Some(caret) = self.caret else {
+            return;
+        };
+        let Some(rect) = self.cell_rect(caret.page, caret.line, caret.cell) else {
+            return;
+        };
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+        let Some(page) = session.view.layout().page(caret.page) else {
+            return;
+        };
+        let (px, py) = (page.x, page.y);
+        session.view.scroll_doc_rect_into_view(
+            px + rect.x0,
+            py + rect.y0,
+            px + rect.x1,
+            py + rect.y1,
+        );
+    }
+
+    /// The caret's rectangle in canvas pixels, with its page. `None` outside
+    /// caret mode or when no caret is placed. The shell paints this overlay.
+    pub fn caret_screen_rect(&self) -> Option<(usize, ScreenRect)> {
+        if self.mode != Mode::Caret {
+            return None;
+        }
+        let caret = self.caret?;
+        let session = self.session.as_ref()?;
+        let cell = session
+            .content
+            .get(&caret.page)?
+            .get(caret.line)?
+            .cells
+            .get(caret.cell)?;
+        let b = cell.bbox;
+        session
+            .view
+            .page_rect_to_screen(caret.page, b.x0, b.y0, b.x1, b.y1)
+            .map(|rect| (caret.page, rect))
+    }
+
     /// One-line status text: file, current page, zoom, pending keys.
     pub fn status_text(&self) -> String {
         let mut out = String::new();
@@ -337,6 +643,12 @@ impl App {
                 ));
             }
             None => out.push_str("no document - press 'o' to open a PDF"),
+        }
+        if self.mode == Mode::Caret {
+            out.push_str("  -- CARET --");
+            if let Some(caret) = self.caret {
+                out.push_str(&format!("  Ln {}, Col {}", caret.line + 1, caret.cell + 1));
+            }
         }
         if self.input.has_pending() {
             out.push_str(&format!("  {}", self.input.pending_display()));
@@ -571,6 +883,106 @@ mod tests {
         assert!(err.is_err());
         assert!(app.has_document());
         assert_eq!(app.visible_pages().len(), 1);
+    }
+
+    #[test]
+    fn caret_enter_places_caret_and_shows_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_doc(dir.path(), 3);
+        assert_eq!(app.mode(), Mode::Normal);
+        press(&mut app, "c");
+        assert_eq!(app.mode(), Mode::Caret);
+        let caret = app.caret().expect("caret placed");
+        assert_eq!((caret.page, caret.line, caret.cell), (0, 0, 0));
+        assert!(app.caret_screen_rect().is_some());
+        assert!(app.status_text().contains("-- CARET --"));
+        assert!(app.status_text().contains("Ln 1, Col 1"));
+    }
+
+    #[test]
+    fn caret_right_advances_chars_then_wraps_to_next_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_doc(dir.path(), 3);
+        press(&mut app, "c");
+        // A few steps stay on the first line (the page's only line of text).
+        press(&mut app, "3l");
+        let caret = app.caret().unwrap();
+        assert_eq!((caret.page, caret.line, caret.cell), (0, 0, 3));
+        // Walking right past the end of page 0 wraps onto page 1 (the exact
+        // glyph count is layout-dependent, so step until the page changes).
+        for _ in 0..200 {
+            if app.caret().unwrap().page != 0 {
+                break;
+            }
+            press(&mut app, "l");
+        }
+        assert_eq!(app.caret().unwrap().page, 1);
+    }
+
+    #[test]
+    fn caret_left_at_document_start_is_clamped() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_doc(dir.path(), 2);
+        press(&mut app, "c");
+        press(&mut app, "h");
+        let caret = app.caret().unwrap();
+        assert_eq!((caret.page, caret.line, caret.cell), (0, 0, 0));
+    }
+
+    #[test]
+    fn caret_vertical_crosses_pages_keeping_column() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_doc(dir.path(), 3);
+        press(&mut app, "c");
+        press(&mut app, "3l"); // column 4 (cell index 3)
+                               // Each page has a single line, so `j` crosses to the next page.
+        press(&mut app, "j");
+        let caret = app.caret().unwrap();
+        assert_eq!(caret.page, 1);
+        // Goal column is preserved across the page boundary (identical layout).
+        assert!(
+            (caret.cell as i32 - 3).abs() <= 1,
+            "col drifted: {}",
+            caret.cell
+        );
+        // `k` comes back up to the previous page.
+        press(&mut app, "k");
+        assert_eq!(app.caret().unwrap().page, 0);
+    }
+
+    #[test]
+    fn caret_exit_restores_scrolling() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_doc(dir.path(), 3);
+        press(&mut app, "c");
+        assert_eq!(app.mode(), Mode::Caret);
+        press(&mut app, "<Esc>");
+        assert_eq!(app.mode(), Mode::Normal);
+        assert!(app.caret_screen_rect().is_none());
+        // In normal mode `j` scrolls again rather than moving the caret.
+        let before = app.session.as_ref().unwrap().view.scroll().1;
+        press(&mut app, "j");
+        let after = app.session.as_ref().unwrap().view.scroll().1;
+        assert!(after > before);
+    }
+
+    #[test]
+    fn caret_mode_keeps_non_hjkl_bindings() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_doc(dir.path(), 5);
+        press(&mut app, "c");
+        // `G` still navigates pages while in caret mode.
+        press(&mut app, "G");
+        assert_eq!(app.current_page(), 4);
+    }
+
+    #[test]
+    fn caret_without_document_does_not_crash() {
+        let mut app = App::new(Config::default(), None);
+        press(&mut app, "c");
+        assert!(app.caret_screen_rect().is_none());
+        press(&mut app, "l");
+        assert!(app.caret().is_none());
     }
 
     #[test]

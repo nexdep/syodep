@@ -107,6 +107,20 @@ void CanvasWidget::paintGL()
         const QRectF target(vp.x / dpr, vp.y / dpr, vp.width / dpr, vp.height / dpr);
         painter.drawImage(target, image);
     }
+
+    // Caret overlay (only present in caret mode). The core returns its rect in
+    // canvas pixels; we draw a translucent fill plus a solid border.
+    const SyoCaret caret = syo_app_caret(m_app);
+    if (caret.valid) {
+        QRectF box(caret.x / dpr, caret.y / dpr, caret.width / dpr, caret.height / dpr);
+        if (box.width() < 2.0)
+            box.setWidth(2.0); // keep zero-width stops (e.g. spaces) visible
+        const QColor accent(80, 160, 255);
+        painter.fillRect(box, QColor(80, 160, 255, 70));
+        painter.setPen(accent);
+        painter.setBrush(Qt::NoBrush);
+        painter.drawRect(box);
+    }
 }
 
 } // namespace syodep

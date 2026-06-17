@@ -95,6 +95,88 @@ pub fn pdf_with_pages(page_texts: &[&str]) -> Vec<u8> {
     buf
 }
 
+/// Build a single A4 page containing a caption line plus one raster image
+/// (a 2x2 DeviceRGB image drawn as a ~120x90 pt box near the middle of the
+/// page). Used to exercise the image branch of `Document::page_content`.
+pub fn pdf_with_image() -> Vec<u8> {
+    // 1 = catalog, 2 = pages, 3 = font, 4 = page, 5 = content, 6 = image.
+    let total_objects = 6;
+    let mut buf: Vec<u8> = b"%PDF-1.4\n".to_vec();
+    let mut offsets: Vec<usize> = vec![0; total_objects + 1];
+
+    let write_obj = |buf: &mut Vec<u8>, offsets: &mut Vec<usize>, num: usize, body: &[u8]| {
+        offsets[num] = buf.len();
+        buf.extend_from_slice(format!("{num} 0 obj\n").as_bytes());
+        buf.extend_from_slice(body);
+        buf.extend_from_slice(b"\nendobj\n");
+    };
+
+    write_obj(
+        &mut buf,
+        &mut offsets,
+        1,
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+    );
+    write_obj(
+        &mut buf,
+        &mut offsets,
+        2,
+        b"<< /Type /Pages /Kids [4 0 R] /Count 1 >>",
+    );
+    write_obj(
+        &mut buf,
+        &mut offsets,
+        3,
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    );
+    write_obj(
+        &mut buf,
+        &mut offsets,
+        4,
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] \
+          /Resources << /Font << /F1 3 0 R >> /XObject << /Im0 6 0 R >> >> \
+          /Contents 5 0 R >>",
+    );
+    // Caption text, then draw the image scaled to 120x90 at (100, 400).
+    let stream = "BT /F1 24 Tf 72 750 Td (Caption) Tj ET\nq 120 0 0 90 100 400 cm /Im0 Do Q";
+    write_obj(
+        &mut buf,
+        &mut offsets,
+        5,
+        format!(
+            "<< /Length {} >>\nstream\n{stream}\nendstream",
+            stream.len()
+        )
+        .as_bytes(),
+    );
+    // 2x2 DeviceRGB image => 4 pixels * 3 bytes = 12 bytes of sample data.
+    let pixels: [u8; 12] = [255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 0];
+    let mut img: Vec<u8> = format!(
+        "<< /Type /XObject /Subtype /Image /Width 2 /Height 2 /ColorSpace /DeviceRGB \
+         /BitsPerComponent 8 /Length {} >>\nstream\n",
+        pixels.len()
+    )
+    .into_bytes();
+    img.extend_from_slice(&pixels);
+    img.extend_from_slice(b"\nendstream");
+    write_obj(&mut buf, &mut offsets, 6, &img);
+
+    let xref_offset = buf.len();
+    buf.extend_from_slice(format!("xref\n0 {}\n", total_objects + 1).as_bytes());
+    buf.extend_from_slice(b"0000000000 65535 f \n");
+    for offset in &offsets[1..] {
+        buf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    buf.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n",
+            total_objects + 1
+        )
+        .as_bytes(),
+    );
+    buf
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

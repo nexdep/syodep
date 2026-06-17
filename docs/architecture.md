@@ -66,13 +66,23 @@ input take plain data). Key pieces:
 - **`App`** (`app.rs`): glues everything; input events come in, `Effects`
   (redraw / quit / open-file-dialog) come out. Persists the reading
   position after every navigation command and on drop.
+- **Caret** (`caret.rs` + `app.rs`): a modal cursor over page-content
+  geometry. A `Mode` selects which keymap drives input — normal `hjkl`
+  scrolling, or caret motion where `h`/`l` step characters and `j`/`k` step
+  lines (keeping a goal column) through text and image cells, auto-scrolling
+  the caret into view. The caret keymap is the normal keymap plus the
+  `[caret_keys]` overrides, so every other command still works in caret mode.
+  Extracted page content is cached per page in the session; the pure
+  goal-column cell picker lives in `caret.rs`.
 
 ### syodep-pdf
 
 The only crate that touches MuPDF. Wraps the maintained `mupdf` crate
 (bindings + vendored MuPDF C sources) and exposes syodep-owned types only:
-`Document`, `Size`, `Rect`, `Bitmap` (tightly packed RGBA8), `OutlineItem`.
-No MuPDF type or pointer crosses this boundary.
+`Document`, `Size`, `Rect`, `Bitmap` (tightly packed RGBA8), `OutlineItem`,
+and the content-geometry layer `ContentLine`/`Cell` (per-page text/image
+boxes from `page_content`, the foundation the caret — and later selection
+and search — navigate). No MuPDF type or pointer crosses this boundary.
 
 **Decision — use `mupdf-rs` instead of hand-rolled bindgen FFI:** building
 MuPDF from vendored source via cargo gives reproducible Linux+Windows
@@ -115,9 +125,11 @@ Four small files; intentionally boring:
   only input knowledge).
 - `CanvasWidget` (a `QOpenGLWidget`) forwards keys/wheel/resizes, asks the
   core for visible page rects + bitmaps, paints them with `QPainter` on the
-  GL-backed surface. It keeps a tiny per-page `QImage` cache only to avoid
-  re-copying bitmaps across the FFI every repaint; the real cache is in the
-  core. Tiled GL texture rendering is planned for phase 3 (roadmap).
+  GL-backed surface, and draws the caret overlay rectangle the core reports
+  (`syo_app_caret`, in canvas pixels) on top. It keeps a tiny per-page
+  `QImage` cache only to avoid re-copying bitmaps across the FFI every
+  repaint; the real cache is in the core. Tiled GL texture rendering is
+  planned for phase 3 (roadmap).
 - `MainWindow` owns the `SyoApp*` handle, the status label and the native
   file dialog.
 - `main.cpp` parses the CLI and implements `--smoke-test` for CI.
@@ -148,6 +160,7 @@ Four small files; intentionally boring:
 | 8 | `0` counts only after a nonzero digit (Vim rule) | lets `0`-prefixed bindings exist later | — |
 | 9 | Config errors degrade to defaults + warning | app must always start | — |
 | 10 | cbindgen-generated header, checked into neither repo nor docs | single source of truth in Rust | ABI freeze for plugins (not planned) |
+| 11 | Modal caret over content geometry (mode-selected keymap) | Vim-like `hjkl` caret without losing `hjkl` scrolling; one stop per image; goal-column vertical motion | always-on caret, or richer text objects (phase 3) |
 
 ## Sioyek: conceptual inspirations (clean-room)
 

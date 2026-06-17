@@ -16,12 +16,12 @@ use syodep_config::keys::{self, Chord, Key, KeyParseError, NamedKey};
 use crate::command::{Command, UnknownCommand};
 
 /// A trie of chord sequences to commands.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Keymap {
     root: Node,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 struct Node {
     command: Option<Command>,
     children: HashMap<Chord, Node>,
@@ -52,6 +52,19 @@ impl Keymap {
         I: IntoIterator<Item = (&'a str, &'a str)>,
     {
         let mut keymap = Self::default();
+        let errors = keymap.overlay(entries);
+        (keymap, errors)
+    }
+
+    /// Bind additional `(key sequence, command name)` pairs onto an existing
+    /// keymap, overwriting any sequence that resolves identically. Used to
+    /// build the caret-mode keymap as the normal keymap plus a few overrides,
+    /// so normal-binding errors are validated (and reported) only once.
+    /// Returns the errors found in *these* entries only.
+    pub fn overlay<'a, I>(&mut self, entries: I) -> Vec<KeymapError>
+    where
+        I: IntoIterator<Item = (&'a str, &'a str)>,
+    {
         let mut errors = Vec::new();
         for (sequence, command_name) in entries {
             let chords = match keys::parse_sequence(sequence) {
@@ -71,9 +84,9 @@ impl Keymap {
                     continue;
                 }
             };
-            keymap.bind(&chords, command);
+            self.bind(&chords, command);
         }
-        (keymap, errors)
+        errors
     }
 
     fn bind(&mut self, chords: &[Chord], command: Command) {

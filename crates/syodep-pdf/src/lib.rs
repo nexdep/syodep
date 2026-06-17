@@ -59,6 +59,31 @@ pub struct Rect {
     pub y1: f32,
 }
 
+/// What a single caret stop represents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CellKind {
+    /// One text character (including spaces).
+    Char(char),
+    /// A raster or vector image, treated as a single caret stop.
+    Image,
+}
+
+/// One navigable stop: a character or an image, with its bounding box in page
+/// points (origin top-left).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Cell {
+    pub kind: CellKind,
+    pub bbox: Rect,
+}
+
+/// A line of content in reading order — a run of character cells, or a single
+/// image cell. `bbox` covers the whole line.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContentLine {
+    pub bbox: Rect,
+    pub cells: Vec<Cell>,
+}
+
 /// An RGBA8 image, tightly packed (`stride == width * 4`).
 #[derive(Debug, Clone)]
 pub struct Bitmap {
@@ -200,10 +225,79 @@ impl Document {
         Ok(text_page.to_text()?)
     }
 
+    /// Per-page navigable content: text lines (each a sequence of character
+    /// cells) and images (one cell each), in reading order, with bounding
+    /// boxes in page points. This is the geometry layer the caret navigates.
+    ///
+    /// `PRESERVE_IMAGES` is required for image blocks to appear in the
+    /// structured-text output at all; the default flags drop them.
+    pub fn page_content(&self, page: usize) -> Result<Vec<ContentLine>, PdfError> {
+        self.check_page(page)?;
+        let mupdf_page = self.inner.load_page(page as i32)?;
+        let text_page = mupdf_page.to_text_page(TextPageFlags::PRESERVE_IMAGES)?;
+        let mut lines = Vec::new();
+        for block in text_page.blocks() {
+            // An image block reports `Some` here; `lines()` is empty for it
+            // (and for any non-text block), so this also discriminates blocks
+            // without needing the non-exported `TextBlockType`.
+            if block.image().is_some() {
+                let bbox = rect_from_mupdf(block.bounds());
+                lines.push(ContentLine {
+                    bbox,
+                    cells: vec![Cell {
+                        kind: CellKind::Image,
+                        bbox,
+                    }],
+                });
+                continue;
+            }
+            for line in block.lines() {
+                let cells: Vec<Cell> = line
+                    .chars()
+                    .filter_map(|ch| {
+                        ch.char().map(|c| Cell {
+                            kind: CellKind::Char(c),
+                            bbox: rect_from_quad(&ch.quad()),
+                        })
+                    })
+                    .collect();
+                if !cells.is_empty() {
+                    lines.push(ContentLine {
+                        bbox: rect_from_mupdf(line.bounds()),
+                        cells,
+                    });
+                }
+            }
+        }
+        Ok(lines)
+    }
+
     /// The document outline (table of contents), possibly empty.
     pub fn outline(&self) -> Result<Vec<OutlineItem>, PdfError> {
         let outlines = self.inner.outlines()?;
         Ok(outlines.into_iter().map(convert_outline).collect())
+    }
+}
+
+fn rect_from_mupdf(r: mupdf::Rect) -> Rect {
+    Rect {
+        x0: r.x0,
+        y0: r.y0,
+        x1: r.x1,
+        y1: r.y1,
+    }
+}
+
+/// Bounding box of a glyph quad (the four corners may be rotated/skewed, so
+/// take the min/max over all of them).
+fn rect_from_quad(q: &mupdf::Quad) -> Rect {
+    let xs = [q.ul.x, q.ur.x, q.ll.x, q.lr.x];
+    let ys = [q.ul.y, q.ur.y, q.ll.y, q.lr.y];
+    Rect {
+        x0: xs.iter().copied().fold(f32::INFINITY, f32::min),
+        y0: ys.iter().copied().fold(f32::INFINITY, f32::min),
+        x1: xs.iter().copied().fold(f32::NEG_INFINITY, f32::max),
+        y1: ys.iter().copied().fold(f32::NEG_INFINITY, f32::max),
     }
 }
 
@@ -314,5 +408,75 @@ mod tests {
     fn outline_of_plain_document_is_empty() {
         let doc = three_page_doc();
         assert_eq!(doc.outline().unwrap(), vec![]);
+    }
+
+    fn cell_text(lines: &[ContentLine]) -> String {
+        lines
+            .iter()
+            .flat_map(|l| l.cells.iter())
+            .filter_map(|c| match c.kind {
+                CellKind::Char(ch) => Some(ch),
+                CellKind::Image => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn page_content_extracts_chars_in_reading_order() {
+        let doc = three_page_doc();
+        let lines = doc.page_content(0).unwrap();
+        assert!(!lines.is_empty());
+        assert!(cell_text(&lines).contains("Hello syodep page one"));
+        for line in &lines {
+            // Line stays within the page.
+            assert!(
+                line.bbox.x0 >= 0.0 && line.bbox.x1 <= 595.0,
+                "{:?}",
+                line.bbox
+            );
+            assert!(
+                line.bbox.y0 >= 0.0 && line.bbox.y1 <= 842.0,
+                "{:?}",
+                line.bbox
+            );
+            // Character cells run left to right.
+            let mut prev = f32::NEG_INFINITY;
+            for cell in &line.cells {
+                assert!(
+                    cell.bbox.x0 >= prev - 0.5,
+                    "cells out of order: {:?}",
+                    line.cells
+                );
+                prev = cell.bbox.x0;
+            }
+        }
+    }
+
+    #[test]
+    fn page_content_out_of_range_fails() {
+        let doc = three_page_doc();
+        assert!(matches!(
+            doc.page_content(3),
+            Err(PdfError::PageOutOfRange { .. })
+        ));
+    }
+
+    #[test]
+    fn page_content_includes_one_cell_per_image() {
+        let doc = Document::from_bytes(&crate::test_support::pdf_with_image()).unwrap();
+        let lines = doc.page_content(0).unwrap();
+        let images: Vec<Cell> = lines
+            .iter()
+            .flat_map(|l| l.cells.iter())
+            .copied()
+            .filter(|c| c.kind == CellKind::Image)
+            .collect();
+        assert_eq!(images.len(), 1, "expected exactly one image cell");
+        let b = images[0].bbox;
+        // Drawn as a 120x90 pt box; allow generous tolerance.
+        assert!((b.x1 - b.x0 - 120.0).abs() < 5.0, "image width: {b:?}");
+        assert!((b.y1 - b.y0 - 90.0).abs() < 5.0, "image height: {b:?}");
+        // The caption text coexists with the image.
+        assert!(cell_text(&lines).contains("Caption"));
     }
 }

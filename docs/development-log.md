@@ -7,6 +7,60 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-06-16 — Modal caret navigation (text + images)
+
+### Implemented
+
+- **Content-geometry layer** (`syodep-pdf`): `Document::page_content` returns
+  per-page `ContentLine`s of `Cell`s — one cell per character (bbox from the
+  glyph quad) and one cell per image — in reading order, in page points.
+  Uses `TextPageFlags::PRESERVE_IMAGES` (image blocks are dropped by the
+  default stext flags). Image vs text blocks are discriminated via
+  `block.image()`/`block.lines()` since `TextBlockType` is not re-exported by
+  the bindings.
+- **Modal caret** (`syodep-core`): a new `Mode { Normal, Caret }` plus a
+  `caret.rs` module (position, direction, goal-column cell picker). `c`
+  enters caret mode; `h`/`l` move the caret character-wise (wrapping across
+  lines/pages), `j`/`k` line-wise keeping a goal column; `<Esc>` exits. Each
+  image is a single stop. The view auto-scrolls to keep the caret visible
+  (`View::scroll_doc_rect_into_view`), and page content is cached per page in
+  the session. The caret keymap is the normal keymap cloned with the
+  `[caret_keys]` overrides applied (`Keymap::overlay`), so every other
+  binding still works in caret mode and normal-binding errors are reported
+  once.
+- **Config**: new `[caret_keys]` table (`h/j/k/l`/arrows + `<Esc>` defaults)
+  and a `c = caret_enter` default in `[keys]`.
+- **FFI/shell**: `SyoCaret` + `syo_app_caret` project the caret rect (canvas
+  pixels) across the C ABI; `CanvasWidget::paintGL` draws a translucent
+  accent box with a border. The status bar shows `-- CARET --  Ln L, Col C`.
+
+### Test strategy
+
+TDD for the pure pieces: `caret.rs` goal-column picker; `View`
+`page_rect_to_screen`/`scroll_doc_rect_into_view`; `syodep-pdf` content
+extraction including an image cell from a new `pdf_with_image` fixture
+(generated, not checked in). App-level integration tests cover enter/exit,
+character/line motion, page wrapping, goal-column preservation across pages,
+counts, and that non-`hjkl` bindings still work in caret mode. The FFI
+round-trip test enters caret mode, moves, and exits. 104 tests total (was
+88); Qt shell covered by compile + offscreen smoke test as before.
+
+### Decisions (details in `docs/architecture.md`, row 11)
+
+- Modal caret (mode-selected keymap) over an always-on caret: keeps `hjkl`
+  scrolling intact and matches the existing Vim-like modal design.
+- One caret stop per image; goal-column vertical motion like a text editor.
+- `page_content` runs only in caret mode and is cached, so plain reading is
+  unaffected.
+
+### Known limitations / next steps
+
+- Word/sentence/paragraph text objects and selection build on this caret
+  (phase 2/3). The caret position is not yet persisted across sessions.
+- RTL/vertical scripts rely on MuPDF reading order; not specially handled.
+
+---
+
 ## 2026-06-12 — Linux AppImage release
 
 ### Implemented

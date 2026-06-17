@@ -46,6 +46,23 @@ The "current page" is the page under the center of the window.
 Zoom keeps the document point at the window center fixed and is clamped to
 5%–1600%.
 
+## Caret
+
+A modal cursor that moves through the document's content — text characters
+and images — independently of scrolling. `caret_enter` switches into caret
+mode (where `hjkl` move the caret); `caret_exit` (or `<Esc>`) returns to
+normal scrolling. Each image is a single caret stop. The view auto-scrolls
+to keep the caret on screen. See `docs/keybindings.md` for the modes.
+
+| Command | Effect | Count |
+|---|---|---|
+| `caret_enter` | enter caret mode, placing the caret on the nearest content | — |
+| `caret_exit` | leave caret mode (the caret position is remembered) | — |
+| `caret_left` | move the caret one character left (wraps to the previous line/page) | repeats N times |
+| `caret_right` | move the caret one character right (wraps to the next line/page) | repeats N times |
+| `caret_up` | move the caret one line up, keeping its column | repeats N times |
+| `caret_down` | move the caret one line down, keeping its column | repeats N times |
+
 ## Application
 
 | Command | Effect |

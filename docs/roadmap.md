@@ -22,8 +22,9 @@ Status legend: ✅ done · 🚧 in progress · ⬜ planned
 
 Ordered roughly by dependency:
 
-1. ⬜ Character-geometry text layer (per-page char/word boxes from
-   `syodep-pdf` TextPage; foundation for everything below)
+1. ✅ Character/image-geometry content layer (per-page character + image
+   boxes from `syodep-pdf::Document::page_content`; foundation for
+   everything below)
 2. ⬜ Mouse + keyboard text selection; selection overlay rendering
 3. ⬜ Highlight selected text; SQLite `highlights` table (migration v2);
    highlight overlays rendered on reload
@@ -35,6 +36,11 @@ Ordered roughly by dependency:
 8. ⬜ Fuzzy search over highlights and notes
 9. ⬜ Export annotations to Markdown and JSON
 10. ⬜ Annotation sidebar (Qt, read-only first)
+
+Delivered ahead of the rest: a **modal caret** (`c` to enter, then `hjkl`)
+navigates the content layer character- and line-wise across text and images,
+auto-scrolling to follow. It is the seam selection/highlight build on. See
+the development log.
 
 ## Phase 3 — text objects and smart navigation ⬜
 

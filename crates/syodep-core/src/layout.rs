@@ -225,6 +225,46 @@ impl View {
         }
     }
 
+    /// Map a rectangle expressed in a page's own coordinate space (points,
+    /// origin at the page's top-left) to screen pixels. Returns `None` if the
+    /// page index is out of range. Uses the same transform as
+    /// [`View::visible_pages`].
+    pub fn page_rect_to_screen(
+        &self,
+        page: usize,
+        x0: f32,
+        y0: f32,
+        x1: f32,
+        y1: f32,
+    ) -> Option<ScreenRect> {
+        let p = self.layout.page(page)?;
+        Some(ScreenRect {
+            x: (p.x + x0 - self.scroll_x) * self.zoom,
+            y: (p.y + y0 - self.scroll_y) * self.zoom,
+            width: (x1 - x0) * self.zoom,
+            height: (y1 - y0) * self.zoom,
+        })
+    }
+
+    /// Scroll the minimum amount so that a document-space rectangle is fully
+    /// within the viewport. A rectangle larger than the viewport aligns to its
+    /// top-left corner. Used to keep the caret on screen as it moves.
+    pub fn scroll_doc_rect_into_view(&mut self, x0: f32, y0: f32, x1: f32, y1: f32) {
+        let view_w = self.viewport_width / self.zoom;
+        let view_h = self.viewport_height / self.zoom;
+        if y0 < self.scroll_y {
+            self.scroll_y = y0;
+        } else if y1 > self.scroll_y + view_h {
+            self.scroll_y = y1 - view_h;
+        }
+        if x0 < self.scroll_x {
+            self.scroll_x = x0;
+        } else if x1 > self.scroll_x + view_w {
+            self.scroll_x = x1 - view_w;
+        }
+        self.clamp_scroll();
+    }
+
     /// Pages intersecting the viewport, with their screen-space rectangles.
     pub fn visible_pages(&self) -> Vec<(usize, ScreenRect)> {
         let mut out = Vec::new();
@@ -411,6 +451,41 @@ mod tests {
         view.scroll_by_px(0.0, 700.0);
         let visible: Vec<usize> = view.visible_pages().iter().map(|(i, _)| *i).collect();
         assert_eq!(visible, vec![0, 1]);
+    }
+
+    #[test]
+    fn page_rect_to_screen_matches_page_transform() {
+        let mut view = View::new(three_pages(), 595.0, 600.0);
+        view.goto_page(1);
+        // A 10x20 rect at (5, 5) on page 1 (which starts at doc y = 852).
+        let r = view.page_rect_to_screen(1, 5.0, 5.0, 15.0, 25.0).unwrap();
+        // Page 1's screen rect, for reference.
+        let page1 = view
+            .visible_pages()
+            .iter()
+            .find(|(i, _)| *i == 1)
+            .unwrap()
+            .1;
+        assert!((r.x - (page1.x + 5.0 * view.zoom())).abs() < 0.01);
+        assert!((r.y - (page1.y + 5.0 * view.zoom())).abs() < 0.01);
+        assert!((r.width - 10.0 * view.zoom()).abs() < 0.01);
+        assert!((r.height - 20.0 * view.zoom()).abs() < 0.01);
+        assert_eq!(view.page_rect_to_screen(99, 0.0, 0.0, 1.0, 1.0), None);
+    }
+
+    #[test]
+    fn scroll_doc_rect_into_view_scrolls_only_when_needed() {
+        let mut view = View::new(three_pages(), 595.0, 600.0);
+        // Already visible near the top: no scroll.
+        view.scroll_doc_rect_into_view(10.0, 10.0, 20.0, 30.0);
+        assert_eq!(view.scroll().1, 0.0);
+        // A rect below the viewport pulls the view down to reveal its bottom.
+        view.scroll_doc_rect_into_view(10.0, 1000.0, 20.0, 1020.0);
+        let view_h = 600.0 / view.zoom();
+        assert!((view.scroll().1 - (1020.0 - view_h)).abs() < 0.01);
+        // A rect above the current scroll (now ~420) pulls back up to its top.
+        view.scroll_doc_rect_into_view(10.0, 100.0, 20.0, 120.0);
+        assert!((view.scroll().1 - 100.0).abs() < 0.01);
     }
 
     #[test]

@@ -62,6 +62,20 @@ pub struct SyoVisiblePage {
     pub height: f32,
 }
 
+/// The caret rectangle in canvas pixels, for the overlay the shell paints.
+/// `valid` is 0 when not in caret mode or no caret is placed, in which case
+/// the remaining fields are unspecified.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SyoCaret {
+    pub valid: u8,
+    pub page: usize,
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
 /// A tightly packed RGBA8 image (stride = width * 4).
 #[repr(C)]
 pub struct SyoBitmap {
@@ -270,6 +284,38 @@ pub unsafe extern "C" fn syo_app_visible_pages(
     pages.len()
 }
 
+/// The caret rectangle (canvas pixels) for the overlay. When `valid` is 0 the
+/// shell draws nothing.
+///
+/// # Safety
+/// `app` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn syo_app_caret(app: *const SyoApp) -> SyoCaret {
+    let invalid = SyoCaret {
+        valid: 0,
+        page: 0,
+        x: 0.0,
+        y: 0.0,
+        width: 0.0,
+        height: 0.0,
+    };
+    let Some(app) = (unsafe { app.as_ref() }) else {
+        return invalid;
+    };
+    catch_unwind(AssertUnwindSafe(|| match app.app.caret_screen_rect() {
+        Some((page, rect)) => SyoCaret {
+            valid: 1,
+            page,
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+        },
+        None => invalid,
+    }))
+    .unwrap_or(invalid)
+}
+
 /// Render a page at the current zoom. Returns NULL on failure. The result
 /// must be freed with `syo_bitmap_free`.
 ///
@@ -476,6 +522,23 @@ mod tests {
             assert_eq!((*bitmap).width, 595);
             assert!(!(*bitmap).data.is_null());
             syo_bitmap_free(bitmap);
+
+            // Caret: inactive until entered, then valid and movable.
+            assert_eq!(syo_app_caret(app).valid, 0);
+            let c_key = CString::new("c").unwrap();
+            syo_app_key_event(app, c_key.as_ptr());
+            let caret0 = syo_app_caret(app);
+            assert_eq!(caret0.valid, 1);
+            let l_key = CString::new("l").unwrap();
+            syo_app_key_event(app, l_key.as_ptr());
+            let caret1 = syo_app_caret(app);
+            assert_eq!(caret1.valid, 1);
+            // Moving right does not move the caret left.
+            assert!(caret1.x >= caret0.x);
+            // Leaving caret mode hides the overlay again.
+            let esc = CString::new("<Esc>").unwrap();
+            syo_app_key_event(app, esc.as_ptr());
+            assert_eq!(syo_app_caret(app).valid, 0);
 
             // Out-of-range render fails cleanly.
             let bad = syo_app_render_page(app, 99);

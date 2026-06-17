@@ -40,6 +40,14 @@ while IFS= read -r binding; do
     grep -qF "$binding" docs/keybindings.md || err "default keybinding not documented: $binding"
 done < <(grep -oP '^\s*\("\K[^"]+(?=", ")' crates/syodep-config/src/lib.rs)
 
+# Every caret-mode binding's command (default_caret_keybindings) must appear
+# in docs/keybindings.md, so the caret mode stays documented.
+while IFS= read -r command; do
+    grep -q "\`$command\`" docs/keybindings.md \
+        || err "caret keybinding command not documented: $command"
+done < <(awk '/pub fn default_caret_keybindings/,/^}/' crates/syodep-config/src/lib.rs \
+    | grep -oP '", "\K[a-z_]+(?="\))')
+
 # Every [view] config field must appear in docs/config.md.
 while IFS= read -r option; do
     grep -q "\`$option\`" docs/config.md || err "config option not documented: $option"

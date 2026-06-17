@@ -48,6 +48,21 @@ the default bindings: `docs/keybindings.md`. Command names:
 "<C-o>" = "open_file"
 ```
 
+## `[caret_keys]`
+
+Keybindings that apply only in **caret mode** (entered with `c`). They
+overlay the normal `[keys]` while caret mode is active, so `hjkl`/`<Esc>`
+can mean caret motions there while every other binding keeps its normal
+behavior. Like `[keys]`, entries overlay the defaults — list only changes.
+Defaults: `h`/`j`/`k`/`l` (and the arrow keys) move the caret, `<Esc>` exits.
+See `docs/keybindings.md` for the full description and `docs/commands.md`
+for the `caret_*` command names.
+
+```toml
+[caret_keys]
+"w" = "caret_right"   # extra binding, only in caret mode
+```
+
 ## Planned config sections
 
 Later phases add: theme/colors beyond the background, annotation

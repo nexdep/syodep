@@ -6,12 +6,14 @@
 //! logic lives in this crate (or below it).
 
 pub mod app;
+pub mod caret;
 pub mod command;
 pub mod input;
 pub mod layout;
 pub mod render_cache;
 
 pub use app::{App, Effects, VisiblePage};
+pub use caret::{Caret, Mode};
 pub use command::Command;
 pub use input::{InputState, KeyOutcome, Keymap, KeymapError};
 pub use layout::{DocumentLayout, View};

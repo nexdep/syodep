@@ -27,6 +27,11 @@ pub struct Config {
     /// Parsed and validated into a keymap by `syodep-core`.
     #[serde(default)]
     pub keys: BTreeMap<String, String>,
+    /// Caret-mode keybindings (the `[caret_keys]` table). These overlay the
+    /// normal `keys` while caret mode is active, so `hjkl`/`<Esc>` can mean
+    /// something different there while every other binding still works.
+    #[serde(default)]
+    pub caret_keys: BTreeMap<String, String>,
 }
 
 /// `[view]` section: rendering and navigation tunables.
@@ -69,6 +74,7 @@ impl Default for Config {
         Self {
             view: ViewConfig::default(),
             keys: default_keybindings(),
+            caret_keys: default_caret_keybindings(),
         }
     }
 }
@@ -101,9 +107,32 @@ pub fn default_keybindings() -> BTreeMap<String, String> {
         ("-", "zoom_out"),
         ("zw", "fit_width"),
         ("z0", "zoom_reset"),
+        ("c", "caret_enter"),
         ("o", "open_file"),
         ("q", "quit"),
         ("<Esc>", "cancel"),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_owned(), v.to_owned()))
+    .collect()
+}
+
+/// Built-in caret-mode keybindings (the `[caret_keys]` table). These overlay
+/// the normal bindings while caret mode is active: `hjkl` move the caret and
+/// `<Esc>` leaves caret mode, while everything else keeps its normal meaning.
+///
+/// Every entry here must be documented in `docs/keybindings.md`.
+pub fn default_caret_keybindings() -> BTreeMap<String, String> {
+    [
+        ("h", "caret_left"),
+        ("j", "caret_down"),
+        ("k", "caret_up"),
+        ("l", "caret_right"),
+        ("<Left>", "caret_left"),
+        ("<Down>", "caret_down"),
+        ("<Up>", "caret_up"),
+        ("<Right>", "caret_right"),
+        ("<Esc>", "caret_exit"),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_owned(), v.to_owned()))
@@ -133,6 +162,9 @@ impl Config {
         let mut keys = default_keybindings();
         keys.extend(std::mem::take(&mut config.keys));
         config.keys = keys;
+        let mut caret_keys = default_caret_keybindings();
+        caret_keys.extend(std::mem::take(&mut config.caret_keys));
+        config.caret_keys = caret_keys;
         Ok(config)
     }
 
@@ -215,6 +247,36 @@ mod tests {
         assert_eq!(config.keys.get("<C-o>").map(String::as_str), Some("quit"));
         // Untouched default survives.
         assert_eq!(config.keys.get("k").map(String::as_str), Some("scroll_up"));
+    }
+
+    #[test]
+    fn caret_keys_default_and_user_override() {
+        let config = Config::from_toml(
+            r#"
+            [caret_keys]
+            "w" = "caret_right"
+            "#,
+        )
+        .unwrap();
+        // Built-in caret bindings survive.
+        assert_eq!(
+            config.caret_keys.get("h").map(String::as_str),
+            Some("caret_left")
+        );
+        assert_eq!(
+            config.caret_keys.get("j").map(String::as_str),
+            Some("caret_down")
+        );
+        // User addition is merged in.
+        assert_eq!(
+            config.caret_keys.get("w").map(String::as_str),
+            Some("caret_right")
+        );
+        // The enter binding lives in the normal table.
+        assert_eq!(
+            config.keys.get("c").map(String::as_str),
+            Some("caret_enter")
+        );
     }
 
     #[test]
