@@ -72,6 +72,10 @@ binaries, run with `--appimage-extract-and-run` since containers lack
 FUSE) with `packaging/syodep.desktop` and `packaging/syodep.svg`.
 Bundled: the binary, Qt libs, platform plugins (xcb, wayland, plus
 `offscreen` via `EXTRA_PLATFORM_PLUGINS` for headless/smoke-test use).
+`qt6-wayland` is installed in the build container so
+`libqwayland-egl.so` and `libqwayland-generic.so` are available to bundle;
+the workflow extracts the finished AppImage and asserts the xcb, wayland
+and offscreen platform plugins are present before running the smoke test.
 Excluded by linuxdeploy's default list and resolved from the host:
 glibc, libGL, fontconfig — exactly the libs that must match the user's
 system.

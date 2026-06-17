@@ -7,6 +7,30 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-06-17 — AppImage Qt platform plugin bundling
+
+### Implemented
+
+- **Wayland platform support**: the Linux AppImage release job now installs
+  `qt6-wayland` in the Ubuntu 22.04 build container and explicitly asks
+  `linuxdeploy-plugin-qt` to bundle `libqwayland-egl.so` and
+  `libqwayland-generic.so` alongside the existing offscreen plugin.
+  `libqxcb.so` remains the plugin's default platform backend.
+- **Packaging verification**: after building the AppImage, CI extracts it
+  and asserts the bundled Qt platform directory contains `xcb`,
+  `offscreen`, and both Wayland platform plugins before running the
+  smoke test.
+- **Docs**: `docs/packaging.md` now records the `qt6-wayland` dependency
+  and the extracted-AppImage plugin check.
+
+### Test strategy
+
+Workflow/docs change. Local verification: `git diff --check` and
+`./scripts/check-docs.sh`; the full AppImage extraction check and packaged
+offscreen smoke test run in GitHub Actions on the next release workflow.
+
+---
+
 ## 2026-06-17 — Continuous prerelease downloads
 
 ### Implemented

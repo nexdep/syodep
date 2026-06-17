@@ -35,7 +35,7 @@ jobs:
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y \
             build-essential clang libclang-dev cmake ninja-build \
-            qt6-base-dev libqt6opengl6-dev libgl1-mesa-dev \
+            qt6-base-dev libqt6opengl6-dev qt6-wayland libgl1-mesa-dev \
             libfontconfig1-dev libfreetype-dev \
             curl file ca-certificates
       - name: Install Rust
@@ -56,9 +56,10 @@ jobs:
           curl -fsSLO https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
           curl -fsSLO https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage
           chmod +x linuxdeploy-x86_64.AppImage linuxdeploy-plugin-qt-x86_64.AppImage
-          # offscreen platform plugin is bundled so the smoke test below
-          # (and headless use generally) works from the AppImage.
-          export EXTRA_PLATFORM_PLUGINS="libqoffscreen.so"
+          # Bundle native Wayland support plus offscreen for the smoke test
+          # below (and headless use generally). linuxdeploy-plugin-qt
+          # deploys libqxcb.so by default.
+          export EXTRA_PLATFORM_PLUGINS="libqoffscreen.so;libqwayland-egl.so;libqwayland-generic.so"
           export QMAKE=/usr/bin/qmake6
           export APPIMAGE_EXTRACT_AND_RUN=1
           export OUTPUT="syodep-x86_64.AppImage"
@@ -68,6 +69,16 @@ jobs:
             --icon-file packaging/syodep.svg \
             --plugin qt \
             --output appimage
+      - name: Verify bundled Qt platform plugins
+        run: |
+          chmod +x syodep-x86_64.AppImage
+          ./syodep-x86_64.AppImage --appimage-extract
+          platform_dir="$(find squashfs-root -type d -path '*/plugins/platforms' -print -quit)"
+          test -n "$platform_dir"
+          test -f "$platform_dir/libqxcb.so"
+          test -f "$platform_dir/libqoffscreen.so"
+          test -f "$platform_dir/libqwayland-egl.so"
+          test -f "$platform_dir/libqwayland-generic.so"
       # Run the actual AppImage so a missing bundled lib fails here, not
       # on a user's machine (mirrors the Windows staged smoke test).
       - name: Smoke test the AppImage
