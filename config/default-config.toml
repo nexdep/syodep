@@ -25,6 +25,14 @@ zoom_step = 1.1
 # Canvas background color (#rrggbb).
 background = "#1e1e1e"
 
+[files]
+# Starting directory for the Open dialog (the "o" command). When unset, the
+# dialog opens in the directory syodep was launched from. If the path below
+# does not exist (or is not a directory), syodep falls back to the launch
+# directory. Run `syodep --check` to see which directory is in effect.
+# Use an absolute path ("~" is not expanded).
+# open_dir = "/home/me/papers"   # example: always start in a fixed folder
+
 # Keybindings: "key sequence" = "command".
 # Entries ADD TO or OVERRIDE the defaults; you only need to list changes.
 # Key syntax (see docs/keybindings.md): plain chars ("j", "G", "+"),

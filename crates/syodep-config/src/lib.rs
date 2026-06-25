@@ -37,6 +37,19 @@ pub struct Config {
     /// `caret_focus_keys`.
     #[serde(default)]
     pub line_focus_keys: BTreeMap<String, String>,
+    /// `[files]` section: file-dialog and path behaviour.
+    #[serde(default)]
+    pub files: FilesConfig,
+}
+
+/// `[files]` section: file-dialog and path behaviour.
+#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
+#[serde(deny_unknown_fields, default)]
+pub struct FilesConfig {
+    /// Starting directory for the Open dialog. When unset, or pointing at a
+    /// path that is not an existing directory, syodep uses the launch
+    /// (current working) directory instead.
+    pub open_dir: Option<String>,
 }
 
 /// `[view]` section: rendering and navigation tunables.
@@ -81,6 +94,7 @@ impl Default for Config {
             keys: default_keybindings(),
             caret_focus_keys: default_caret_focus_keybindings(),
             line_focus_keys: default_line_focus_keybindings(),
+            files: FilesConfig::default(),
         }
     }
 }
@@ -321,6 +335,20 @@ mod tests {
             config.keys.get("cc").map(String::as_str),
             Some("caret_focus_enter")
         );
+    }
+
+    #[test]
+    fn parses_files_section() {
+        let config = Config::from_toml(
+            r#"
+            [files]
+            open_dir = "/some/path"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.files.open_dir.as_deref(), Some("/some/path"));
+        // Default has no override.
+        assert_eq!(Config::default().files.open_dir, None);
     }
 
     #[test]
