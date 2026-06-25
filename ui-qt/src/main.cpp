@@ -69,7 +69,7 @@ int main(int argc, char *argv[])
     // These are static and safe to set before the QApplication exists; the
     // version reporters below read them without needing a display.
     QApplication::setApplicationName(QStringLiteral("syodep"));
-    QApplication::setApplicationVersion(QStringLiteral("0.2.0"));
+    QApplication::setApplicationVersion(QStringLiteral("0.3.0"));
 
     // Decide and apply graphics fallbacks (software GL, X11 on WSL, ...) before
     // the QApplication is constructed — Qt locks the platform plugin and GL
