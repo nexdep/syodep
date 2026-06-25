@@ -224,11 +224,18 @@ QString buildCheckReport(const PlatformInfo &info, const GraphicsDecision &decis
     line(QStringLiteral("  Config file:      %1")
              .arg(configExists ? QStringLiteral("loaded")
                                : QStringLiteral("not found — using built-in defaults")));
-    // Construct a throwaway core (no persistence) to surface parse warnings.
+    // Construct a throwaway core (no persistence) to surface parse warnings and
+    // the resolved Open-dialog directory. This runs in the same process as a
+    // real launch, so the working directory and config match what the dialog
+    // would see.
     SyoApp *app = syo_app_new(configPath.toUtf8().constData(), nullptr);
     const QString warnings = app ? takeSyoString(syo_app_startup_warnings(app)) : QString();
+    const QString openDir = app ? takeSyoString(syo_app_open_dir(app)) : QString();
+    const QString openDirSrc = app ? takeSyoString(syo_app_open_dir_source(app)) : QString();
     if (app)
         syo_app_free(app);
+    line(QStringLiteral("  Open dialog dir:  %1  (%2)")
+             .arg(openDir.isEmpty() ? QStringLiteral("(none)") : openDir, openDirSrc));
     if (warnings.isEmpty())
         line(QStringLiteral("  Warnings:         none"));
     else {

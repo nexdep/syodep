@@ -30,6 +30,60 @@ use syodep_storage::Storage;
 /// Opaque application handle.
 pub struct SyoApp {
     app: App,
+    /// Resolved starting directory for the Open dialog (absolute when known).
+    open_dir: String,
+    /// Human-readable provenance of `open_dir`, reported by `--check`.
+    open_dir_source: String,
+}
+
+/// Outcome of resolving the Open-dialog starting directory.
+struct OpenDirResolution {
+    /// Directory the dialog should open in (empty if even the CWD is unknown,
+    /// in which case the shell lets Qt pick its own default).
+    path: String,
+    /// Short note on where the value came from, for `--check`.
+    source: String,
+    /// A startup warning to surface, set only when a configured directory was
+    /// requested but could not be used.
+    warning: Option<String>,
+}
+
+/// Resolve the Open-dialog starting directory.
+///
+/// Precedence: a configured `files.open_dir` that exists as a directory wins;
+/// otherwise the launch (current working) directory is used. A configured path
+/// that is missing or not a directory falls back to the launch directory and
+/// produces a warning.
+fn resolve_open_dir(configured: Option<&str>) -> OpenDirResolution {
+    let cwd = std::env::current_dir()
+        .ok()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+
+    match configured {
+        Some(raw) if !raw.trim().is_empty() => {
+            if PathBuf::from(raw).is_dir() {
+                OpenDirResolution {
+                    path: raw.to_owned(),
+                    source: format!("config: files.open_dir ({raw})"),
+                    warning: None,
+                }
+            } else {
+                OpenDirResolution {
+                    path: cwd,
+                    source: format!("config dir not found ({raw}) — using launch directory"),
+                    warning: Some(format!(
+                        "open_dir not found: {raw} — using launch directory"
+                    )),
+                }
+            }
+        }
+        _ => OpenDirResolution {
+            path: cwd,
+            source: "launch directory".to_owned(),
+            warning: None,
+        },
+    }
 }
 
 /// Effect bits returned by input functions.
@@ -139,11 +193,19 @@ pub unsafe extern "C" fn syo_app_new(
             },
             None => None,
         };
+        let open = resolve_open_dir(config.files.open_dir.as_deref());
+        if let Some(warning) = open.warning {
+            warnings.push(warning);
+        }
         let mut app = App::new(config, storage);
         for warning in warnings {
             app.report_error(warning);
         }
-        SyoApp { app }
+        SyoApp {
+            app,
+            open_dir: open.path,
+            open_dir_source: open.source,
+        }
     });
     match result {
         Ok(app) => Box::into_raw(Box::new(app)),
@@ -431,6 +493,34 @@ pub unsafe extern "C" fn syo_app_startup_warnings(app: *const SyoApp) -> *mut c_
     to_c_string(text)
 }
 
+/// Resolved starting directory for the Open dialog (absolute when known; empty
+/// when even the launch directory is unavailable, in which case the shell lets
+/// Qt choose). Free with `syo_string_free`.
+///
+/// # Safety
+/// `app` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn syo_app_open_dir(app: *const SyoApp) -> *mut c_char {
+    let Some(app) = (unsafe { app.as_ref() }) else {
+        return to_c_string(String::new());
+    };
+    to_c_string(app.open_dir.clone())
+}
+
+/// Human-readable provenance of the Open-dialog directory (e.g. "launch
+/// directory", "config: files.open_dir (...)"), for `--check`. Free with
+/// `syo_string_free`.
+///
+/// # Safety
+/// `app` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn syo_app_open_dir_source(app: *const SyoApp) -> *mut c_char {
+    let Some(app) = (unsafe { app.as_ref() }) else {
+        return to_c_string(String::new());
+    };
+    to_c_string(app.open_dir_source.clone())
+}
+
 /// Free a string returned by this library.
 ///
 /// # Safety
@@ -632,6 +722,93 @@ mod tests {
             let text = CStr::from_ptr(status).to_str().unwrap().to_owned();
             syo_string_free(status);
             assert!(text.contains("default config"), "{text}");
+            syo_app_free(app);
+        }
+    }
+
+    #[test]
+    fn resolve_open_dir_defaults_to_cwd() {
+        let cwd = std::env::current_dir().unwrap().display().to_string();
+        let r = resolve_open_dir(None);
+        assert_eq!(r.path, cwd);
+        assert_eq!(r.source, "launch directory");
+        assert!(r.warning.is_none());
+
+        // An empty / whitespace override is treated as unset.
+        let r = resolve_open_dir(Some("   "));
+        assert_eq!(r.path, cwd);
+        assert!(r.warning.is_none());
+    }
+
+    #[test]
+    fn resolve_open_dir_uses_existing_configured_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().display().to_string();
+        let r = resolve_open_dir(Some(&path));
+        assert_eq!(r.path, path);
+        assert!(r.source.contains("files.open_dir"));
+        assert!(r.warning.is_none());
+    }
+
+    #[test]
+    fn resolve_open_dir_falls_back_when_configured_dir_missing() {
+        let cwd = std::env::current_dir().unwrap().display().to_string();
+        let r = resolve_open_dir(Some("/no/such/syodep/dir"));
+        assert_eq!(r.path, cwd);
+        assert!(r.source.contains("not found"));
+        assert!(r.warning.is_some());
+    }
+
+    #[test]
+    fn open_dir_getters_wire_through_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let papers = dir.path().join("papers");
+        std::fs::create_dir(&papers).unwrap();
+        std::fs::write(
+            &config_path,
+            format!("[files]\nopen_dir = \"{}\"\n", papers.display()),
+        )
+        .unwrap();
+        let c_config = CString::new(config_path.display().to_string()).unwrap();
+        unsafe {
+            let app = syo_app_new(c_config.as_ptr(), std::ptr::null());
+            assert!(!app.is_null());
+            let open = syo_app_open_dir(app);
+            let open_s = CStr::from_ptr(open).to_str().unwrap().to_owned();
+            syo_string_free(open);
+            assert_eq!(open_s, papers.display().to_string());
+            let src = syo_app_open_dir_source(app);
+            let src_s = CStr::from_ptr(src).to_str().unwrap().to_owned();
+            syo_string_free(src);
+            assert!(src_s.contains("files.open_dir"), "{src_s}");
+            syo_app_free(app);
+        }
+    }
+
+    #[test]
+    fn missing_open_dir_warns_and_falls_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            "[files]\nopen_dir = \"/no/such/syodep/dir\"\n",
+        )
+        .unwrap();
+        let c_config = CString::new(config_path.display().to_string()).unwrap();
+        let cwd = std::env::current_dir().unwrap().display().to_string();
+        unsafe {
+            let app = syo_app_new(c_config.as_ptr(), std::ptr::null());
+            assert!(!app.is_null());
+            let open = syo_app_open_dir(app);
+            let open_s = CStr::from_ptr(open).to_str().unwrap().to_owned();
+            syo_string_free(open);
+            assert_eq!(open_s, cwd);
+            // The fallback surfaces in the status line.
+            let status = syo_app_status_text(app);
+            let text = CStr::from_ptr(status).to_str().unwrap().to_owned();
+            syo_string_free(status);
+            assert!(text.contains("open_dir not found"), "{text}");
             syo_app_free(app);
         }
     }

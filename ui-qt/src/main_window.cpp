@@ -1,7 +1,6 @@
 #include "main_window.h"
 
 #include <QFileDialog>
-#include <QStandardPaths>
 #include <QStatusBar>
 
 #include "canvas_widget.h"
@@ -69,8 +68,7 @@ void MainWindow::refreshStatus()
 
 void MainWindow::showOpenDialog()
 {
-    const QString start =
-        QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
+    const QString start = takeSyoString(syo_app_open_dir(m_app));
     const QString path = QFileDialog::getOpenFileName(
         this, tr("Open PDF"), start, tr("PDF documents (*.pdf);;All files (*)"));
     if (!path.isEmpty())

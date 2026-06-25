@@ -35,6 +35,26 @@ bookmarks, highlights, notes, history. That lives in the SQLite database
 Documents with a saved reading position restore their previous scroll and
 zoom instead of applying `default_zoom`/`fit_width_on_open`.
 
+## `[files]`
+
+| Option | Type | Default | Meaning |
+|---|---|---|---|
+| `open_dir` | string | *(unset)* | starting directory for the Open dialog (the `open_file`/`o` command) |
+
+When `open_dir` is unset, the Open dialog starts in the directory syodep was
+launched from (the process working directory) — useful when launching from a
+terminal inside a paper or project folder. When set, it must be an absolute
+path (`~` is not expanded). If the configured path does not exist or is not a
+directory, syodep falls back to the launch directory and shows a warning.
+
+`syodep --check` reports the resolved directory and where it came from, under
+*Configuration → Open dialog dir*.
+
+```toml
+[files]
+open_dir = "/home/me/papers"
+```
+
 ## `[keys]`
 
 A table of `"key sequence" = "command name"` entries that overlay the
