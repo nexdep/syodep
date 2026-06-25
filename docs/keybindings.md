@@ -86,17 +86,23 @@ cursor moves through the document's content — text characters and images:
 | `l`, `<Right>` | `caret_focus_right` — one character right |
 | `k`, `<Up>` | `caret_focus_up` — one line up (keeps the column) |
 | `j`, `<Down>` | `caret_focus_down` — one line down (keeps the column) |
+| `w` | `caret_focus_next_word` — next word start |
+| `e` | `caret_focus_end_word` — current/next word end |
+| `b` | `caret_focus_prev_word` — current/previous word start |
 | `<Esc>` | `caret_focus_exit` — back to normal mode |
 
 `h`/`l` step character by character and wrap across lines and pages; `j`/`k`
-move line by line, keeping a goal column like a text editor. Each image is a
-single caret stop. The view scrolls to keep the caret visible, and counts
-work (`5l`, `3j`). Every other binding (page scroll, page navigation, zoom,
-`q`, `o`, …) still works in caret focus mode — only `hjkl`/`<Esc>` change
-meaning. Scroll and page-jump commands additionally carry the caret to the
-top of the newly visible content; zoom leaves it in place. The status bar
-shows `-- CARET FOCUS --` with the current line and column. See
-`docs/commands-caret-focus-mode.md` for the full list.
+move line by line, keeping a goal column like a text editor. `w`/`e`/`b`
+move by Vim-like word runs: letters/digits/underscore together,
+punctuation/symbols separately, whitespace skipped. Each image is a single
+caret stop. The view scrolls to keep the caret visible, and counts work
+(`5l`, `3j`, `2w`). Every other binding (page scroll, page navigation,
+zoom, `q`, `o`, …) still works in caret focus mode — only
+`hjkl`/`w`/`e`/`b`/`<Esc>` change meaning. Scroll and page-jump commands
+additionally carry the caret to the top of the newly visible content; zoom
+leaves it in place. The status bar shows `-- CARET FOCUS --` with the
+current line and column. See `docs/commands-caret-focus-mode.md` for the
+full list.
 
 Customize caret-focus-mode keys with a `[caret_focus_keys]` table (see
 `docs/config.md`); it overlays the normal bindings while caret focus mode is

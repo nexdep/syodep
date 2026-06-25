@@ -11,6 +11,10 @@ Counts work here too (`5l`, `3j`).
 
 ## Caret motion
 
+Word motions use Vim-like lowercase boundaries: letters/digits/underscore
+form word runs, punctuation/symbols form separate runs, whitespace is
+skipped, and each image is a single stop.
+
 | Command | Effect | Count |
 |---|---|---|
 | `caret_focus_exit` | leave caret focus mode (the caret position is remembered) | — |
@@ -18,17 +22,21 @@ Counts work here too (`5l`, `3j`).
 | `caret_focus_right` | move the caret one character right (wraps to the next line/page) | repeats N times |
 | `caret_focus_up` | move the caret one line up, keeping its column | repeats N times |
 | `caret_focus_down` | move the caret one line down, keeping its column | repeats N times |
+| `caret_focus_next_word` | move to the start of the next word run | repeats N times |
+| `caret_focus_end_word` | move to the end of the current word run, or the next run if already at an end | repeats N times |
+| `caret_focus_prev_word` | move to the start of the current word run, or the previous run if already at a start | repeats N times |
 
 The view auto-scrolls to keep the caret on screen as it moves.
 
 ## Inherited view commands
 
 Every normal-mode command stays available in caret focus mode with its
-normal binding — only `hjkl`, the arrow keys and `<Esc>` are remapped (to
-caret motion / exit). So the page-scroll, page-navigation and zoom commands
-below all work here too. (The plain line-scroll commands `scroll_down` /
-`scroll_up` / `scroll_left` / `scroll_right` are *not* reachable from the
-keyboard, since their default `hjkl`/arrow bindings move the caret instead.)
+normal binding — only `hjkl`, `w`/`e`/`b`, the arrow keys and `<Esc>` are
+remapped (to caret motion / exit). So the page-scroll, page-navigation and
+zoom commands below all work here too. (The plain line-scroll commands
+`scroll_down` / `scroll_up` / `scroll_left` / `scroll_right` are *not*
+reachable from the keyboard, since their default `hjkl`/arrow bindings move
+the caret instead.)
 
 **Scroll and page jumps reposition the caret.** After any of these
 commands, the caret jumps to the top-most content now visible in the window,
