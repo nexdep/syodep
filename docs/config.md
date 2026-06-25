@@ -54,13 +54,14 @@ Keybindings that apply only in **caret focus mode** (entered with `cc`). They
 overlay the normal `[keys]` while caret focus mode is active, so `hjkl`/`<Esc>`
 can mean caret motions there while every other binding keeps its normal
 behavior. Like `[keys]`, entries overlay the defaults — list only changes.
-Defaults: `h`/`j`/`k`/`l` (and the arrow keys) move the caret, `<Esc>` exits.
-See `docs/keybindings.md` for the full description and `docs/commands.md`
-for the `caret_focus_*` command names.
+Defaults: `h`/`j`/`k`/`l` (and the arrow keys) move the caret,
+`w`/`e`/`b` move by word runs, and `<Esc>` exits. See
+`docs/keybindings.md` for the full description and `docs/commands.md` for
+the `caret_focus_*` command names.
 
 ```toml
 [caret_focus_keys]
-"w" = "caret_focus_right"   # extra binding, only in caret focus mode
+"x" = "caret_focus_right"   # extra binding, only in caret focus mode
 ```
 
 ## Planned config sections

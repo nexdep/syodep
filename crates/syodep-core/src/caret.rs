@@ -13,7 +13,7 @@
 //! page boundaries, scrolling the caret into view) lives in [`crate::app`],
 //! which holds the document and the layout.
 
-use syodep_pdf::Cell;
+use syodep_pdf::{Cell, CellKind};
 
 /// Whether `hjkl` scroll the page or move the caret.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -41,6 +41,46 @@ pub enum Dir {
     Right,
     Up,
     Down,
+}
+
+/// A cell's class for Vim-like lowercase word motions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WordClass {
+    /// Letters, digits and `_`.
+    Word,
+    /// Non-whitespace punctuation and symbols.
+    Punctuation,
+    /// Whitespace is skipped by word motions.
+    Whitespace,
+    /// Images are single word-like stops.
+    Image,
+}
+
+/// Classify a cell for `w`/`e`/`b` caret motion.
+pub fn word_class(cell: &Cell) -> WordClass {
+    match cell.kind {
+        CellKind::Char(c) if c.is_alphanumeric() || c == '_' => WordClass::Word,
+        CellKind::Char(c) if c.is_whitespace() => WordClass::Whitespace,
+        CellKind::Char(_) => WordClass::Punctuation,
+        CellKind::Image => WordClass::Image,
+    }
+}
+
+/// Whether this class is a place word motions can land.
+pub fn is_word_target(class: WordClass) -> bool {
+    !matches!(class, WordClass::Whitespace)
+}
+
+/// Whether two adjacent cells are part of the same word-motion run.
+///
+/// Runs never continue across line/page boundaries, whitespace is skipped, and
+/// each image is its own stop even when images are adjacent.
+pub fn continues_word_run(left: WordClass, right: WordClass, same_line: bool) -> bool {
+    same_line
+        && matches!(
+            (left, right),
+            (WordClass::Word, WordClass::Word) | (WordClass::Punctuation, WordClass::Punctuation)
+        )
 }
 
 /// Index of the cell whose horizontal extent is nearest `goal_x` (the
@@ -73,9 +113,9 @@ mod tests {
     use super::*;
     use syodep_pdf::{CellKind, Rect};
 
-    fn char_cell(x0: f32, x1: f32) -> Cell {
+    fn char_cell_at(c: char, x0: f32, x1: f32) -> Cell {
         Cell {
-            kind: CellKind::Char('x'),
+            kind: CellKind::Char(c),
             bbox: Rect {
                 x0,
                 y0: 0.0,
@@ -83,6 +123,73 @@ mod tests {
                 y1: 10.0,
             },
         }
+    }
+
+    fn char_cell(x0: f32, x1: f32) -> Cell {
+        char_cell_at('x', x0, x1)
+    }
+
+    fn image_cell() -> Cell {
+        Cell {
+            kind: CellKind::Image,
+            bbox: Rect {
+                x0: 0.0,
+                y0: 0.0,
+                x1: 10.0,
+                y1: 10.0,
+            },
+        }
+    }
+
+    #[test]
+    fn word_class_identifies_word_cells() {
+        assert_eq!(word_class(&char_cell_at('a', 0.0, 1.0)), WordClass::Word);
+        assert_eq!(word_class(&char_cell_at('9', 0.0, 1.0)), WordClass::Word);
+        assert_eq!(word_class(&char_cell_at('_', 0.0, 1.0)), WordClass::Word);
+    }
+
+    #[test]
+    fn word_class_identifies_skips_and_single_stops() {
+        assert_eq!(
+            word_class(&char_cell_at(' ', 0.0, 1.0)),
+            WordClass::Whitespace
+        );
+        assert_eq!(
+            word_class(&char_cell_at('-', 0.0, 1.0)),
+            WordClass::Punctuation
+        );
+        assert_eq!(word_class(&image_cell()), WordClass::Image);
+
+        assert!(!is_word_target(WordClass::Whitespace));
+        assert!(is_word_target(WordClass::Word));
+        assert!(is_word_target(WordClass::Punctuation));
+        assert!(is_word_target(WordClass::Image));
+    }
+
+    #[test]
+    fn word_runs_respect_class_and_boundaries() {
+        assert!(continues_word_run(WordClass::Word, WordClass::Word, true));
+        assert!(continues_word_run(
+            WordClass::Punctuation,
+            WordClass::Punctuation,
+            true
+        ));
+        assert!(!continues_word_run(
+            WordClass::Word,
+            WordClass::Punctuation,
+            true
+        ));
+        assert!(!continues_word_run(WordClass::Word, WordClass::Word, false));
+        assert!(!continues_word_run(
+            WordClass::Image,
+            WordClass::Image,
+            true
+        ));
+        assert!(!continues_word_run(
+            WordClass::Whitespace,
+            WordClass::Whitespace,
+            true
+        ));
     }
 
     #[test]

@@ -68,12 +68,13 @@ input take plain data). Key pieces:
   position after every navigation command and on drop.
 - **Caret** (`caret.rs` + `app.rs`): a modal cursor over page-content
   geometry. A `Mode` selects which keymap drives input — normal `hjkl`
-  scrolling, or caret motion where `h`/`l` step characters and `j`/`k` step
-  lines (keeping a goal column) through text and image cells, auto-scrolling
-  the caret into view. The caret keymap is the normal keymap plus the
-  `[caret_focus_keys]` overrides, so every other command still works in caret focus mode.
+  scrolling, or caret motion where `h`/`l` step characters, `w`/`e`/`b` step
+  word runs, and `j`/`k` step lines (keeping a goal column) through text and
+  image cells, auto-scrolling the caret into view. The caret keymap is the
+  normal keymap plus the `[caret_focus_keys]` overrides, so every other
+  command still works in caret focus mode.
   Extracted page content is cached per page in the session; the pure
-  goal-column cell picker lives in `caret.rs`.
+  goal-column and word-boundary helpers live in `caret.rs`.
 
 ### syodep-pdf
 

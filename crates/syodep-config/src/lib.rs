@@ -128,6 +128,9 @@ pub fn default_caret_focus_keybindings() -> BTreeMap<String, String> {
         ("j", "caret_focus_down"),
         ("k", "caret_focus_up"),
         ("l", "caret_focus_right"),
+        ("w", "caret_focus_next_word"),
+        ("e", "caret_focus_end_word"),
+        ("b", "caret_focus_prev_word"),
         ("<Left>", "caret_focus_left"),
         ("<Down>", "caret_focus_down"),
         ("<Up>", "caret_focus_up"),
@@ -267,7 +270,15 @@ mod tests {
             config.caret_focus_keys.get("j").map(String::as_str),
             Some("caret_focus_down")
         );
-        // User addition is merged in.
+        assert_eq!(
+            config.caret_focus_keys.get("e").map(String::as_str),
+            Some("caret_focus_end_word")
+        );
+        assert_eq!(
+            config.caret_focus_keys.get("b").map(String::as_str),
+            Some("caret_focus_prev_word")
+        );
+        // User override is merged in.
         assert_eq!(
             config.caret_focus_keys.get("w").map(String::as_str),
             Some("caret_focus_right")

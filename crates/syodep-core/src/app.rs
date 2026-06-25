@@ -18,7 +18,10 @@ use syodep_config::Config;
 use syodep_pdf::{Bitmap, ContentLine, Rect};
 use syodep_storage::{Position, Storage};
 
-use crate::caret::{nearest_cell_in_line, Caret, Dir, Mode};
+use crate::caret::{
+    continues_word_run, is_word_target, nearest_cell_in_line, word_class, Caret, Dir, Mode,
+    WordClass,
+};
 use crate::command::Command;
 use crate::input::{InputState, KeyOutcome, Keymap, KeymapError};
 use crate::layout::{DocumentLayout, PageSize, ScreenRect, View};
@@ -48,6 +51,13 @@ impl Effects {
 pub struct VisiblePage {
     pub page: usize,
     pub rect: ScreenRect,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WordMotion {
+    NextStart,
+    End,
+    PrevStart,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -290,6 +300,13 @@ impl App {
             Command::CaretFocusRight => return self.caret_move(Dir::Right, count),
             Command::CaretFocusUp => return self.caret_move(Dir::Up, count),
             Command::CaretFocusDown => return self.caret_move(Dir::Down, count),
+            Command::CaretFocusNextWord => {
+                return self.caret_word_move(WordMotion::NextStart, count)
+            }
+            Command::CaretFocusEndWord => return self.caret_word_move(WordMotion::End, count),
+            Command::CaretFocusPrevWord => {
+                return self.caret_word_move(WordMotion::PrevStart, count)
+            }
             _ => {}
         }
 
@@ -330,7 +347,10 @@ impl App {
             | Command::CaretFocusLeft
             | Command::CaretFocusRight
             | Command::CaretFocusUp
-            | Command::CaretFocusDown => unreachable!("handled above"),
+            | Command::CaretFocusDown
+            | Command::CaretFocusNextWord
+            | Command::CaretFocusEndWord
+            | Command::CaretFocusPrevWord => unreachable!("handled above"),
         }
         // In caret focus mode, scroll and page jumps carry the caret to the
         // newly visible content; zoom commands leave it where it is.
@@ -517,6 +537,31 @@ impl App {
         Effects::redraw()
     }
 
+    fn caret_word_move(&mut self, motion: WordMotion, count: Option<u32>) -> Effects {
+        if self.session.is_none() {
+            return Effects::default();
+        }
+        let Some(mut caret) = self.caret else {
+            return self.enter_caret_focus();
+        };
+        let steps = count.unwrap_or(1).max(1);
+        for _ in 0..steps {
+            let moved = match motion {
+                WordMotion::NextStart => self.step_next_word_start(&mut caret),
+                WordMotion::End => self.step_word_end(&mut caret),
+                WordMotion::PrevStart => self.step_prev_word_start(&mut caret),
+            };
+            if !moved {
+                break;
+            }
+        }
+        self.caret = Some(caret);
+        self.update_goal_x(caret);
+        self.ensure_caret_visible();
+        self.save_position();
+        Effects::redraw()
+    }
+
     /// After a scroll or page jump in caret focus mode, move the caret to the
     /// top-most content line now visible, keeping its goal column. Unlike caret
     /// motion this does *not* scroll the view back, so the caret follows the
@@ -632,6 +677,158 @@ impl App {
         false
     }
 
+    fn word_class_at(&mut self, caret: Caret) -> Option<WordClass> {
+        self.ensure_content(caret.page);
+        self.content(caret.page)
+            .get(caret.line)
+            .and_then(|line| line.cells.get(caret.cell))
+            .map(word_class)
+    }
+
+    fn next_cell(&mut self, caret: Caret) -> Option<Caret> {
+        let mut next = caret;
+        self.step_right(&mut next).then_some(next)
+    }
+
+    fn prev_cell(&mut self, caret: Caret) -> Option<Caret> {
+        let mut prev = caret;
+        self.step_left(&mut prev).then_some(prev)
+    }
+
+    fn same_word_run(&mut self, left: Caret, right: Caret) -> bool {
+        let Some(left_class) = self.word_class_at(left) else {
+            return false;
+        };
+        let Some(right_class) = self.word_class_at(right) else {
+            return false;
+        };
+        continues_word_run(
+            left_class,
+            right_class,
+            left.page == right.page && left.line == right.line,
+        )
+    }
+
+    fn next_word_target_from(&mut self, mut caret: Caret) -> Option<Caret> {
+        loop {
+            if is_word_target(self.word_class_at(caret)?) {
+                return Some(caret);
+            }
+            caret = self.next_cell(caret)?;
+        }
+    }
+
+    fn prev_word_target_from(&mut self, mut caret: Caret) -> Option<Caret> {
+        loop {
+            if is_word_target(self.word_class_at(caret)?) {
+                return Some(caret);
+            }
+            caret = self.prev_cell(caret)?;
+        }
+    }
+
+    fn word_run_end(&mut self, mut caret: Caret) -> Caret {
+        while let Some(next) = self.next_cell(caret) {
+            if !self.same_word_run(caret, next) {
+                break;
+            }
+            caret = next;
+        }
+        caret
+    }
+
+    fn word_run_start(&mut self, mut caret: Caret) -> Caret {
+        while let Some(prev) = self.prev_cell(caret) {
+            if !self.same_word_run(prev, caret) {
+                break;
+            }
+            caret = prev;
+        }
+        caret
+    }
+
+    fn step_next_word_start(&mut self, caret: &mut Caret) -> bool {
+        let Some(current_class) = self.word_class_at(*caret) else {
+            return false;
+        };
+        let mut pos = *caret;
+        if is_word_target(current_class) {
+            loop {
+                let Some(next) = self.next_cell(pos) else {
+                    return false;
+                };
+                pos = next;
+                if !self.same_word_run(*caret, pos) {
+                    break;
+                }
+            }
+        } else {
+            let Some(next) = self.next_cell(pos) else {
+                return false;
+            };
+            pos = next;
+        }
+        let Some(target) = self.next_word_target_from(pos) else {
+            return false;
+        };
+        *caret = target;
+        true
+    }
+
+    fn step_word_end(&mut self, caret: &mut Caret) -> bool {
+        let Some(current_class) = self.word_class_at(*caret) else {
+            return false;
+        };
+        let target = if is_word_target(current_class) {
+            let end = self.word_run_end(*caret);
+            if end != *caret {
+                *caret = end;
+                return true;
+            }
+            let Some(next) = self.next_cell(*caret) else {
+                return false;
+            };
+            self.next_word_target_from(next)
+        } else {
+            let Some(next) = self.next_cell(*caret) else {
+                return false;
+            };
+            self.next_word_target_from(next)
+        };
+        let Some(target) = target else {
+            return false;
+        };
+        *caret = self.word_run_end(target);
+        true
+    }
+
+    fn step_prev_word_start(&mut self, caret: &mut Caret) -> bool {
+        let Some(current_class) = self.word_class_at(*caret) else {
+            return false;
+        };
+        let target = if is_word_target(current_class) {
+            let start = self.word_run_start(*caret);
+            if start != *caret {
+                *caret = start;
+                return true;
+            }
+            let Some(prev) = self.prev_cell(*caret) else {
+                return false;
+            };
+            self.prev_word_target_from(prev)
+        } else {
+            let Some(prev) = self.prev_cell(*caret) else {
+                return false;
+            };
+            self.prev_word_target_from(prev)
+        };
+        let Some(target) = target else {
+            return false;
+        };
+        *caret = self.word_run_start(target);
+        true
+    }
+
     fn update_goal_x(&mut self, caret: Caret) {
         if let Some(r) = self.cell_rect(caret.page, caret.line, caret.cell) {
             self.caret_goal_x = (r.x0 + r.x1) / 2.0;
@@ -744,14 +941,21 @@ impl Drop for App {
 mod tests {
     use super::*;
     use syodep_config::keys::parse_sequence;
-    use syodep_pdf::test_support::pdf_with_pages;
+    use syodep_pdf::{
+        test_support::{pdf_with_image, pdf_with_pages},
+        CellKind,
+    };
+
+    fn write_pdf_bytes(dir: &Path, name: &str, bytes: Vec<u8>) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
 
     fn write_test_pdf(dir: &Path, pages: usize) -> PathBuf {
         let texts: Vec<String> = (1..=pages).map(|i| format!("Page {i} text")).collect();
         let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
-        let path = dir.join("doc.pdf");
-        std::fs::write(&path, pdf_with_pages(&refs)).unwrap();
-        path
+        write_pdf_bytes(dir, "doc.pdf", pdf_with_pages(&refs))
     }
 
     fn app_with_doc(dir: &Path, pages: usize) -> App {
@@ -761,12 +965,108 @@ mod tests {
         app
     }
 
+    fn app_with_text_pages(dir: &Path, page_texts: &[&str]) -> App {
+        let mut app = App::new(Config::default(), Some(Storage::in_memory().unwrap()));
+        app.set_viewport_size(595.0, 600.0);
+        let path = write_pdf_bytes(dir, "text.pdf", pdf_with_pages(page_texts));
+        app.open_document(&path).unwrap();
+        app
+    }
+
+    fn escape_pdf_text(text: &str) -> String {
+        text.replace('\\', "\\\\")
+            .replace('(', "\\(")
+            .replace(')', "\\)")
+    }
+
+    fn pdf_with_two_lines(first: &str, second: &str) -> Vec<u8> {
+        let total_objects = 5;
+        let mut buf: Vec<u8> = b"%PDF-1.4\n".to_vec();
+        let mut offsets: Vec<usize> = vec![0; total_objects + 1];
+
+        let write_obj = |buf: &mut Vec<u8>, offsets: &mut Vec<usize>, num: usize, body: &[u8]| {
+            offsets[num] = buf.len();
+            buf.extend_from_slice(format!("{num} 0 obj\n").as_bytes());
+            buf.extend_from_slice(body);
+            buf.extend_from_slice(b"\nendobj\n");
+        };
+
+        write_obj(
+            &mut buf,
+            &mut offsets,
+            1,
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+        );
+        write_obj(
+            &mut buf,
+            &mut offsets,
+            2,
+            b"<< /Type /Pages /Kids [4 0 R] /Count 1 >>",
+        );
+        write_obj(
+            &mut buf,
+            &mut offsets,
+            3,
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        );
+        write_obj(
+            &mut buf,
+            &mut offsets,
+            4,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] \
+              /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R >>",
+        );
+        let stream = format!(
+            "BT /F1 24 Tf 72 750 Td ({}) Tj ET\nBT /F1 24 Tf 72 710 Td ({}) Tj ET",
+            escape_pdf_text(first),
+            escape_pdf_text(second)
+        );
+        write_obj(
+            &mut buf,
+            &mut offsets,
+            5,
+            format!(
+                "<< /Length {} >>\nstream\n{stream}\nendstream",
+                stream.len()
+            )
+            .as_bytes(),
+        );
+
+        let xref_offset = buf.len();
+        buf.extend_from_slice(format!("xref\n0 {}\n", total_objects + 1).as_bytes());
+        buf.extend_from_slice(b"0000000000 65535 f \n");
+        for offset in &offsets[1..] {
+            buf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        buf.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n",
+                total_objects + 1
+            )
+            .as_bytes(),
+        );
+        buf
+    }
+
+    fn app_with_two_line_pdf(dir: &Path, first: &str, second: &str) -> App {
+        let mut app = App::new(Config::default(), Some(Storage::in_memory().unwrap()));
+        app.set_viewport_size(595.0, 600.0);
+        let path = write_pdf_bytes(dir, "two-lines.pdf", pdf_with_two_lines(first, second));
+        app.open_document(&path).unwrap();
+        app
+    }
+
     fn press(app: &mut App, sequence: &str) -> Effects {
         let mut effects = Effects::default();
         for chord in parse_sequence(sequence).unwrap() {
             effects = app.handle_key(chord);
         }
         effects
+    }
+
+    fn assert_caret(app: &App, page: usize, line: usize, cell: usize) {
+        let caret = app.caret().unwrap();
+        assert_eq!((caret.page, caret.line, caret.cell), (page, line, cell));
     }
 
     #[test]
@@ -1083,6 +1383,87 @@ mod tests {
         assert_eq!(app.caret().unwrap(), before);
         press(&mut app, "zw"); // fit_width does not move the caret
         assert_eq!(app.caret().unwrap(), before);
+    }
+
+    #[test]
+    fn caret_next_word_skips_current_run_and_whitespace() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta-gamma"]);
+        press(&mut app, "cc");
+        press(&mut app, "w");
+        assert_caret(&app, 0, 0, 6);
+    }
+
+    #[test]
+    fn caret_end_word_uses_current_then_next_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta"]);
+        press(&mut app, "cc");
+        press(&mut app, "e");
+        assert_caret(&app, 0, 0, 4);
+        press(&mut app, "e");
+        assert_caret(&app, 0, 0, 9);
+    }
+
+    #[test]
+    fn caret_prev_word_uses_current_then_previous_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta"]);
+        press(&mut app, "cc");
+        press(&mut app, "8l");
+        assert_caret(&app, 0, 0, 8);
+        press(&mut app, "b");
+        assert_caret(&app, 0, 0, 6);
+        press(&mut app, "b");
+        assert_caret(&app, 0, 0, 0);
+    }
+
+    #[test]
+    fn caret_word_counts_cross_lines_and_pages() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_two_line_pdf(dir.path(), "one two", "three four");
+        press(&mut app, "cc");
+        press(&mut app, "2w");
+        assert_caret(&app, 0, 1, 0);
+
+        let page_dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(page_dir.path(), &["one two", "three four"]);
+        press(&mut app, "cc");
+        press(&mut app, "2w");
+        assert_caret(&app, 1, 0, 0);
+    }
+
+    #[test]
+    fn caret_word_motions_clamp_at_document_edges() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["one"]);
+        press(&mut app, "cc");
+        press(&mut app, "b");
+        assert_caret(&app, 0, 0, 0);
+        press(&mut app, "e");
+        assert_caret(&app, 0, 0, 2);
+        press(&mut app, "e");
+        assert_caret(&app, 0, 0, 2);
+        press(&mut app, "w");
+        assert_caret(&app, 0, 0, 2);
+    }
+
+    #[test]
+    fn caret_word_motion_treats_images_as_single_stops() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(Config::default(), Some(Storage::in_memory().unwrap()));
+        app.set_viewport_size(595.0, 600.0);
+        let path = write_pdf_bytes(dir.path(), "image.pdf", pdf_with_image());
+        app.open_document(&path).unwrap();
+
+        press(&mut app, "cc");
+        press(&mut app, "w");
+        let image = app.caret().unwrap();
+        let cell =
+            &app.session.as_ref().unwrap().content[&image.page][image.line].cells[image.cell];
+        assert_eq!(cell.kind, CellKind::Image);
+        press(&mut app, "b");
+        assert_caret(&app, 0, 0, 0);
     }
 
     #[test]

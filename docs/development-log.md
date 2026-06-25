@@ -7,6 +7,30 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-06-25 — Caret word motions
+
+### Implemented
+
+- **Word motions in caret focus mode** (`syodep-core`): added
+  `caret_focus_next_word`, `caret_focus_end_word` and
+  `caret_focus_prev_word`, bound by default to `w`, `e` and `b` in
+  `[caret_focus_keys]`. Motions use Vim-like lowercase word runs:
+  letters/digits/underscore together, punctuation/symbols as separate runs,
+  whitespace skipped, line/page boundaries splitting runs, and each image as
+  one word-like stop. Counts repeat the motion; the caret goal column is
+  refreshed after landing and the view scrolls to keep the caret visible.
+- **Docs/config**: command docs, default keybindings and the caret-focus
+  config example now include the word-motion bindings.
+
+### Tests
+
+- Pure `caret.rs` tests cover word classification, skipped whitespace,
+  punctuation runs, line-boundary splitting and image single-stop behavior.
+- App-level tests cover `w`, `e`, `b`, repeated counts across lines/pages,
+  document-edge clamping and image cells as word-motion stops.
+
+---
+
 ## 2026-06-25 — Navigation commands in caret focus mode
 
 ### Implemented
