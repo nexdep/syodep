@@ -14,6 +14,7 @@
 
 #include <cstdio>
 
+#include "diagnostics.h"
 #include "main_window.h"
 #include "syodep_ffi.h"
 
@@ -65,21 +66,53 @@ int runSmokeTest(const QString &pdfPath)
 
 int main(int argc, char *argv[])
 {
-    QApplication app(argc, argv);
+    // These are static and safe to set before the QApplication exists; the
+    // version reporters below read them without needing a display.
     QApplication::setApplicationName(QStringLiteral("syodep"));
     QApplication::setApplicationVersion(QStringLiteral("0.2.0"));
+
+    // Decide and apply graphics fallbacks (software GL, X11 on WSL, ...) before
+    // the QApplication is constructed — Qt locks the platform plugin and GL
+    // backend in at that point. Silent on a normal launch; `--check` reports it.
+    const syodep::diag::PlatformInfo platform = syodep::diag::detectPlatform();
+    const syodep::diag::GraphicsDecision decision =
+        syodep::diag::decideFallbacks(platform);
+    syodep::diag::applyFallbacks(decision);
+
+    // --version needs neither a display nor a GL context, so handle it before
+    // constructing QApplication (which would pull in the platform plugin).
+    for (int i = 1; i < argc; ++i) {
+        const QByteArray arg(argv[i]);
+        if (arg == "--version" || arg == "-v") {
+            std::fputs(qPrintable(syodep::diag::buildVersionReport(platform)), stdout);
+            return 0;
+        }
+    }
+
+    QApplication app(argc, argv);
 
     QCommandLineParser parser;
     parser.setApplicationDescription(
         QStringLiteral("keyboard-first academic PDF reader"));
     parser.addHelpOption();
-    parser.addVersionOption();
+    // Listed for --help; the actual handling happens before QApplication above.
+    QCommandLineOption versionOption({QStringLiteral("v"), QStringLiteral("version")},
+                                     QStringLiteral("show version information and exit"));
+    parser.addOption(versionOption);
+    QCommandLineOption checkOption(QStringLiteral("check"),
+                                   QStringLiteral("print graphics/config diagnostics and exit"));
+    parser.addOption(checkOption);
     parser.addPositionalArgument(QStringLiteral("file"),
                                  QStringLiteral("PDF document to open"));
     QCommandLineOption smokeOption(QStringLiteral("smoke-test"),
                                    QStringLiteral("render one frame and exit"));
     parser.addOption(smokeOption);
     parser.process(app);
+
+    if (parser.isSet(checkOption)) {
+        std::fputs(qPrintable(syodep::diag::buildCheckReport(platform, decision)), stdout);
+        return 0;
+    }
 
     const QStringList args = parser.positionalArguments();
 

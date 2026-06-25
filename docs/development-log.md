@@ -7,6 +7,55 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-06-25 — Graphics diagnostics & WSL auto-fallback (0.3.0)
+
+### Implemented
+
+- **Self-diagnosing graphics startup** (`ui-qt/src/diagnostics.{h,cpp}`): a new
+  module that detects the host platform (OS, WSL via `WSL_DISTRO_NAME` or
+  `/proc/version`, GPU passthrough via `/dev/dxg`, X11/Wayland display env) and,
+  **before the `QApplication` is constructed**, applies safe fallbacks: on WSL
+  it forces `QT_QPA_PLATFORM=xcb` when a display is present (the WSLg
+  wayland-egl client buffer integration is routinely empty) and
+  `Qt::AA_UseSoftwareOpenGL` when there is no GPU passthrough. Any user-set
+  `QT_QPA_PLATFORM`/`LIBGL_ALWAYS_SOFTWARE`/`QT_OPENGL` is respected and left
+  untouched. Silent on a normal launch.
+- **`syodep --check`**: prints platform detection, the selected Qt platform
+  plugin and the reason, a live OpenGL probe (offscreen context →
+  `GL_RENDERER`/`GL_VERSION`, so software `llvmpipe` is visible), the config
+  file path with loaded/not-found state plus parse warnings
+  (`syo_app_startup_warnings`), and version info; then exits.
+- **Extended `syodep --version`**: shell, core, Qt, platform and build-type
+  lines instead of the bare name+version. Handled before `QApplication`, so it
+  needs no display.
+- **FFI**: added `syo_core_version()` (`crates/syodep-ffi/src/lib.rs`) returning
+  the core crate version; freed with the existing `syo_string_free`.
+
+### Why
+
+Launching in WSL crashed with `wayland-egl` integration failures and
+`QOpenGLWidget: Failed to create context`, because the canvas is a
+`QOpenGLWidget` requiring a GL context the WSLg environment could not provide.
+The app now degrades automatically instead of failing, and `--check` makes the
+active graphics path inspectable.
+
+### Tests
+
+- `QT_QPA_PLATFORM=offscreen ./build/ui-qt/syodep --smoke-test f.pdf` still
+  passes; `--version` and `--check` exercised manually (offscreen for the GL
+  probe in headless CI). Detection logic is pure and reads only env/filesystem
+  signals.
+
+### Decisions
+
+- Fallback selection is **heuristic**, not a live GPU probe: Qt locks the
+  platform plugin and GL backend at `QApplication` construction, so there is no
+  context to probe at decision time.
+- `Qt::AA_UseSoftwareOpenGL` is the cross-platform software switch (Mesa
+  llvmpipe on Linux, `opengl32sw` on Windows); the `xcb` override is Linux-only.
+
+---
+
 ## 2026-06-25 — Caret word motions
 
 ### Implemented

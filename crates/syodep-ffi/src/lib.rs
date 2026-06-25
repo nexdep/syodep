@@ -443,6 +443,13 @@ pub unsafe extern "C" fn syo_string_free(s: *mut c_char) {
     }
 }
 
+/// Version of the core library (the Rust workspace crate). Free with
+/// `syo_string_free`. Reported by the shell's `--version`/`--check`.
+#[no_mangle]
+pub extern "C" fn syo_core_version() -> *mut c_char {
+    to_c_string(env!("CARGO_PKG_VERSION").to_string())
+}
+
 /// Default config file path for this platform (may not exist yet).
 /// Free with `syo_string_free`.
 #[no_mangle]
