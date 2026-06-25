@@ -27,11 +27,11 @@ pub struct Config {
     /// Parsed and validated into a keymap by `syodep-core`.
     #[serde(default)]
     pub keys: BTreeMap<String, String>,
-    /// Caret-mode keybindings (the `[caret_keys]` table). These overlay the
-    /// normal `keys` while caret mode is active, so `hjkl`/`<Esc>` can mean
+    /// Caret-focus-mode keybindings (the `[caret_focus_keys]` table). These overlay
+    /// the normal `keys` while caret focus mode is active, so `hjkl`/`<Esc>` can mean
     /// something different there while every other binding still works.
     #[serde(default)]
-    pub caret_keys: BTreeMap<String, String>,
+    pub caret_focus_keys: BTreeMap<String, String>,
 }
 
 /// `[view]` section: rendering and navigation tunables.
@@ -74,7 +74,7 @@ impl Default for Config {
         Self {
             view: ViewConfig::default(),
             keys: default_keybindings(),
-            caret_keys: default_caret_keybindings(),
+            caret_focus_keys: default_caret_focus_keybindings(),
         }
     }
 }
@@ -107,7 +107,7 @@ pub fn default_keybindings() -> BTreeMap<String, String> {
         ("-", "zoom_out"),
         ("zw", "fit_width"),
         ("z0", "zoom_reset"),
-        ("c", "caret_enter"),
+        ("cc", "caret_focus_enter"),
         ("o", "open_file"),
         ("q", "quit"),
         ("<Esc>", "cancel"),
@@ -117,22 +117,22 @@ pub fn default_keybindings() -> BTreeMap<String, String> {
     .collect()
 }
 
-/// Built-in caret-mode keybindings (the `[caret_keys]` table). These overlay
-/// the normal bindings while caret mode is active: `hjkl` move the caret and
-/// `<Esc>` leaves caret mode, while everything else keeps its normal meaning.
+/// Built-in caret-focus-mode keybindings (the `[caret_focus_keys]` table). These overlay
+/// the normal bindings while caret focus mode is active: `hjkl` move the caret and
+/// `<Esc>` leaves caret focus mode, while everything else keeps its normal meaning.
 ///
 /// Every entry here must be documented in `docs/keybindings.md`.
-pub fn default_caret_keybindings() -> BTreeMap<String, String> {
+pub fn default_caret_focus_keybindings() -> BTreeMap<String, String> {
     [
-        ("h", "caret_left"),
-        ("j", "caret_down"),
-        ("k", "caret_up"),
-        ("l", "caret_right"),
-        ("<Left>", "caret_left"),
-        ("<Down>", "caret_down"),
-        ("<Up>", "caret_up"),
-        ("<Right>", "caret_right"),
-        ("<Esc>", "caret_exit"),
+        ("h", "caret_focus_left"),
+        ("j", "caret_focus_down"),
+        ("k", "caret_focus_up"),
+        ("l", "caret_focus_right"),
+        ("<Left>", "caret_focus_left"),
+        ("<Down>", "caret_focus_down"),
+        ("<Up>", "caret_focus_up"),
+        ("<Right>", "caret_focus_right"),
+        ("<Esc>", "caret_focus_exit"),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_owned(), v.to_owned()))
@@ -162,9 +162,9 @@ impl Config {
         let mut keys = default_keybindings();
         keys.extend(std::mem::take(&mut config.keys));
         config.keys = keys;
-        let mut caret_keys = default_caret_keybindings();
-        caret_keys.extend(std::mem::take(&mut config.caret_keys));
-        config.caret_keys = caret_keys;
+        let mut caret_focus_keys = default_caret_focus_keybindings();
+        caret_focus_keys.extend(std::mem::take(&mut config.caret_focus_keys));
+        config.caret_focus_keys = caret_focus_keys;
         Ok(config)
     }
 
@@ -250,32 +250,32 @@ mod tests {
     }
 
     #[test]
-    fn caret_keys_default_and_user_override() {
+    fn caret_focus_keys_default_and_user_override() {
         let config = Config::from_toml(
             r#"
-            [caret_keys]
-            "w" = "caret_right"
+            [caret_focus_keys]
+            "w" = "caret_focus_right"
             "#,
         )
         .unwrap();
         // Built-in caret bindings survive.
         assert_eq!(
-            config.caret_keys.get("h").map(String::as_str),
-            Some("caret_left")
+            config.caret_focus_keys.get("h").map(String::as_str),
+            Some("caret_focus_left")
         );
         assert_eq!(
-            config.caret_keys.get("j").map(String::as_str),
-            Some("caret_down")
+            config.caret_focus_keys.get("j").map(String::as_str),
+            Some("caret_focus_down")
         );
         // User addition is merged in.
         assert_eq!(
-            config.caret_keys.get("w").map(String::as_str),
-            Some("caret_right")
+            config.caret_focus_keys.get("w").map(String::as_str),
+            Some("caret_focus_right")
         );
-        // The enter binding lives in the normal table.
+        // The enter binding (`cc`) lives in the normal table.
         assert_eq!(
-            config.keys.get("c").map(String::as_str),
-            Some("caret_enter")
+            config.keys.get("cc").map(String::as_str),
+            Some("caret_focus_enter")
         );
     }
 

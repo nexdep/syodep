@@ -57,11 +57,11 @@ Zoom:
 | `zw` | `fit_width` |
 | `z0` | `zoom_reset` |
 
-Caret (see "Caret mode" below):
+Caret (see "Caret focus mode" below):
 
 | Keys | Command |
 |---|---|
-| `c` | `caret_enter` |
+| `cc` | `caret_focus_enter` |
 
 Application:
 
@@ -74,29 +74,32 @@ Application:
 The mouse wheel (and horizontal trackpad scrolling) also scrolls the view;
 this is a convenience, not the primary workflow.
 
-## Caret mode
+## Caret focus mode
 
 syodep has two input modes. In **normal mode** (the default) `hjkl` scroll
-the page. Press `c` (`caret_enter`) to switch to **caret mode**, where a
+the page. Press `cc` (`caret_focus_enter`) to switch to **caret focus mode**, where a
 cursor moves through the document's content — text characters and images:
 
 | Keys | Command |
 |---|---|
-| `h`, `<Left>` | `caret_left` — one character left |
-| `l`, `<Right>` | `caret_right` — one character right |
-| `k`, `<Up>` | `caret_up` — one line up (keeps the column) |
-| `j`, `<Down>` | `caret_down` — one line down (keeps the column) |
-| `<Esc>` | `caret_exit` — back to normal mode |
+| `h`, `<Left>` | `caret_focus_left` — one character left |
+| `l`, `<Right>` | `caret_focus_right` — one character right |
+| `k`, `<Up>` | `caret_focus_up` — one line up (keeps the column) |
+| `j`, `<Down>` | `caret_focus_down` — one line down (keeps the column) |
+| `<Esc>` | `caret_focus_exit` — back to normal mode |
 
 `h`/`l` step character by character and wrap across lines and pages; `j`/`k`
 move line by line, keeping a goal column like a text editor. Each image is a
 single caret stop. The view scrolls to keep the caret visible, and counts
-work (`5l`, `3j`). Every other binding (zoom, page navigation, `q`, `o`, …)
-still works in caret mode — only `hjkl`/`<Esc>` change meaning. The status
-bar shows `-- CARET --` with the current line and column.
+work (`5l`, `3j`). Every other binding (page scroll, page navigation, zoom,
+`q`, `o`, …) still works in caret focus mode — only `hjkl`/`<Esc>` change
+meaning. Scroll and page-jump commands additionally carry the caret to the
+top of the newly visible content; zoom leaves it in place. The status bar
+shows `-- CARET FOCUS --` with the current line and column. See
+`docs/commands-caret-focus-mode.md` for the full list.
 
-Customize caret-mode keys with a `[caret_keys]` table (see
-`docs/config.md`); it overlays the normal bindings while caret mode is
+Customize caret-focus-mode keys with a `[caret_focus_keys]` table (see
+`docs/config.md`); it overlays the normal bindings while caret focus mode is
 active. The caret is the foundation for selection, highlighting and search
 in later phases (`docs/roadmap.md`).
 

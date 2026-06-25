@@ -19,6 +19,8 @@ required_docs=(
     docs/architecture.md
     docs/development-log.md
     docs/commands.md
+    docs/commands-normal-mode.md
+    docs/commands-caret-focus-mode.md
     docs/keybindings.md
     docs/config.md
     docs/testing.md
@@ -29,9 +31,11 @@ for doc in "${required_docs[@]}"; do
     [ -s "$doc" ] || err "missing or empty: $doc"
 done
 
-# Every command name in ALL_COMMANDS must appear in docs/commands.md.
+# Every command name in ALL_COMMANDS must appear on a per-mode commands page
+# (docs/commands.md is the index; the tables live in the per-mode pages).
+command_docs=(docs/commands-normal-mode.md docs/commands-caret-focus-mode.md)
 while IFS= read -r command; do
-    grep -q "\`$command\`" docs/commands.md || err "command not documented: $command"
+    grep -q "\`$command\`" "${command_docs[@]}" || err "command not documented: $command"
 done < <(grep -oP '^\s*\("\K[a-z0-9_]+(?=",)' crates/syodep-core/src/command.rs)
 
 # Every default binding's command in default_keybindings() must appear in
@@ -40,12 +44,12 @@ while IFS= read -r binding; do
     grep -qF "$binding" docs/keybindings.md || err "default keybinding not documented: $binding"
 done < <(grep -oP '^\s*\("\K[^"]+(?=", ")' crates/syodep-config/src/lib.rs)
 
-# Every caret-mode binding's command (default_caret_keybindings) must appear
-# in docs/keybindings.md, so the caret mode stays documented.
+# Every caret-focus binding's command (default_caret_focus_keybindings) must
+# appear in docs/keybindings.md, so caret focus mode stays documented.
 while IFS= read -r command; do
     grep -q "\`$command\`" docs/keybindings.md \
         || err "caret keybinding command not documented: $command"
-done < <(awk '/pub fn default_caret_keybindings/,/^}/' crates/syodep-config/src/lib.rs \
+done < <(awk '/pub fn default_caret_focus_keybindings/,/^}/' crates/syodep-config/src/lib.rs \
     | grep -oP '", "\K[a-z_]+(?="\))')
 
 # Every [view] config field must appear in docs/config.md.

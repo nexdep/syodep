@@ -36,9 +36,9 @@ background = "#1e1e1e"
 # "J"     = "scroll_half_page_down"   # example override
 # "<C-o>" = "open_file"               # example addition
 
-# Caret-mode keybindings (active after pressing "c" to enter caret mode).
-# These overlay the normal [keys] while caret mode is active: h/j/k/l move
+# Caret-focus-mode keybindings (active after pressing "cc" to enter caret focus mode).
+# These overlay the normal [keys] while caret focus mode is active: h/j/k/l move
 # the caret (h/l by character, j/k by line) and <Esc> exits. Every other
 # binding keeps its normal meaning. See docs/keybindings.md.
-[caret_keys]
-# "w" = "caret_right"                 # example addition (caret mode only)
+[caret_focus_keys]
+# "w" = "caret_focus_right"           # example addition (caret focus mode only)

@@ -7,6 +7,39 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-06-25 — Navigation commands in caret focus mode
+
+### Implemented
+
+- **View commands carry the caret** (`syodep-core`): the page-scroll
+  (`scroll_half_page_down/up`, `scroll_page_down/up`), page-navigation
+  (`next_page`, `prev_page`, `goto_first_page`, `goto_last_page`) and zoom
+  (`zoom_in/out`, `fit_width`, `zoom_reset`) commands are now first-class in
+  caret focus mode. They were already *reachable* there (the caret-focus
+  keymap is the normal keymap plus the `[caret_focus_keys]` overlay, which
+  only remaps `hjkl`/arrows/`<Esc>`, so no clashes), but the caret stayed
+  put. Now scroll and page jumps reposition the caret to the top-most content
+  visible in the new viewport, keeping its goal column; zoom leaves the caret
+  in place. New `App::reposition_caret_to_viewport` + `topmost_visible_line`
+  hook into `App::execute` after the view mutates (`app.rs`); they reuse
+  `View::scroll`, `DocumentLayout::page_at_y`/`page`, and `ContentLine::bbox`.
+- **Per-mode command docs**: `docs/commands.md` is now an index linking
+  `docs/commands-normal-mode.md` and `docs/commands-caret-focus-mode.md`. The
+  caret-focus page documents the inherited view commands and the
+  reposition/zoom behavior. `scripts/check-docs.sh` greps command names
+  against the per-mode pages (and its caret check now follows the renamed
+  `default_caret_focus_keybindings`).
+
+### Tests
+
+- `caret_focus_page_jumps_carry_the_caret` (J/K/G/gg move the caret onto the
+  destination page), `caret_focus_page_scroll_advances_the_caret` (`<C-f>`
+  advances the caret), `caret_focus_zoom_leaves_the_caret_in_place`
+  (`+`/`zw` keep the caret), and an extended
+  `caret_focus_keeps_non_hjkl_bindings`.
+
+---
+
 ## 2026-06-17 — AppImage Qt platform plugin bundling
 
 ### Implemented
@@ -89,21 +122,21 @@ GitHub Actions dependency graph on the next push.
   default stext flags). Image vs text blocks are discriminated via
   `block.image()`/`block.lines()` since `TextBlockType` is not re-exported by
   the bindings.
-- **Modal caret** (`syodep-core`): a new `Mode { Normal, Caret }` plus a
+- **Modal caret** (`syodep-core`): a new `Mode { Normal, CaretFocus }` plus a
   `caret.rs` module (position, direction, goal-column cell picker). `c`
-  enters caret mode; `h`/`l` move the caret character-wise (wrapping across
+  enters caret focus mode; `h`/`l` move the caret character-wise (wrapping across
   lines/pages), `j`/`k` line-wise keeping a goal column; `<Esc>` exits. Each
   image is a single stop. The view auto-scrolls to keep the caret visible
   (`View::scroll_doc_rect_into_view`), and page content is cached per page in
   the session. The caret keymap is the normal keymap cloned with the
-  `[caret_keys]` overrides applied (`Keymap::overlay`), so every other
-  binding still works in caret mode and normal-binding errors are reported
+  `[caret_focus_keys]` overrides applied (`Keymap::overlay`), so every other
+  binding still works in caret focus mode and normal-binding errors are reported
   once.
-- **Config**: new `[caret_keys]` table (`h/j/k/l`/arrows + `<Esc>` defaults)
-  and a `c = caret_enter` default in `[keys]`.
+- **Config**: new `[caret_focus_keys]` table (`h/j/k/l`/arrows + `<Esc>` defaults)
+  and a `cc = caret_focus_enter` default in `[keys]`.
 - **FFI/shell**: `SyoCaret` + `syo_app_caret` project the caret rect (canvas
   pixels) across the C ABI; `CanvasWidget::paintGL` draws a translucent
-  accent box with a border. The status bar shows `-- CARET --  Ln L, Col C`.
+  accent box with a border. The status bar shows `-- CARET FOCUS --  Ln L, Col C`.
 
 ### Test strategy
 
@@ -112,8 +145,8 @@ TDD for the pure pieces: `caret.rs` goal-column picker; `View`
 extraction including an image cell from a new `pdf_with_image` fixture
 (generated, not checked in). App-level integration tests cover enter/exit,
 character/line motion, page wrapping, goal-column preservation across pages,
-counts, and that non-`hjkl` bindings still work in caret mode. The FFI
-round-trip test enters caret mode, moves, and exits. 104 tests total (was
+counts, and that non-`hjkl` bindings still work in caret focus mode. The FFI
+round-trip test enters caret focus mode, moves, and exits. 104 tests total (was
 88); Qt shell covered by compile + offscreen smoke test as before.
 
 ### Decisions (details in `docs/architecture.md`, row 11)
@@ -121,7 +154,7 @@ round-trip test enters caret mode, moves, and exits. 104 tests total (was
 - Modal caret (mode-selected keymap) over an always-on caret: keeps `hjkl`
   scrolling intact and matches the existing Vim-like modal design.
 - One caret stop per image; goal-column vertical motion like a text editor.
-- `page_content` runs only in caret mode and is cached, so plain reading is
+- `page_content` runs only in caret focus mode and is cached, so plain reading is
   unaffected.
 
 ### Known limitations / next steps

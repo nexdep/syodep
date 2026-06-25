@@ -58,7 +58,7 @@ impl Keymap {
 
     /// Bind additional `(key sequence, command name)` pairs onto an existing
     /// keymap, overwriting any sequence that resolves identically. Used to
-    /// build the caret-mode keymap as the normal keymap plus a few overrides,
+    /// build the caret-focus keymap as the normal keymap plus a few overrides,
     /// so normal-binding errors are validated (and reported) only once.
     /// Returns the errors found in *these* entries only.
     pub fn overlay<'a, I>(&mut self, entries: I) -> Vec<KeymapError>

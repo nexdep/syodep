@@ -71,7 +71,7 @@ input take plain data). Key pieces:
   scrolling, or caret motion where `h`/`l` step characters and `j`/`k` step
   lines (keeping a goal column) through text and image cells, auto-scrolling
   the caret into view. The caret keymap is the normal keymap plus the
-  `[caret_keys]` overrides, so every other command still works in caret mode.
+  `[caret_focus_keys]` overrides, so every other command still works in caret focus mode.
   Extracted page content is cached per page in the session; the pure
   goal-column cell picker lives in `caret.rs`.
 

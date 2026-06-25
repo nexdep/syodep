@@ -2,7 +2,7 @@
 //! content (text characters and images) independently of scrolling.
 //!
 //! The caret is *modal*: the app is either in [`Mode::Normal`] (where `hjkl`
-//! scroll the page) or [`Mode::Caret`] (where `hjkl` move the caret — `h`/`l`
+//! scroll the page) or [`Mode::CaretFocus`] (where `hjkl` move the caret — `h`/`l`
 //! by character, `j`/`k` by line — and the view auto-scrolls to follow it).
 //! Each image is a single caret stop, so the caret traverses text and images
 //! uniformly.
@@ -21,8 +21,8 @@ pub enum Mode {
     /// `hjkl` scroll the page (the original behavior).
     #[default]
     Normal,
-    /// `hjkl` move the caret; the view follows it.
-    Caret,
+    /// Caret focus mode: `hjkl` move the caret; the view follows it.
+    CaretFocus,
 }
 
 /// A caret position: a cell within a line within a page. All indices are

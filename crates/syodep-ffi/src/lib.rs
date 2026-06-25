@@ -63,7 +63,7 @@ pub struct SyoVisiblePage {
 }
 
 /// The caret rectangle in canvas pixels, for the overlay the shell paints.
-/// `valid` is 0 when not in caret mode or no caret is placed, in which case
+/// `valid` is 0 when not in caret focus mode or no caret is placed, in which case
 /// the remaining fields are unspecified.
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -523,9 +523,12 @@ mod tests {
             assert!(!(*bitmap).data.is_null());
             syo_bitmap_free(bitmap);
 
-            // Caret: inactive until entered, then valid and movable.
+            // Caret focus: inactive until entered with `cc`, then valid and movable.
             assert_eq!(syo_app_caret(app).valid, 0);
             let c_key = CString::new("c").unwrap();
+            // `cc` is a two-key sequence: one `c` is pending, the second enters.
+            syo_app_key_event(app, c_key.as_ptr());
+            assert_eq!(syo_app_caret(app).valid, 0);
             syo_app_key_event(app, c_key.as_ptr());
             let caret0 = syo_app_caret(app);
             assert_eq!(caret0.valid, 1);
@@ -535,7 +538,7 @@ mod tests {
             assert_eq!(caret1.valid, 1);
             // Moving right does not move the caret left.
             assert!(caret1.x >= caret0.x);
-            // Leaving caret mode hides the overlay again.
+            // Leaving caret focus mode hides the overlay again.
             let esc = CString::new("<Esc>").unwrap();
             syo_app_key_event(app, esc.as_ptr());
             assert_eq!(syo_app_caret(app).valid, 0);

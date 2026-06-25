@@ -108,7 +108,7 @@ void CanvasWidget::paintGL()
         painter.drawImage(target, image);
     }
 
-    // Caret overlay (only present in caret mode). The core returns its rect in
+    // Caret overlay (only present in caret focus mode). The core returns its rect in
     // canvas pixels; we draw a translucent fill plus a solid border.
     const SyoCaret caret = syo_app_caret(m_app);
     if (caret.valid) {

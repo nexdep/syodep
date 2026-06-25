@@ -31,7 +31,9 @@ for what to build next.
 ## Definition of done (enforced by CI)
 
 A feature is complete only when implemented, tested, and documented:
-commands in `docs/commands.md`, default bindings in `docs/keybindings.md`,
+commands in the per-mode pages indexed by `docs/commands.md`
+(`docs/commands-normal-mode.md`, `docs/commands-caret-focus-mode.md`),
+default bindings in `docs/keybindings.md`,
 config options in `docs/config.md` (the `docs` CI job greps source registries
 against these files — `scripts/check-docs.sh`), plus a dev-log entry for the
 milestone. TDD for core logic; if TDD is impractical, state the test

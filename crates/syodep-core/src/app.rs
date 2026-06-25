@@ -73,9 +73,9 @@ struct Session {
 pub struct App {
     config: Config,
     keymap: Keymap,
-    /// Keymap used while in caret mode: the normal keymap plus the
-    /// `[caret_keys]` overrides (so `hjkl`/`<Esc>` change meaning there).
-    caret_keymap: Keymap,
+    /// Keymap used while in caret focus mode: the normal keymap plus the
+    /// `[caret_focus_keys]` overrides (so `hjkl`/`<Esc>` change meaning there).
+    caret_focus_keymap: Keymap,
     input: InputState,
     storage: Option<Storage>,
     session: Option<Session>,
@@ -98,21 +98,21 @@ impl App {
     pub fn new(config: Config, storage: Option<Storage>) -> Self {
         let entries = config.keys.iter().map(|(k, v)| (k.as_str(), v.as_str()));
         let (keymap, mut keymap_errors) = Keymap::from_entries(entries);
-        // The caret keymap is the normal keymap with the caret-mode overrides
-        // applied, so every normal binding still works in caret mode and only
-        // the overridden keys (hjkl/<Esc>) change meaning. Cloning then
+        // The caret keymap is the normal keymap with the caret-focus overrides
+        // applied, so every normal binding still works in caret focus mode and
+        // only the overridden keys (hjkl/<Esc>) change meaning. Cloning then
         // overlaying avoids re-validating (and double-reporting) normal keys.
-        let mut caret_keymap = keymap.clone();
+        let mut caret_focus_keymap = keymap.clone();
         let caret_entries = config
-            .caret_keys
+            .caret_focus_keys
             .iter()
             .map(|(k, v)| (k.as_str(), v.as_str()));
-        keymap_errors.extend(caret_keymap.overlay(caret_entries));
+        keymap_errors.extend(caret_focus_keymap.overlay(caret_entries));
         let startup_warnings = keymap_errors.iter().map(KeymapError::to_string).collect();
         Self {
             config,
             keymap,
-            caret_keymap,
+            caret_focus_keymap,
             input: InputState::new(),
             storage,
             session: None,
@@ -248,7 +248,7 @@ impl App {
     pub fn handle_key(&mut self, chord: Chord) -> Effects {
         let keymap = match self.mode {
             Mode::Normal => &self.keymap,
-            Mode::Caret => &self.caret_keymap,
+            Mode::CaretFocus => &self.caret_focus_keymap,
         };
         match self.input.handle(keymap, chord) {
             // Redraw on pending input so the status line shows it.
@@ -281,15 +281,15 @@ impl App {
                 };
             }
             Command::Cancel => return Effects::redraw(),
-            Command::CaretEnter => return self.enter_caret_mode(),
-            Command::CaretExit => {
+            Command::CaretFocusEnter => return self.enter_caret_focus(),
+            Command::CaretFocusExit => {
                 self.mode = Mode::Normal;
                 return Effects::redraw();
             }
-            Command::CaretLeft => return self.caret_move(Dir::Left, count),
-            Command::CaretRight => return self.caret_move(Dir::Right, count),
-            Command::CaretUp => return self.caret_move(Dir::Up, count),
-            Command::CaretDown => return self.caret_move(Dir::Down, count),
+            Command::CaretFocusLeft => return self.caret_move(Dir::Left, count),
+            Command::CaretFocusRight => return self.caret_move(Dir::Right, count),
+            Command::CaretFocusUp => return self.caret_move(Dir::Up, count),
+            Command::CaretFocusDown => return self.caret_move(Dir::Down, count),
             _ => {}
         }
 
@@ -325,12 +325,28 @@ impl App {
             Command::Quit
             | Command::OpenFile
             | Command::Cancel
-            | Command::CaretEnter
-            | Command::CaretExit
-            | Command::CaretLeft
-            | Command::CaretRight
-            | Command::CaretUp
-            | Command::CaretDown => unreachable!("handled above"),
+            | Command::CaretFocusEnter
+            | Command::CaretFocusExit
+            | Command::CaretFocusLeft
+            | Command::CaretFocusRight
+            | Command::CaretFocusUp
+            | Command::CaretFocusDown => unreachable!("handled above"),
+        }
+        // In caret focus mode, scroll and page jumps carry the caret to the
+        // newly visible content; zoom commands leave it where it is.
+        let moves_caret = matches!(
+            command,
+            Command::ScrollHalfPageDown
+                | Command::ScrollHalfPageUp
+                | Command::ScrollPageDown
+                | Command::ScrollPageUp
+                | Command::NextPage
+                | Command::PrevPage
+                | Command::GotoFirstPage
+                | Command::GotoLastPage
+        );
+        if self.mode == Mode::CaretFocus && moves_caret {
+            self.reposition_caret_to_viewport();
         }
         self.save_position();
         Effects::redraw()
@@ -448,11 +464,11 @@ impl App {
         (0..before).rev().find(|&p| self.page_line_count(p) > 0)
     }
 
-    fn enter_caret_mode(&mut self) -> Effects {
+    fn enter_caret_focus(&mut self) -> Effects {
         if self.session.is_none() {
             return Effects::default();
         }
-        self.mode = Mode::Caret;
+        self.mode = Mode::CaretFocus;
         if self.caret.is_none() {
             let start = self.current_page();
             if let Some(page) = self.content_page_from(start) {
@@ -476,7 +492,7 @@ impl App {
         }
         // No caret yet (e.g. entered on an empty document): try to place one.
         let Some(mut caret) = self.caret else {
-            return self.enter_caret_mode();
+            return self.enter_caret_focus();
         };
         let steps = count.unwrap_or(1).max(1);
         let goal_x = self.caret_goal_x;
@@ -499,6 +515,47 @@ impl App {
         self.ensure_caret_visible();
         self.save_position();
         Effects::redraw()
+    }
+
+    /// After a scroll or page jump in caret focus mode, move the caret to the
+    /// top-most content line now visible, keeping its goal column. Unlike caret
+    /// motion this does *not* scroll the view back, so the caret follows the
+    /// scroll rather than fighting it.
+    fn reposition_caret_to_viewport(&mut self) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        let view_top = session.view.scroll().1;
+        let goal_x = self.caret_goal_x;
+        if let Some((page, line)) = self.topmost_visible_line(view_top) {
+            let cell = self.nearest_cell(page, line, goal_x);
+            self.caret = Some(Caret { page, line, cell });
+        }
+    }
+
+    /// The first content line whose bottom edge is at or below `view_top`
+    /// (document space), scanning from the page under the viewport top. Falls
+    /// back to the last content line when the view is scrolled past all
+    /// content; `None` only when the document has no content at all.
+    fn topmost_visible_line(&mut self, view_top: f32) -> Option<(usize, usize)> {
+        let page_count = self.session.as_ref()?.view.layout().page_count();
+        let start = self.session.as_ref()?.view.layout().page_at_y(view_top);
+        let mut fallback = None;
+        for page in start..page_count {
+            self.ensure_content(page);
+            let page_top = self.session.as_ref()?.view.layout().page(page)?.y;
+            let lines = self.content(page);
+            for (line, content) in lines.iter().enumerate() {
+                if content.cells.is_empty() {
+                    continue;
+                }
+                fallback = Some((page, line));
+                if page_top + content.bbox.y1 >= view_top {
+                    return Some((page, line));
+                }
+            }
+        }
+        fallback
     }
 
     fn step_right(&mut self, caret: &mut Caret) -> bool {
@@ -605,9 +662,9 @@ impl App {
     }
 
     /// The caret's rectangle in canvas pixels, with its page. `None` outside
-    /// caret mode or when no caret is placed. The shell paints this overlay.
+    /// caret focus mode or when no caret is placed. The shell paints this overlay.
     pub fn caret_screen_rect(&self) -> Option<(usize, ScreenRect)> {
-        if self.mode != Mode::Caret {
+        if self.mode != Mode::CaretFocus {
             return None;
         }
         let caret = self.caret?;
@@ -644,8 +701,8 @@ impl App {
             }
             None => out.push_str("no document - press 'o' to open a PDF"),
         }
-        if self.mode == Mode::Caret {
-            out.push_str("  -- CARET --");
+        if self.mode == Mode::CaretFocus {
+            out.push_str("  -- CARET FOCUS --");
             if let Some(caret) = self.caret {
                 out.push_str(&format!("  Ln {}, Col {}", caret.line + 1, caret.cell + 1));
             }
@@ -890,12 +947,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_doc(dir.path(), 3);
         assert_eq!(app.mode(), Mode::Normal);
+        // A single `c` is only the first half of the `cc` sequence: still
+        // pending, so the mode does not change yet.
         press(&mut app, "c");
-        assert_eq!(app.mode(), Mode::Caret);
+        assert_eq!(app.mode(), Mode::Normal);
+        // The second `c` completes `cc` and enters caret focus mode.
+        press(&mut app, "c");
+        assert_eq!(app.mode(), Mode::CaretFocus);
         let caret = app.caret().expect("caret placed");
         assert_eq!((caret.page, caret.line, caret.cell), (0, 0, 0));
         assert!(app.caret_screen_rect().is_some());
-        assert!(app.status_text().contains("-- CARET --"));
+        assert!(app.status_text().contains("-- CARET FOCUS --"));
         assert!(app.status_text().contains("Ln 1, Col 1"));
     }
 
@@ -903,7 +965,7 @@ mod tests {
     fn caret_right_advances_chars_then_wraps_to_next_page() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_doc(dir.path(), 3);
-        press(&mut app, "c");
+        press(&mut app, "cc");
         // A few steps stay on the first line (the page's only line of text).
         press(&mut app, "3l");
         let caret = app.caret().unwrap();
@@ -923,7 +985,7 @@ mod tests {
     fn caret_left_at_document_start_is_clamped() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_doc(dir.path(), 2);
-        press(&mut app, "c");
+        press(&mut app, "cc");
         press(&mut app, "h");
         let caret = app.caret().unwrap();
         assert_eq!((caret.page, caret.line, caret.cell), (0, 0, 0));
@@ -933,7 +995,7 @@ mod tests {
     fn caret_vertical_crosses_pages_keeping_column() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_doc(dir.path(), 3);
-        press(&mut app, "c");
+        press(&mut app, "cc");
         press(&mut app, "3l"); // column 4 (cell index 3)
                                // Each page has a single line, so `j` crosses to the next page.
         press(&mut app, "j");
@@ -954,8 +1016,8 @@ mod tests {
     fn caret_exit_restores_scrolling() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_doc(dir.path(), 3);
-        press(&mut app, "c");
-        assert_eq!(app.mode(), Mode::Caret);
+        press(&mut app, "cc");
+        assert_eq!(app.mode(), Mode::CaretFocus);
         press(&mut app, "<Esc>");
         assert_eq!(app.mode(), Mode::Normal);
         assert!(app.caret_screen_rect().is_none());
@@ -967,19 +1029,66 @@ mod tests {
     }
 
     #[test]
-    fn caret_mode_keeps_non_hjkl_bindings() {
+    fn caret_focus_keeps_non_hjkl_bindings() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_doc(dir.path(), 5);
-        press(&mut app, "c");
-        // `G` still navigates pages while in caret mode.
+        press(&mut app, "cc");
+        // `G` still navigates pages while in caret focus mode, and the caret
+        // follows to the newly visible page.
         press(&mut app, "G");
         assert_eq!(app.current_page(), 4);
+        assert_eq!(app.caret().unwrap().page, 4);
+    }
+
+    #[test]
+    fn caret_focus_page_jumps_carry_the_caret() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_doc(dir.path(), 5);
+        press(&mut app, "cc");
+        assert_eq!(app.caret().unwrap().page, 0);
+        // Next/prev page move the caret onto the destination page.
+        press(&mut app, "J");
+        assert_eq!(app.caret().unwrap().page, 1);
+        press(&mut app, "K");
+        assert_eq!(app.caret().unwrap().page, 0);
+        // Goto last / first page (G / gg) likewise.
+        press(&mut app, "G");
+        assert_eq!(app.caret().unwrap().page, 4);
+        press(&mut app, "gg");
+        assert_eq!(app.caret().unwrap().page, 0);
+    }
+
+    #[test]
+    fn caret_focus_page_scroll_advances_the_caret() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_doc(dir.path(), 5);
+        press(&mut app, "cc");
+        let start = app.caret().unwrap().page;
+        // A full page-down scroll (<C-f>) carries the caret to later content.
+        press(&mut app, "<C-f>");
+        assert!(
+            app.caret().unwrap().page > start,
+            "caret should advance past page {start}"
+        );
+    }
+
+    #[test]
+    fn caret_focus_zoom_leaves_the_caret_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_doc(dir.path(), 3);
+        press(&mut app, "cc");
+        press(&mut app, "3l"); // move within the line
+        let before = app.caret().unwrap();
+        press(&mut app, "+"); // zoom_in does not move the caret
+        assert_eq!(app.caret().unwrap(), before);
+        press(&mut app, "zw"); // fit_width does not move the caret
+        assert_eq!(app.caret().unwrap(), before);
     }
 
     #[test]
     fn caret_without_document_does_not_crash() {
         let mut app = App::new(Config::default(), None);
-        press(&mut app, "c");
+        press(&mut app, "cc");
         assert!(app.caret_screen_rect().is_none());
         press(&mut app, "l");
         assert!(app.caret().is_none());
