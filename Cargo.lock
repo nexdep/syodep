@@ -969,7 +969,7 @@ dependencies = [
 
 [[package]]
 name = "syodep-config"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "serde",
  "tempfile",
@@ -979,7 +979,7 @@ dependencies = [
 
 [[package]]
 name = "syodep-core"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "syodep-config",
  "syodep-pdf",
@@ -990,7 +990,7 @@ dependencies = [
 
 [[package]]
 name = "syodep-ffi"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "cbindgen",
  "syodep-config",
@@ -1002,7 +1002,7 @@ dependencies = [
 
 [[package]]
 name = "syodep-pdf"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "mupdf",
  "tempfile",
@@ -1011,7 +1011,7 @@ dependencies = [
 
 [[package]]
 name = "syodep-storage"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "rusqlite",
  "sha2",

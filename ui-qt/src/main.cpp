@@ -67,7 +67,7 @@ int main(int argc, char *argv[])
 {
     QApplication app(argc, argv);
     QApplication::setApplicationName(QStringLiteral("syodep"));
-    QApplication::setApplicationVersion(QStringLiteral("0.1.1"));
+    QApplication::setApplicationVersion(QStringLiteral("0.2.0"));
 
     QCommandLineParser parser;
     parser.setApplicationDescription(
