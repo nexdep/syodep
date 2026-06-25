@@ -64,6 +64,20 @@ the `caret_focus_*` command names.
 "x" = "caret_focus_right"   # extra binding, only in caret focus mode
 ```
 
+## `[line_focus_keys]`
+
+Keybindings that apply only in **line focus mode** (entered with `cl`). They
+overlay the normal `[keys]` while line focus mode is active, mirroring
+`[caret_focus_keys]`. Defaults: `j`/`k` (and `<Up>`/`<Down>`) move the
+highlight line-wise, `h`/`l` (and `<Left>`/`<Right>`) move between columns,
+`<Esc>` exits. See `docs/keybindings.md` for the full description and
+`docs/commands.md` for the `line_focus_*` command names.
+
+```toml
+[line_focus_keys]
+"w" = "line_focus_right"   # extra binding, only in line focus mode
+```
+
 ## Planned config sections
 
 Later phases add: theme/colors beyond the background, annotation

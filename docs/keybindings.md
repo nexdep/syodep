@@ -62,6 +62,7 @@ Caret (see "Caret focus mode" below):
 | Keys | Command |
 |---|---|
 | `cc` | `caret_focus_enter` |
+| `cl` | `line_focus_enter` |
 
 Application:
 
@@ -108,6 +109,32 @@ Customize caret-focus-mode keys with a `[caret_focus_keys]` table (see
 `docs/config.md`); it overlays the normal bindings while caret focus mode is
 active. The caret is the foundation for selection, highlighting and search
 in later phases (`docs/roadmap.md`).
+
+## Line focus mode
+
+Press `cl` (`line_focus_enter`) to switch to **line focus mode**, where a
+whole content line is highlighted:
+
+| Keys | Command |
+|---|---|
+| `h`, `<Left>` | `line_focus_left` — previous column (multi-column pages) |
+| `l`, `<Right>` | `line_focus_right` — next column (multi-column pages) |
+| `k`, `<Up>` | `line_focus_up` — one line up |
+| `j`, `<Down>` | `line_focus_down` — one line down |
+| `<Esc>` | `line_focus_exit` — back to normal mode |
+
+`j`/`k` move the highlight line by line, wrapping across pages; `h`/`l` move
+between columns when the page has two or more, keeping the current row (a
+no-op on single-column pages). The view scrolls to keep the highlighted line
+visible, and counts work (`3j`). As in caret focus mode, every other binding
+still works — only `hjkl`/`<Esc>` change meaning — and scroll / page-jump
+commands carry the highlight to the top of the newly visible content while
+zoom leaves it in place. The status bar shows `-- LINE FOCUS --` with the
+current line. See `docs/commands-line-focus-mode.md` for the full list.
+
+Customize line-focus-mode keys with a `[line_focus_keys]` table (see
+`docs/config.md`); it overlays the normal bindings while line focus mode is
+active.
 
 ## Customizing
 

@@ -316,6 +316,39 @@ pub unsafe extern "C" fn syo_app_caret(app: *const SyoApp) -> SyoCaret {
     .unwrap_or(invalid)
 }
 
+/// The line-focus rectangle (canvas pixels) for the overlay. Reuses the
+/// [`SyoCaret`] layout; `valid` is 0 unless line focus mode is active with a
+/// line marked.
+///
+/// # Safety
+/// `app` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn syo_app_line(app: *const SyoApp) -> SyoCaret {
+    let invalid = SyoCaret {
+        valid: 0,
+        page: 0,
+        x: 0.0,
+        y: 0.0,
+        width: 0.0,
+        height: 0.0,
+    };
+    let Some(app) = (unsafe { app.as_ref() }) else {
+        return invalid;
+    };
+    catch_unwind(AssertUnwindSafe(|| match app.app.line_screen_rect() {
+        Some((page, rect)) => SyoCaret {
+            valid: 1,
+            page,
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+        },
+        None => invalid,
+    }))
+    .unwrap_or(invalid)
+}
+
 /// Render a page at the current zoom. Returns NULL on failure. The result
 /// must be freed with `syo_bitmap_free`.
 ///
@@ -542,6 +575,16 @@ mod tests {
             let esc = CString::new("<Esc>").unwrap();
             syo_app_key_event(app, esc.as_ptr());
             assert_eq!(syo_app_caret(app).valid, 0);
+
+            // Line focus: inactive until entered with `cl`, then valid; `<Esc>`
+            // hides it again.
+            assert_eq!(syo_app_line(app).valid, 0);
+            syo_app_key_event(app, c_key.as_ptr());
+            assert_eq!(syo_app_line(app).valid, 0);
+            syo_app_key_event(app, l_key.as_ptr());
+            assert_eq!(syo_app_line(app).valid, 1);
+            syo_app_key_event(app, esc.as_ptr());
+            assert_eq!(syo_app_line(app).valid, 0);
 
             // Out-of-range render fails cleanly.
             let bad = syo_app_render_page(app, 99);

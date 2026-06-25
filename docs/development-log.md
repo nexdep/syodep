@@ -31,6 +31,46 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-06-25 — Line focus mode
+
+### Implemented
+
+- **Line focus mode** (`syodep-core`): a third input mode (`Mode::LineFocus`)
+  alongside Normal and CaretFocus, entered with `cl` (`line_focus_enter`) and
+  left with `<Esc>`. It highlights a whole content line (`ContentLine.bbox`);
+  `j`/`k` move the highlight line by line, wrapping across pages, and `h`/`l`
+  move between columns on multi-column pages. It mirrors the caret machinery at
+  line granularity: a `LineMark { page, line }` position, a `line_focus_keymap`
+  (normal keymap overlaid with `[line_focus_keys]`), `enter_line_focus` /
+  `line_move` / `line_step_up`/`down` / `line_step_column`, viewport-follow via
+  `reposition_line_to_viewport` (reusing `topmost_visible_line`),
+  `ensure_line_visible`, and `line_screen_rect`. Scroll/page jumps carry the
+  highlight; zoom leaves it in place — same rules as the caret.
+- **Column detection** (`caret.rs`, pure + unit-tested): `column_ranges`
+  greedily clusters a page's line bboxes into disjoint horizontal bands;
+  `column_index_of` maps a line to its column; `nearest_line_in_column` is the
+  goal-row analogue of `nearest_cell_in_line` so `h`/`l` keep the vertical
+  position. `h`/`l` are a no-op on single-column pages and edge columns.
+- **Entry binding `cl`, not `ll`**: `ll` would make a lone `l` ambiguous (both a
+  binding and a prefix), breaking `l` scrolling and caret-right. `cl` reuses the
+  prefix-only `c` focus family (`cc` caret, `cl` line) with no collisions.
+- **FFI + Qt**: `syo_app_line` returns the highlight rect (reusing `SyoCaret`'s
+  layout); the Qt canvas paints it as a translucent amber band, distinct from
+  the blue caret. Header regenerates via cbindgen.
+- **Docs**: new `docs/commands-line-focus-mode.md`; `[line_focus_keys]` in
+  `docs/config.md`; line-focus section in `docs/keybindings.md`;
+  `scripts/check-docs.sh` extended to cover the new page and bindings.
+
+### Tests
+
+A two-column PDF fixture (`test_support::pdf_two_column_page`) plus core tests:
+enter/mark/status, vertical page crossing, exit restores scrolling, inherited
+bindings carry the mark, `h`/`l` no-op on single column and jump columns on the
+fixture; FFI validity test for `syo_app_line`; pure tests for the three column
+helpers.
+
+---
+
 ## 2026-06-25 — Navigation commands in caret focus mode
 
 ### Implemented

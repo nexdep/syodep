@@ -121,6 +121,21 @@ void CanvasWidget::paintGL()
         painter.setBrush(Qt::NoBrush);
         painter.drawRect(box);
     }
+
+    // Line-focus overlay (only present in line focus mode). Same translucent
+    // fill plus border as the caret, in a distinct accent so the two modes are
+    // visually distinguishable.
+    const SyoCaret line = syo_app_line(m_app);
+    if (line.valid) {
+        QRectF box(line.x / dpr, line.y / dpr, line.width / dpr, line.height / dpr);
+        if (box.height() < 2.0)
+            box.setHeight(2.0); // keep zero-height lines visible
+        const QColor accent(255, 170, 60);
+        painter.fillRect(box, QColor(255, 170, 60, 70));
+        painter.setPen(accent);
+        painter.setBrush(Qt::NoBrush);
+        painter.drawRect(box);
+    }
 }
 
 } // namespace syodep

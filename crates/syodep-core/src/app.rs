@@ -19,8 +19,8 @@ use syodep_pdf::{Bitmap, ContentLine, Rect};
 use syodep_storage::{Position, Storage};
 
 use crate::caret::{
-    continues_word_run, is_word_target, nearest_cell_in_line, word_class, Caret, Dir, Mode,
-    WordClass,
+    column_index_of, column_ranges, continues_word_run, is_word_target, nearest_cell_in_line,
+    nearest_line_in_column, word_class, Caret, Dir, LineMark, Mode, WordClass,
 };
 use crate::command::Command;
 use crate::input::{InputState, KeyOutcome, Keymap, KeymapError};
@@ -86,6 +86,9 @@ pub struct App {
     /// Keymap used while in caret focus mode: the normal keymap plus the
     /// `[caret_focus_keys]` overrides (so `hjkl`/`<Esc>` change meaning there).
     caret_focus_keymap: Keymap,
+    /// Keymap used while in line focus mode: the normal keymap plus the
+    /// `[line_focus_keys]` overrides.
+    line_focus_keymap: Keymap,
     input: InputState,
     storage: Option<Storage>,
     session: Option<Session>,
@@ -96,6 +99,10 @@ pub struct App {
     caret: Option<Caret>,
     /// Remembered goal column (page-space x) for vertical caret motion.
     caret_goal_x: f32,
+    /// Current line-focus position, remembered across mode toggles.
+    line_mark: Option<LineMark>,
+    /// Remembered goal row (page-space y center) for horizontal column motion.
+    line_goal_y: f32,
     /// Config/keymap problems collected at startup, for the UI to surface.
     startup_warnings: Vec<String>,
     last_error: Option<String>,
@@ -118,11 +125,19 @@ impl App {
             .iter()
             .map(|(k, v)| (k.as_str(), v.as_str()));
         keymap_errors.extend(caret_focus_keymap.overlay(caret_entries));
+        // The line-focus keymap is built the same way, from `[line_focus_keys]`.
+        let mut line_focus_keymap = keymap.clone();
+        let line_entries = config
+            .line_focus_keys
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()));
+        keymap_errors.extend(line_focus_keymap.overlay(line_entries));
         let startup_warnings = keymap_errors.iter().map(KeymapError::to_string).collect();
         Self {
             config,
             keymap,
             caret_focus_keymap,
+            line_focus_keymap,
             input: InputState::new(),
             storage,
             session: None,
@@ -130,6 +145,8 @@ impl App {
             mode: Mode::Normal,
             caret: None,
             caret_goal_x: 0.0,
+            line_mark: None,
+            line_goal_y: 0.0,
             startup_warnings,
             last_error: None,
         }
@@ -202,6 +219,8 @@ impl App {
         self.mode = Mode::Normal;
         self.caret = None;
         self.caret_goal_x = 0.0;
+        self.line_mark = None;
+        self.line_goal_y = 0.0;
         self.last_error = None;
         Ok(())
     }
@@ -259,6 +278,7 @@ impl App {
         let keymap = match self.mode {
             Mode::Normal => &self.keymap,
             Mode::CaretFocus => &self.caret_focus_keymap,
+            Mode::LineFocus => &self.line_focus_keymap,
         };
         match self.input.handle(keymap, chord) {
             // Redraw on pending input so the status line shows it.
@@ -307,6 +327,15 @@ impl App {
             Command::CaretFocusPrevWord => {
                 return self.caret_word_move(WordMotion::PrevStart, count)
             }
+            Command::LineFocusEnter => return self.enter_line_focus(),
+            Command::LineFocusExit => {
+                self.mode = Mode::Normal;
+                return Effects::redraw();
+            }
+            Command::LineFocusLeft => return self.line_move(Dir::Left, count),
+            Command::LineFocusRight => return self.line_move(Dir::Right, count),
+            Command::LineFocusUp => return self.line_move(Dir::Up, count),
+            Command::LineFocusDown => return self.line_move(Dir::Down, count),
             _ => {}
         }
 
@@ -350,7 +379,13 @@ impl App {
             | Command::CaretFocusDown
             | Command::CaretFocusNextWord
             | Command::CaretFocusEndWord
-            | Command::CaretFocusPrevWord => unreachable!("handled above"),
+            | Command::CaretFocusPrevWord
+            | Command::LineFocusEnter
+            | Command::LineFocusExit
+            | Command::LineFocusLeft
+            | Command::LineFocusRight
+            | Command::LineFocusUp
+            | Command::LineFocusDown => unreachable!("handled above"),
         }
         // In caret focus mode, scroll and page jumps carry the caret to the
         // newly visible content; zoom commands leave it where it is.
@@ -367,6 +402,9 @@ impl App {
         );
         if self.mode == Mode::CaretFocus && moves_caret {
             self.reposition_caret_to_viewport();
+        }
+        if self.mode == Mode::LineFocus && moves_caret {
+            self.reposition_line_to_viewport();
         }
         self.save_position();
         Effects::redraw()
@@ -879,6 +917,189 @@ impl App {
             .map(|rect| (caret.page, rect))
     }
 
+    // ---- Line focus navigation -----------------------------------------
+
+    pub fn line_mark(&self) -> Option<LineMark> {
+        self.line_mark
+    }
+
+    /// Bounding box of a content line in page points (`None` if absent).
+    fn line_bbox(&mut self, page: usize, line: usize) -> Option<Rect> {
+        self.ensure_content(page);
+        self.content(page).get(line).map(|l| l.bbox)
+    }
+
+    /// Update the remembered goal row from the marked line's vertical center.
+    fn update_goal_y(&mut self, mark: LineMark) {
+        if let Some(b) = self.line_bbox(mark.page, mark.line) {
+            self.line_goal_y = (b.y0 + b.y1) / 2.0;
+        }
+    }
+
+    fn enter_line_focus(&mut self) -> Effects {
+        if self.session.is_none() {
+            return Effects::default();
+        }
+        self.mode = Mode::LineFocus;
+        if self.line_mark.is_none() {
+            let start = self.current_page();
+            if let Some(page) = self.content_page_from(start) {
+                let mark = LineMark { page, line: 0 };
+                self.line_mark = Some(mark);
+                self.update_goal_y(mark);
+            }
+        }
+        self.ensure_line_visible();
+        self.save_position();
+        Effects::redraw()
+    }
+
+    fn line_move(&mut self, dir: Dir, count: Option<u32>) -> Effects {
+        if self.session.is_none() {
+            return Effects::default();
+        }
+        let Some(mut mark) = self.line_mark else {
+            return self.enter_line_focus();
+        };
+        let steps = count.unwrap_or(1).max(1);
+        let goal_y = self.line_goal_y;
+        for _ in 0..steps {
+            let moved = match dir {
+                Dir::Down => self.line_step_down(&mut mark),
+                Dir::Up => self.line_step_up(&mut mark),
+                Dir::Left => self.line_step_column(&mut mark, goal_y, false),
+                Dir::Right => self.line_step_column(&mut mark, goal_y, true),
+            };
+            if !moved {
+                break; // document edge, or single-column page for H/L
+            }
+        }
+        self.line_mark = Some(mark);
+        // Vertical motion sets a new goal row; horizontal (column) motion keeps it.
+        if matches!(dir, Dir::Up | Dir::Down) {
+            self.update_goal_y(mark);
+        }
+        self.ensure_line_visible();
+        self.save_position();
+        Effects::redraw()
+    }
+
+    fn line_step_down(&mut self, mark: &mut LineMark) -> bool {
+        if mark.line + 1 < self.page_line_count(mark.page) {
+            mark.line += 1;
+            return true;
+        }
+        if let Some(next) = self.next_content_page(mark.page) {
+            mark.page = next;
+            mark.line = 0;
+            return true;
+        }
+        false
+    }
+
+    fn line_step_up(&mut self, mark: &mut LineMark) -> bool {
+        if mark.line > 0 {
+            mark.line -= 1;
+            return true;
+        }
+        if let Some(prev) = self.prev_content_page(mark.page) {
+            mark.page = prev;
+            mark.line = self.page_line_count(prev).saturating_sub(1);
+            return true;
+        }
+        false
+    }
+
+    /// Move the mark to the adjacent column on the same page, landing on the line
+    /// nearest `goal_y`. A no-op (returns `false`) on single-column pages or when
+    /// already in the edge column toward `forward`.
+    fn line_step_column(&mut self, mark: &mut LineMark, goal_y: f32, forward: bool) -> bool {
+        self.ensure_content(mark.page);
+        let lines = self.content(mark.page);
+        let cols = column_ranges(lines);
+        if cols.len() < 2 {
+            return false;
+        }
+        let Some(cur_box) = lines.get(mark.line).map(|l| l.bbox) else {
+            return false;
+        };
+        let Some(cur_col) = column_index_of(&cols, cur_box.x0, cur_box.x1) else {
+            return false;
+        };
+        let target = if forward {
+            cur_col + 1
+        } else {
+            cur_col.checked_sub(1).unwrap_or(usize::MAX)
+        };
+        if target >= cols.len() {
+            return false;
+        }
+        let candidates: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| {
+                !l.cells.is_empty() && column_index_of(&cols, l.bbox.x0, l.bbox.x1) == Some(target)
+            })
+            .map(|(i, _)| i)
+            .collect();
+        if candidates.is_empty() {
+            return false;
+        }
+        mark.line = nearest_line_in_column(lines, &candidates, goal_y);
+        true
+    }
+
+    /// After a scroll or page jump in line focus mode, move the mark to the
+    /// top-most content line now visible, keeping its goal row.
+    fn reposition_line_to_viewport(&mut self) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        let view_top = session.view.scroll().1;
+        if let Some((page, line)) = self.topmost_visible_line(view_top) {
+            self.line_mark = Some(LineMark { page, line });
+        }
+    }
+
+    /// Scroll the minimum amount needed to keep the marked line on screen.
+    fn ensure_line_visible(&mut self) {
+        let Some(mark) = self.line_mark else {
+            return;
+        };
+        let Some(rect) = self.line_bbox(mark.page, mark.line) else {
+            return;
+        };
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+        let Some(page) = session.view.layout().page(mark.page) else {
+            return;
+        };
+        let (px, py) = (page.x, page.y);
+        session.view.scroll_doc_rect_into_view(
+            px + rect.x0,
+            py + rect.y0,
+            px + rect.x1,
+            py + rect.y1,
+        );
+    }
+
+    /// The marked line's rectangle in canvas pixels, with its page. `None`
+    /// outside line focus mode or when no line is marked. The shell paints this.
+    pub fn line_screen_rect(&self) -> Option<(usize, ScreenRect)> {
+        if self.mode != Mode::LineFocus {
+            return None;
+        }
+        let mark = self.line_mark?;
+        let session = self.session.as_ref()?;
+        let line = session.content.get(&mark.page)?.get(mark.line)?;
+        let b = line.bbox;
+        session
+            .view
+            .page_rect_to_screen(mark.page, b.x0, b.y0, b.x1, b.y1)
+            .map(|rect| (mark.page, rect))
+    }
+
     /// One-line status text: file, current page, zoom, pending keys.
     pub fn status_text(&self) -> String {
         let mut out = String::new();
@@ -902,6 +1123,12 @@ impl App {
             out.push_str("  -- CARET FOCUS --");
             if let Some(caret) = self.caret {
                 out.push_str(&format!("  Ln {}, Col {}", caret.line + 1, caret.cell + 1));
+            }
+        }
+        if self.mode == Mode::LineFocus {
+            out.push_str("  -- LINE FOCUS --");
+            if let Some(mark) = self.line_mark {
+                out.push_str(&format!("  Ln {}", mark.line + 1));
             }
         }
         if self.input.has_pending() {
@@ -1473,6 +1700,117 @@ mod tests {
         assert!(app.caret_screen_rect().is_none());
         press(&mut app, "l");
         assert!(app.caret().is_none());
+    }
+
+    fn app_with_two_column_page(dir: &Path) -> App {
+        let mut app = App::new(Config::default(), Some(Storage::in_memory().unwrap()));
+        app.set_viewport_size(595.0, 600.0);
+        let path = dir.join("cols.pdf");
+        std::fs::write(&path, syodep_pdf::test_support::pdf_two_column_page(3)).unwrap();
+        app.open_document(&path).unwrap();
+        app
+    }
+
+    #[test]
+    fn line_enter_marks_line_and_shows_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_doc(dir.path(), 3);
+        assert_eq!(app.mode(), Mode::Normal);
+        // A single `c` is only the first half of `cl`: still pending.
+        press(&mut app, "c");
+        assert_eq!(app.mode(), Mode::Normal);
+        press(&mut app, "l");
+        assert_eq!(app.mode(), Mode::LineFocus);
+        let mark = app.line_mark().expect("line marked");
+        assert_eq!((mark.page, mark.line), (0, 0));
+        assert!(app.line_screen_rect().is_some());
+        assert!(app.status_text().contains("-- LINE FOCUS --"));
+        assert!(app.status_text().contains("Ln 1"));
+    }
+
+    #[test]
+    fn line_vertical_crosses_pages() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_doc(dir.path(), 3);
+        press(&mut app, "cl");
+        // Each page has a single line, so `j` crosses to the next page.
+        press(&mut app, "j");
+        assert_eq!(app.line_mark().unwrap().page, 1);
+        press(&mut app, "k");
+        assert_eq!(app.line_mark().unwrap().page, 0);
+        // `k` at the document start is clamped.
+        press(&mut app, "k");
+        assert_eq!(app.line_mark().unwrap().page, 0);
+    }
+
+    #[test]
+    fn line_exit_restores_scrolling() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_doc(dir.path(), 3);
+        press(&mut app, "cl");
+        assert_eq!(app.mode(), Mode::LineFocus);
+        press(&mut app, "<Esc>");
+        assert_eq!(app.mode(), Mode::Normal);
+        assert!(app.line_screen_rect().is_none());
+        let before = app.session.as_ref().unwrap().view.scroll().1;
+        press(&mut app, "j");
+        let after = app.session.as_ref().unwrap().view.scroll().1;
+        assert!(after > before);
+    }
+
+    #[test]
+    fn line_focus_keeps_non_hjkl_bindings_and_carries_mark() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_doc(dir.path(), 5);
+        press(&mut app, "cl");
+        press(&mut app, "G");
+        assert_eq!(app.current_page(), 4);
+        assert_eq!(app.line_mark().unwrap().page, 4);
+        press(&mut app, "gg");
+        assert_eq!(app.line_mark().unwrap().page, 0);
+        // A full page-down scroll carries the mark to later content.
+        press(&mut app, "<C-f>");
+        assert!(app.line_mark().unwrap().page > 0);
+    }
+
+    #[test]
+    fn line_horizontal_is_noop_on_single_column() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_doc(dir.path(), 2);
+        press(&mut app, "cl");
+        let before = app.line_mark().unwrap();
+        press(&mut app, "l");
+        assert_eq!(app.line_mark().unwrap(), before);
+        press(&mut app, "h");
+        assert_eq!(app.line_mark().unwrap(), before);
+    }
+
+    #[test]
+    fn line_horizontal_jumps_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_two_column_page(dir.path());
+        press(&mut app, "cl");
+        // Start in the left column on its first line.
+        let start = app.line_mark().unwrap();
+        // `l` jumps to the right column, keeping the goal row (same first line).
+        press(&mut app, "l");
+        let right = app.line_mark().unwrap();
+        assert_ne!(right.line, start.line, "should move to a right-column line");
+        // `l` again is a no-op at the right edge column.
+        press(&mut app, "l");
+        assert_eq!(app.line_mark().unwrap(), right);
+        // `h` returns to the left column.
+        press(&mut app, "h");
+        assert_eq!(app.line_mark().unwrap(), start);
+    }
+
+    #[test]
+    fn line_without_document_does_not_crash() {
+        let mut app = App::new(Config::default(), None);
+        press(&mut app, "cl");
+        assert!(app.line_screen_rect().is_none());
+        press(&mut app, "j");
+        assert!(app.line_mark().is_none());
     }
 
     #[test]

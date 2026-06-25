@@ -32,6 +32,11 @@ pub struct Config {
     /// something different there while every other binding still works.
     #[serde(default)]
     pub caret_focus_keys: BTreeMap<String, String>,
+    /// Line-focus-mode keybindings (the `[line_focus_keys]` table). These overlay
+    /// the normal `keys` while line focus mode is active, mirroring
+    /// `caret_focus_keys`.
+    #[serde(default)]
+    pub line_focus_keys: BTreeMap<String, String>,
 }
 
 /// `[view]` section: rendering and navigation tunables.
@@ -75,6 +80,7 @@ impl Default for Config {
             view: ViewConfig::default(),
             keys: default_keybindings(),
             caret_focus_keys: default_caret_focus_keybindings(),
+            line_focus_keys: default_line_focus_keybindings(),
         }
     }
 }
@@ -108,6 +114,7 @@ pub fn default_keybindings() -> BTreeMap<String, String> {
         ("zw", "fit_width"),
         ("z0", "zoom_reset"),
         ("cc", "caret_focus_enter"),
+        ("cl", "line_focus_enter"),
         ("o", "open_file"),
         ("q", "quit"),
         ("<Esc>", "cancel"),
@@ -142,6 +149,29 @@ pub fn default_caret_focus_keybindings() -> BTreeMap<String, String> {
     .collect()
 }
 
+/// Built-in line-focus-mode keybindings (the `[line_focus_keys]` table). These
+/// overlay the normal bindings while line focus mode is active: `j`/`k` move the
+/// highlight line-wise, `h`/`l` move between columns, and `<Esc>` leaves the mode,
+/// while everything else keeps its normal meaning.
+///
+/// Every entry here must be documented in `docs/keybindings.md`.
+pub fn default_line_focus_keybindings() -> BTreeMap<String, String> {
+    [
+        ("h", "line_focus_left"),
+        ("j", "line_focus_down"),
+        ("k", "line_focus_up"),
+        ("l", "line_focus_right"),
+        ("<Left>", "line_focus_left"),
+        ("<Down>", "line_focus_down"),
+        ("<Up>", "line_focus_up"),
+        ("<Right>", "line_focus_right"),
+        ("<Esc>", "line_focus_exit"),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_owned(), v.to_owned()))
+    .collect()
+}
+
 /// Errors produced while loading or parsing configuration.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -168,6 +198,9 @@ impl Config {
         let mut caret_focus_keys = default_caret_focus_keybindings();
         caret_focus_keys.extend(std::mem::take(&mut config.caret_focus_keys));
         config.caret_focus_keys = caret_focus_keys;
+        let mut line_focus_keys = default_line_focus_keybindings();
+        line_focus_keys.extend(std::mem::take(&mut config.line_focus_keys));
+        config.line_focus_keys = line_focus_keys;
         Ok(config)
     }
 

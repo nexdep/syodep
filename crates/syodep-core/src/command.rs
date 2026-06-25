@@ -45,6 +45,17 @@ pub enum Command {
     CaretFocusNextWord,
     CaretFocusEndWord,
     CaretFocusPrevWord,
+    // Line focus (modal whole-line highlight over content).
+    /// Enter line focus mode, highlighting the nearest content line.
+    LineFocusEnter,
+    /// Leave line focus mode, returning to scrolling (the line is remembered).
+    LineFocusExit,
+    /// Move to the line in the previous column (multi-column pages only).
+    LineFocusLeft,
+    /// Move to the line in the next column (multi-column pages only).
+    LineFocusRight,
+    LineFocusUp,
+    LineFocusDown,
     // Application.
     OpenFile,
     Quit,
@@ -80,6 +91,12 @@ pub const ALL_COMMANDS: &[(&str, Command)] = &[
     ("caret_focus_next_word", Command::CaretFocusNextWord),
     ("caret_focus_end_word", Command::CaretFocusEndWord),
     ("caret_focus_prev_word", Command::CaretFocusPrevWord),
+    ("line_focus_enter", Command::LineFocusEnter),
+    ("line_focus_exit", Command::LineFocusExit),
+    ("line_focus_left", Command::LineFocusLeft),
+    ("line_focus_right", Command::LineFocusRight),
+    ("line_focus_up", Command::LineFocusUp),
+    ("line_focus_down", Command::LineFocusDown),
     ("open_file", Command::OpenFile),
     ("quit", Command::Quit),
     ("cancel", Command::Cancel),
