@@ -765,9 +765,11 @@ mod tests {
         let config_path = dir.path().join("config.toml");
         let papers = dir.path().join("papers");
         std::fs::create_dir(&papers).unwrap();
+        // TOML literal string (single quotes) so Windows backslash paths are
+        // not mangled by basic-string escape processing.
         std::fs::write(
             &config_path,
-            format!("[files]\nopen_dir = \"{}\"\n", papers.display()),
+            format!("[files]\nopen_dir = '{}'\n", papers.display()),
         )
         .unwrap();
         let c_config = CString::new(config_path.display().to_string()).unwrap();
