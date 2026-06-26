@@ -4,7 +4,7 @@ Every user-visible action in syodep is a *command*. Keybindings map key
 sequences to command names (see `docs/keybindings.md`); future features
 (command palette, text objects) reuse the same registry.
 
-syodep has four input modes, each with its own command page:
+syodep has six input modes, each with its own command page:
 
 - **[Normal mode](commands-normal-mode.md)** — the default. `hjkl` scroll
   the page; covers scrolling, page navigation, zoom, entering the focus
@@ -21,6 +21,15 @@ syodep has four input modes, each with its own command page:
   A whole Vim-like word run is highlighted; `h`/`b` and `l`/`w` move between
   word runs, while `j`/`k` move line-wise. The view, page-navigation and zoom
   commands stay available, and scroll / page jumps carry the highlight along.
+- **[Sentence focus mode](commands-sentence-focus-mode.md)** — entered with
+  `cs`. A whole sentence (possibly spanning lines) is highlighted; sentences are
+  a linear sequence, so all of `hjkl`/arrows collapse to previous/next. The
+  view, page-navigation and zoom commands stay available, and scroll / page
+  jumps carry the highlight along.
+- **[Paragraph focus mode](commands-paragraph-focus-mode.md)** — entered with
+  `cp`. A whole paragraph (a block of lines) is highlighted; like sentence
+  focus, `hjkl`/arrows collapse to previous/next. The view, page-navigation and
+  zoom commands stay available, and scroll / page jumps carry the highlight along.
 
 Counts: most commands accept a count prefix typed before the binding
 (`5j`, `3J`, `12G`). Where a count has a special meaning it is noted on the

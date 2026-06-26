@@ -15,12 +15,14 @@ use std::path::{Path, PathBuf};
 
 use syodep_config::keys::Chord;
 use syodep_config::Config;
-use syodep_pdf::{Bitmap, ContentLine, Rect};
+use syodep_pdf::{Bitmap, CellKind, ContentLine, Rect};
 use syodep_storage::{Position, Storage};
 
 use crate::caret::{
-    column_index_of, column_ranges, continues_word_run, is_word_target, nearest_cell_in_line,
-    nearest_line_in_column, word_class, Caret, Dir, LineMark, Mode, WordClass, WordMark,
+    column_index_of, column_ranges, continues_word_run, is_sentence_terminator,
+    is_sentence_trailer, is_word_target, nearest_cell_in_line, nearest_line_in_column,
+    paragraph_segments, word_class, Caret, Dir, LineMark, Mode, ParagraphMark, SentenceMark,
+    WordClass, WordMark,
 };
 use crate::command::Command;
 use crate::input::{InputState, KeyOutcome, Keymap, KeymapError};
@@ -92,6 +94,12 @@ pub struct App {
     /// Keymap used while in word focus mode: the normal keymap plus the
     /// `[word_focus_keys]` overrides.
     word_focus_keymap: Keymap,
+    /// Keymap used while in sentence focus mode: the normal keymap plus the
+    /// `[sentence_focus_keys]` overrides.
+    sentence_focus_keymap: Keymap,
+    /// Keymap used while in paragraph focus mode: the normal keymap plus the
+    /// `[paragraph_focus_keys]` overrides.
+    paragraph_focus_keymap: Keymap,
     input: InputState,
     storage: Option<Storage>,
     session: Option<Session>,
@@ -110,6 +118,10 @@ pub struct App {
     word_mark: Option<WordMark>,
     /// Remembered goal column (page-space x) for vertical word motion.
     word_goal_x: f32,
+    /// Current sentence-focus position, remembered across mode toggles.
+    sentence_mark: Option<SentenceMark>,
+    /// Current paragraph-focus position, remembered across mode toggles.
+    paragraph_mark: Option<ParagraphMark>,
     /// Config/keymap problems collected at startup, for the UI to surface.
     startup_warnings: Vec<String>,
     last_error: Option<String>,
@@ -146,6 +158,19 @@ impl App {
             .iter()
             .map(|(k, v)| (k.as_str(), v.as_str()));
         keymap_errors.extend(word_focus_keymap.overlay(word_entries));
+        // The sentence- and paragraph-focus keymaps follow the same recipe.
+        let mut sentence_focus_keymap = keymap.clone();
+        let sentence_entries = config
+            .sentence_focus_keys
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()));
+        keymap_errors.extend(sentence_focus_keymap.overlay(sentence_entries));
+        let mut paragraph_focus_keymap = keymap.clone();
+        let paragraph_entries = config
+            .paragraph_focus_keys
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()));
+        keymap_errors.extend(paragraph_focus_keymap.overlay(paragraph_entries));
         let startup_warnings = keymap_errors.iter().map(KeymapError::to_string).collect();
         Self {
             config,
@@ -153,6 +178,8 @@ impl App {
             caret_focus_keymap,
             line_focus_keymap,
             word_focus_keymap,
+            sentence_focus_keymap,
+            paragraph_focus_keymap,
             input: InputState::new(),
             storage,
             session: None,
@@ -164,6 +191,8 @@ impl App {
             line_goal_y: 0.0,
             word_mark: None,
             word_goal_x: 0.0,
+            sentence_mark: None,
+            paragraph_mark: None,
             startup_warnings,
             last_error: None,
         }
@@ -240,6 +269,8 @@ impl App {
         self.line_goal_y = 0.0;
         self.word_mark = None;
         self.word_goal_x = 0.0;
+        self.sentence_mark = None;
+        self.paragraph_mark = None;
         self.last_error = None;
         Ok(())
     }
@@ -299,6 +330,8 @@ impl App {
             Mode::CaretFocus => &self.caret_focus_keymap,
             Mode::LineFocus => &self.line_focus_keymap,
             Mode::WordFocus => &self.word_focus_keymap,
+            Mode::SentenceFocus => &self.sentence_focus_keymap,
+            Mode::ParagraphFocus => &self.paragraph_focus_keymap,
         };
         match self.input.handle(keymap, chord) {
             // Redraw on pending input so the status line shows it.
@@ -365,6 +398,20 @@ impl App {
             Command::WordFocusRight => return self.word_move(Dir::Right, count),
             Command::WordFocusUp => return self.word_move(Dir::Up, count),
             Command::WordFocusDown => return self.word_move(Dir::Down, count),
+            Command::SentenceFocusEnter => return self.enter_sentence_focus(),
+            Command::SentenceFocusExit => {
+                self.mode = Mode::Normal;
+                return Effects::redraw();
+            }
+            Command::SentenceFocusNext => return self.sentence_move(true, count),
+            Command::SentenceFocusPrev => return self.sentence_move(false, count),
+            Command::ParagraphFocusEnter => return self.enter_paragraph_focus(),
+            Command::ParagraphFocusExit => {
+                self.mode = Mode::Normal;
+                return Effects::redraw();
+            }
+            Command::ParagraphFocusNext => return self.paragraph_move(true, count),
+            Command::ParagraphFocusPrev => return self.paragraph_move(false, count),
             _ => {}
         }
 
@@ -420,7 +467,15 @@ impl App {
             | Command::WordFocusLeft
             | Command::WordFocusRight
             | Command::WordFocusUp
-            | Command::WordFocusDown => unreachable!("handled above"),
+            | Command::WordFocusDown
+            | Command::SentenceFocusEnter
+            | Command::SentenceFocusExit
+            | Command::SentenceFocusNext
+            | Command::SentenceFocusPrev
+            | Command::ParagraphFocusEnter
+            | Command::ParagraphFocusExit
+            | Command::ParagraphFocusNext
+            | Command::ParagraphFocusPrev => unreachable!("handled above"),
         }
         // In caret focus mode, scroll and page jumps carry the caret to the
         // newly visible content; zoom commands leave it where it is.
@@ -443,6 +498,12 @@ impl App {
         }
         if self.mode == Mode::WordFocus && moves_caret {
             self.reposition_word_to_viewport();
+        }
+        if self.mode == Mode::SentenceFocus && moves_caret {
+            self.reposition_sentence_to_viewport();
+        }
+        if self.mode == Mode::ParagraphFocus && moves_caret {
+            self.reposition_paragraph_to_viewport();
         }
         self.save_position();
         Effects::redraw()
@@ -1348,6 +1409,571 @@ impl App {
             .map(|rect| (mark.page, rect))
     }
 
+    // ---- Shared focus-entry helper -------------------------------------
+
+    /// The caret a focus mode should start from: the top-most content line in
+    /// the viewport, falling back to the first content line of the document.
+    /// Shared by sentence and paragraph entry (mirrors the logic in
+    /// [`Self::enter_word_focus`]).
+    fn focus_entry_caret(&mut self) -> Option<Caret> {
+        let from_visible = if let Some(view_top) = self.session.as_ref().map(|s| s.view.scroll().1)
+        {
+            self.topmost_visible_line(view_top)
+                .map(|(page, line)| Caret {
+                    page,
+                    line,
+                    cell: 0,
+                })
+        } else {
+            None
+        };
+        from_visible.or_else(|| {
+            let start = self.current_page();
+            self.content_page_from(start).map(|page| Caret {
+                page,
+                line: 0,
+                cell: 0,
+            })
+        })
+    }
+
+    // ---- Sentence focus navigation -------------------------------------
+
+    pub fn sentence_mark(&self) -> Option<SentenceMark> {
+        self.sentence_mark
+    }
+
+    /// One cell forward/backward but only within the same page (sentences never
+    /// straddle a page). Thin filters over [`Self::next_cell`]/[`Self::prev_cell`].
+    fn next_cell_same_page(&mut self, c: Caret) -> Option<Caret> {
+        self.next_cell(c).filter(|n| n.page == c.page)
+    }
+
+    fn prev_cell_same_page(&mut self, c: Caret) -> Option<Caret> {
+        self.prev_cell(c).filter(|p| p.page == c.page)
+    }
+
+    /// The character at `c`, or `None` for an image or absent cell.
+    fn char_at(&mut self, c: Caret) -> Option<char> {
+        self.ensure_content(c.page);
+        match self
+            .content(c.page)
+            .get(c.line)
+            .and_then(|l| l.cells.get(c.cell))
+            .map(|cell| cell.kind)
+        {
+            Some(CellKind::Char(ch)) => Some(ch),
+            _ => None,
+        }
+    }
+
+    /// Whether `c` is the last cell of a sentence-ending group — a maximal run
+    /// of terminators (`. ! ?`) plus any trailing closing quotes/brackets. The
+    /// group must contain at least one terminator, so a lone closing bracket is
+    /// not a boundary. Analogue of [`Self::same_word_run`] for sentences.
+    fn sentence_boundary_after(&mut self, c: Caret) -> bool {
+        let here = match self.char_at(c) {
+            Some(ch) if is_sentence_terminator(ch) || is_sentence_trailer(ch) => ch,
+            _ => return false,
+        };
+        // The group must end at `c`: the next cell cannot continue it.
+        if let Some(next) = self.next_cell_same_page(c) {
+            if matches!(self.char_at(next), Some(ch) if is_sentence_terminator(ch) || is_sentence_trailer(ch))
+            {
+                return false;
+            }
+        }
+        if is_sentence_terminator(here) {
+            return true;
+        }
+        // `here` is a trailer: the group is only a boundary if a terminator
+        // precedes it through the run of terminators/trailers.
+        let mut cur = c;
+        while let Some(prev) = self.prev_cell_same_page(cur) {
+            match self.char_at(prev) {
+                Some(ch) if is_sentence_terminator(ch) => return true,
+                Some(ch) if is_sentence_trailer(ch) => cur = prev,
+                _ => break,
+            }
+        }
+        false
+    }
+
+    /// Advance over whitespace/empty cells to the first real content cell at or
+    /// after `from`, staying on the page.
+    fn skip_whitespace_forward(&mut self, from: Caret) -> Caret {
+        let mut cur = from;
+        loop {
+            match self.word_class_at(cur) {
+                Some(WordClass::Whitespace) | None => match self.next_cell_same_page(cur) {
+                    Some(next) => cur = next,
+                    None => return cur,
+                },
+                Some(_) => return cur,
+            }
+        }
+    }
+
+    /// Last cell of the sentence containing `from` (walk forward to a boundary
+    /// or the page edge). Analogue of [`Self::word_run_end`].
+    fn sentence_run_end(&mut self, from: Caret) -> Caret {
+        let mut cur = from;
+        loop {
+            if self.sentence_boundary_after(cur) {
+                return cur;
+            }
+            match self.next_cell_same_page(cur) {
+                Some(next) => cur = next,
+                None => return cur,
+            }
+        }
+    }
+
+    /// First (non-whitespace) cell of the sentence containing `from` (walk back
+    /// until just after the previous boundary, then skip leading whitespace).
+    /// Analogue of [`Self::word_run_start`].
+    fn sentence_run_start(&mut self, from: Caret) -> Caret {
+        let mut cur = from;
+        while let Some(prev) = self.prev_cell_same_page(cur) {
+            if self.sentence_boundary_after(prev) {
+                break;
+            }
+            cur = prev;
+        }
+        self.skip_whitespace_forward(cur)
+    }
+
+    /// Build a [`SentenceMark`] for the sentence containing `caret`.
+    fn sentence_mark_from_caret(&mut self, caret: Caret) -> SentenceMark {
+        let start = self.sentence_run_start(caret);
+        let end = self.sentence_run_end(caret);
+        SentenceMark {
+            page: caret.page,
+            start_line: start.line,
+            start_cell: start.cell,
+            end_line: end.line,
+            end_cell: end.cell,
+        }
+    }
+
+    /// First content cell of `page` (skipping leading whitespace/empty lines).
+    fn first_sentence_start_on_page(&mut self, page: usize) -> Option<Caret> {
+        let mut cur = Caret {
+            page,
+            line: 0,
+            cell: 0,
+        };
+        loop {
+            match self.word_class_at(cur) {
+                Some(WordClass::Whitespace) | None => {
+                    cur = self.next_cell_same_page(cur)?;
+                }
+                Some(_) => return Some(cur),
+            }
+        }
+    }
+
+    /// Start cell of the next sentence on the same page, or `None` at the page
+    /// edge (the caller then crosses to the next content page).
+    fn step_next_sentence_start(&mut self, caret: Caret) -> Option<Caret> {
+        let end = self.sentence_run_end(caret);
+        let mut cur = self.next_cell_same_page(end)?;
+        loop {
+            match self.word_class_at(cur) {
+                Some(WordClass::Whitespace) | None => {
+                    cur = self.next_cell_same_page(cur)?;
+                }
+                Some(_) => return Some(cur),
+            }
+        }
+    }
+
+    /// Start cell of the previous sentence on the same page, or `None` at the
+    /// page start.
+    fn step_prev_sentence_start(&mut self, caret: Caret) -> Option<Caret> {
+        let start = self.sentence_run_start(caret);
+        let mut cur = self.prev_cell_same_page(start)?;
+        // Skip whitespace back into the previous sentence, then expand it.
+        while matches!(self.word_class_at(cur), Some(WordClass::Whitespace) | None) {
+            cur = self.prev_cell_same_page(cur)?;
+        }
+        Some(self.sentence_run_start(cur))
+    }
+
+    fn enter_sentence_focus(&mut self) -> Effects {
+        if self.session.is_none() {
+            return Effects::default();
+        }
+        self.mode = Mode::SentenceFocus;
+        if self.sentence_mark.is_none() {
+            if let Some(from) = self.focus_entry_caret() {
+                let mark = self.sentence_mark_from_caret(from);
+                self.sentence_mark = Some(mark);
+            }
+        }
+        self.ensure_sentence_visible();
+        self.save_position();
+        Effects::redraw()
+    }
+
+    fn sentence_move(&mut self, forward: bool, count: Option<u32>) -> Effects {
+        if self.session.is_none() {
+            return Effects::default();
+        }
+        let Some(mut mark) = self.sentence_mark else {
+            return self.enter_sentence_focus();
+        };
+        let steps = count.unwrap_or(1).max(1);
+        for _ in 0..steps {
+            let moved = if forward {
+                self.sentence_step_next(&mut mark)
+            } else {
+                self.sentence_step_prev(&mut mark)
+            };
+            if !moved {
+                break; // reached a document edge
+            }
+        }
+        self.sentence_mark = Some(mark);
+        self.ensure_sentence_visible();
+        self.save_position();
+        Effects::redraw()
+    }
+
+    fn sentence_step_next(&mut self, mark: &mut SentenceMark) -> bool {
+        let caret = Caret {
+            page: mark.page,
+            line: mark.start_line,
+            cell: mark.start_cell,
+        };
+        if let Some(next) = self.step_next_sentence_start(caret) {
+            *mark = self.sentence_mark_from_caret(next);
+            return true;
+        }
+        if let Some(page) = self.next_content_page(mark.page) {
+            if let Some(start) = self.first_sentence_start_on_page(page) {
+                *mark = self.sentence_mark_from_caret(start);
+                return true;
+            }
+        }
+        false
+    }
+
+    fn sentence_step_prev(&mut self, mark: &mut SentenceMark) -> bool {
+        let caret = Caret {
+            page: mark.page,
+            line: mark.start_line,
+            cell: mark.start_cell,
+        };
+        if let Some(prev) = self.step_prev_sentence_start(caret) {
+            *mark = self.sentence_mark_from_caret(prev);
+            return true;
+        }
+        if let Some(page) = self.prev_content_page(mark.page) {
+            // Last sentence of the previous page: expand from its last cell.
+            let last_line = self.page_line_count(page).saturating_sub(1);
+            let last_cell = self.line_cell_count(page, last_line).saturating_sub(1);
+            let from = Caret {
+                page,
+                line: last_line,
+                cell: last_cell,
+            };
+            *mark = self.sentence_mark_from_caret(from);
+            return true;
+        }
+        false
+    }
+
+    /// After a scroll or page jump in sentence focus mode, move the mark to the
+    /// sentence containing the top-most content line now visible.
+    fn reposition_sentence_to_viewport(&mut self) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        let view_top = session.view.scroll().1;
+        if let Some((page, line)) = self.topmost_visible_line(view_top) {
+            let mark = self.sentence_mark_from_caret(Caret {
+                page,
+                line,
+                cell: 0,
+            });
+            self.sentence_mark = Some(mark);
+        }
+    }
+
+    /// Bounding box (page points) spanning the marked sentence, for scrolling.
+    fn sentence_bbox(&mut self, mark: SentenceMark) -> Option<Rect> {
+        let start = self.cell_rect(mark.page, mark.start_line, mark.start_cell)?;
+        let end = self
+            .cell_rect(mark.page, mark.end_line, mark.end_cell)
+            .unwrap_or(start);
+        Some(Rect {
+            x0: start.x0.min(end.x0),
+            y0: start.y0.min(end.y0),
+            x1: start.x1.max(end.x1),
+            y1: start.y1.max(end.y1),
+        })
+    }
+
+    fn ensure_sentence_visible(&mut self) {
+        let Some(mark) = self.sentence_mark else {
+            return;
+        };
+        let Some(rect) = self.sentence_bbox(mark) else {
+            return;
+        };
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+        let Some(page) = session.view.layout().page(mark.page) else {
+            return;
+        };
+        let (px, py) = (page.x, page.y);
+        session.view.scroll_doc_rect_into_view(
+            px + rect.x0,
+            py + rect.y0,
+            px + rect.x1,
+            py + rect.y1,
+        );
+    }
+
+    /// The marked sentence as one screen rectangle per spanned line (a
+    /// text-selection shape): the first line runs from the sentence start to the
+    /// line end, middle lines are full, the last line runs from the line start to
+    /// the sentence end. `None` outside sentence focus mode. The shell paints these.
+    pub fn sentence_screen_rects(&self) -> Option<(usize, Vec<ScreenRect>)> {
+        if self.mode != Mode::SentenceFocus {
+            return None;
+        }
+        let mark = self.sentence_mark?;
+        let session = self.session.as_ref()?;
+        let lines = session.content.get(&mark.page)?;
+        let mut rects = Vec::new();
+        for line_idx in mark.start_line..=mark.end_line {
+            let Some(line) = lines.get(line_idx) else {
+                continue;
+            };
+            if line.cells.is_empty() {
+                continue;
+            }
+            let (x0, x1) = if mark.start_line == mark.end_line {
+                let s = line.cells.get(mark.start_cell)?.bbox;
+                let e = line.cells.get(mark.end_cell).map_or(s, |c| c.bbox);
+                (s.x0.min(e.x0), s.x1.max(e.x1))
+            } else if line_idx == mark.start_line {
+                let s = line.cells.get(mark.start_cell)?.bbox;
+                (s.x0, line.bbox.x1)
+            } else if line_idx == mark.end_line {
+                let e = line.cells.get(mark.end_cell)?.bbox;
+                (line.bbox.x0, e.x1)
+            } else {
+                (line.bbox.x0, line.bbox.x1)
+            };
+            if let Some(rect) =
+                session
+                    .view
+                    .page_rect_to_screen(mark.page, x0, line.bbox.y0, x1, line.bbox.y1)
+            {
+                rects.push(rect);
+            }
+        }
+        if rects.is_empty() {
+            None
+        } else {
+            Some((mark.page, rects))
+        }
+    }
+
+    // ---- Paragraph focus navigation ------------------------------------
+
+    pub fn paragraph_mark(&self) -> Option<ParagraphMark> {
+        self.paragraph_mark
+    }
+
+    /// The paragraph (segment of lines) that contains `line` on `page`.
+    fn paragraph_mark_containing(&mut self, page: usize, line: usize) -> Option<ParagraphMark> {
+        self.ensure_content(page);
+        let segs = paragraph_segments(self.content(page));
+        segs.iter()
+            .find(|(s, e)| *s <= line && line <= *e)
+            .or_else(|| segs.last())
+            .map(|&(s, e)| ParagraphMark {
+                page,
+                start_line: s,
+                end_line: e,
+            })
+    }
+
+    fn enter_paragraph_focus(&mut self) -> Effects {
+        if self.session.is_none() {
+            return Effects::default();
+        }
+        self.mode = Mode::ParagraphFocus;
+        if self.paragraph_mark.is_none() {
+            if let Some(from) = self.focus_entry_caret() {
+                self.paragraph_mark = self.paragraph_mark_containing(from.page, from.line);
+            }
+        }
+        self.ensure_paragraph_visible();
+        self.save_position();
+        Effects::redraw()
+    }
+
+    fn paragraph_move(&mut self, forward: bool, count: Option<u32>) -> Effects {
+        if self.session.is_none() {
+            return Effects::default();
+        }
+        let Some(mut mark) = self.paragraph_mark else {
+            return self.enter_paragraph_focus();
+        };
+        let steps = count.unwrap_or(1).max(1);
+        for _ in 0..steps {
+            let moved = if forward {
+                self.paragraph_step_next(&mut mark)
+            } else {
+                self.paragraph_step_prev(&mut mark)
+            };
+            if !moved {
+                break; // reached a document edge
+            }
+        }
+        self.paragraph_mark = Some(mark);
+        self.ensure_paragraph_visible();
+        self.save_position();
+        Effects::redraw()
+    }
+
+    fn paragraph_step_next(&mut self, mark: &mut ParagraphMark) -> bool {
+        self.ensure_content(mark.page);
+        let segs = paragraph_segments(self.content(mark.page));
+        if let Some(i) = segs
+            .iter()
+            .position(|&(s, e)| s <= mark.start_line && mark.start_line <= e)
+        {
+            if i + 1 < segs.len() {
+                let (s, e) = segs[i + 1];
+                *mark = ParagraphMark {
+                    page: mark.page,
+                    start_line: s,
+                    end_line: e,
+                };
+                return true;
+            }
+        }
+        if let Some(page) = self.next_content_page(mark.page) {
+            self.ensure_content(page);
+            if let Some(&(s, e)) = paragraph_segments(self.content(page)).first() {
+                *mark = ParagraphMark {
+                    page,
+                    start_line: s,
+                    end_line: e,
+                };
+                return true;
+            }
+        }
+        false
+    }
+
+    fn paragraph_step_prev(&mut self, mark: &mut ParagraphMark) -> bool {
+        self.ensure_content(mark.page);
+        let segs = paragraph_segments(self.content(mark.page));
+        if let Some(i) = segs
+            .iter()
+            .position(|&(s, e)| s <= mark.start_line && mark.start_line <= e)
+        {
+            if i > 0 {
+                let (s, e) = segs[i - 1];
+                *mark = ParagraphMark {
+                    page: mark.page,
+                    start_line: s,
+                    end_line: e,
+                };
+                return true;
+            }
+        }
+        if let Some(page) = self.prev_content_page(mark.page) {
+            self.ensure_content(page);
+            if let Some(&(s, e)) = paragraph_segments(self.content(page)).last() {
+                *mark = ParagraphMark {
+                    page,
+                    start_line: s,
+                    end_line: e,
+                };
+                return true;
+            }
+        }
+        false
+    }
+
+    /// After a scroll or page jump in paragraph focus mode, move the mark to the
+    /// paragraph containing the top-most content line now visible.
+    fn reposition_paragraph_to_viewport(&mut self) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        let view_top = session.view.scroll().1;
+        if let Some((page, line)) = self.topmost_visible_line(view_top) {
+            self.paragraph_mark = self.paragraph_mark_containing(page, line);
+        }
+    }
+
+    /// Bounding box (page points) of the marked paragraph's lines.
+    fn paragraph_bbox(&mut self, mark: ParagraphMark) -> Option<Rect> {
+        let start = self.line_bbox(mark.page, mark.start_line)?;
+        let end = self.line_bbox(mark.page, mark.end_line).unwrap_or(start);
+        Some(Rect {
+            x0: start.x0.min(end.x0),
+            y0: start.y0.min(end.y0),
+            x1: start.x1.max(end.x1),
+            y1: start.y1.max(end.y1),
+        })
+    }
+
+    fn ensure_paragraph_visible(&mut self) {
+        let Some(mark) = self.paragraph_mark else {
+            return;
+        };
+        let Some(rect) = self.paragraph_bbox(mark) else {
+            return;
+        };
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+        let Some(page) = session.view.layout().page(mark.page) else {
+            return;
+        };
+        let (px, py) = (page.x, page.y);
+        session.view.scroll_doc_rect_into_view(
+            px + rect.x0,
+            py + rect.y0,
+            px + rect.x1,
+            py + rect.y1,
+        );
+    }
+
+    /// The marked paragraph's bounding rectangle in canvas pixels, with its page.
+    /// `None` outside paragraph focus mode. The shell paints this overlay.
+    pub fn paragraph_screen_rect(&self) -> Option<(usize, ScreenRect)> {
+        if self.mode != Mode::ParagraphFocus {
+            return None;
+        }
+        let mark = self.paragraph_mark?;
+        let session = self.session.as_ref()?;
+        let lines = session.content.get(&mark.page)?;
+        let start = lines.get(mark.start_line)?.bbox;
+        let end = lines.get(mark.end_line).map_or(start, |l| l.bbox);
+        session
+            .view
+            .page_rect_to_screen(
+                mark.page,
+                start.x0.min(end.x0),
+                start.y0.min(end.y0),
+                start.x1.max(end.x1),
+                start.y1.max(end.y1),
+            )
+            .map(|rect| (mark.page, rect))
+    }
+
     /// One-line status text: file, current page, zoom, pending keys.
     pub fn status_text(&self) -> String {
         let mut out = String::new();
@@ -1386,6 +2012,22 @@ impl App {
                     "  Ln {}, Col {}",
                     mark.line + 1,
                     mark.start_cell + 1
+                ));
+            }
+        }
+        if self.mode == Mode::SentenceFocus {
+            out.push_str("  -- SENTENCE FOCUS --");
+            if let Some(mark) = self.sentence_mark {
+                out.push_str(&format!("  Ln {}", mark.start_line + 1));
+            }
+        }
+        if self.mode == Mode::ParagraphFocus {
+            out.push_str("  -- PARAGRAPH FOCUS --");
+            if let Some(mark) = self.paragraph_mark {
+                out.push_str(&format!(
+                    "  ¶ {}-{}",
+                    mark.start_line + 1,
+                    mark.end_line + 1
                 ));
             }
         }
@@ -2191,6 +2833,169 @@ mod tests {
         assert!(app.word_screen_rect().is_none());
         press(&mut app, "l");
         assert!(app.word_mark().is_none());
+    }
+
+    // ---- Sentence focus ------------------------------------------------
+
+    #[test]
+    fn sentence_enter_marks_sentence_and_shows_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["Alpha beta. Gamma delta."]);
+        assert_eq!(app.mode(), Mode::Normal);
+        // A single `c` is only the first half of `cs`: still pending.
+        press(&mut app, "c");
+        assert_eq!(app.mode(), Mode::Normal);
+        press(&mut app, "s");
+        assert_eq!(app.mode(), Mode::SentenceFocus);
+        let mark = app.sentence_mark().expect("sentence marked");
+        // The first sentence "Alpha beta." is cells 0..=10 on line 0.
+        assert_eq!(
+            (mark.page, mark.start_line, mark.start_cell, mark.end_line),
+            (0, 0, 0, 0)
+        );
+        assert!(app.sentence_screen_rects().is_some());
+        assert!(app.status_text().contains("-- SENTENCE FOCUS --"));
+    }
+
+    #[test]
+    fn sentence_next_and_prev_step() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["Alpha beta. Gamma delta."]);
+        press(&mut app, "cs");
+        assert_eq!(app.sentence_mark().unwrap().start_cell, 0);
+        // `l`/`j` advance to the next sentence ("Gamma delta." starting at G).
+        press(&mut app, "l");
+        assert_eq!(app.sentence_mark().unwrap().start_cell, 12);
+        // `h`/`k` move back to the first sentence.
+        press(&mut app, "h");
+        assert_eq!(app.sentence_mark().unwrap().start_cell, 0);
+    }
+
+    #[test]
+    fn sentence_spans_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        // The first sentence runs from line 0 (no terminator) into line 1's period.
+        let mut app = app_with_two_line_pdf(dir.path(), "Alpha beta", "gamma. Delta");
+        press(&mut app, "cs");
+        let mark = app.sentence_mark().unwrap();
+        assert_eq!(mark.start_line, 0);
+        assert_eq!(mark.end_line, 1);
+        // A multi-line sentence yields one rect per spanned line.
+        let (_, rects) = app.sentence_screen_rects().unwrap();
+        assert!(rects.len() >= 2);
+    }
+
+    #[test]
+    fn sentence_next_crosses_pages() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["One sentence.", "Second sentence."]);
+        press(&mut app, "cs");
+        assert_eq!(app.sentence_mark().unwrap().page, 0);
+        // The page has a single sentence, so `l` crosses to the next page.
+        press(&mut app, "l");
+        assert_eq!(app.sentence_mark().unwrap().page, 1);
+        press(&mut app, "h");
+        assert_eq!(app.sentence_mark().unwrap().page, 0);
+        // `h` at the document start is clamped.
+        press(&mut app, "h");
+        assert_eq!(app.sentence_mark().unwrap().page, 0);
+    }
+
+    #[test]
+    fn sentence_exit_restores_scrolling() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_doc(dir.path(), 3);
+        press(&mut app, "cs");
+        assert_eq!(app.mode(), Mode::SentenceFocus);
+        press(&mut app, "<Esc>");
+        assert_eq!(app.mode(), Mode::Normal);
+        assert!(app.sentence_screen_rects().is_none());
+        let before = app.session.as_ref().unwrap().view.scroll().1;
+        press(&mut app, "j");
+        let after = app.session.as_ref().unwrap().view.scroll().1;
+        assert!(after > before);
+    }
+
+    #[test]
+    fn sentence_without_document_does_not_crash() {
+        let mut app = App::new(Config::default(), None);
+        press(&mut app, "cs");
+        assert!(app.sentence_screen_rects().is_none());
+        press(&mut app, "l");
+        assert!(app.sentence_mark().is_none());
+    }
+
+    // ---- Paragraph focus -----------------------------------------------
+
+    #[test]
+    fn paragraph_enter_marks_paragraph_and_shows_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["Hello world"]);
+        press(&mut app, "c");
+        assert_eq!(app.mode(), Mode::Normal);
+        press(&mut app, "p");
+        assert_eq!(app.mode(), Mode::ParagraphFocus);
+        let mark = app.paragraph_mark().expect("paragraph marked");
+        assert_eq!((mark.page, mark.start_line), (0, 0));
+        assert!(app.paragraph_screen_rect().is_some());
+        assert!(app.status_text().contains("-- PARAGRAPH FOCUS --"));
+    }
+
+    #[test]
+    fn paragraph_next_steps_within_page() {
+        let dir = tempfile::tempdir().unwrap();
+        // A two-column page has more than one paragraph (split at the column gap).
+        let mut app = app_with_two_column_page(dir.path());
+        press(&mut app, "cp");
+        let first = app.paragraph_mark().unwrap();
+        press(&mut app, "j");
+        let next = app.paragraph_mark().unwrap();
+        assert_eq!(next.page, 0, "still on the same page");
+        assert_ne!(
+            (next.start_line, next.end_line),
+            (first.start_line, first.end_line),
+            "moved to a different paragraph"
+        );
+    }
+
+    #[test]
+    fn paragraph_next_crosses_pages() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["First page", "Second page"]);
+        press(&mut app, "cp");
+        assert_eq!(app.paragraph_mark().unwrap().page, 0);
+        // Each page is a single paragraph, so `j` crosses to the next page.
+        press(&mut app, "j");
+        assert_eq!(app.paragraph_mark().unwrap().page, 1);
+        press(&mut app, "k");
+        assert_eq!(app.paragraph_mark().unwrap().page, 0);
+        // `k` at the document start is clamped.
+        press(&mut app, "k");
+        assert_eq!(app.paragraph_mark().unwrap().page, 0);
+    }
+
+    #[test]
+    fn paragraph_exit_restores_scrolling() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_doc(dir.path(), 3);
+        press(&mut app, "cp");
+        assert_eq!(app.mode(), Mode::ParagraphFocus);
+        press(&mut app, "<Esc>");
+        assert_eq!(app.mode(), Mode::Normal);
+        assert!(app.paragraph_screen_rect().is_none());
+        let before = app.session.as_ref().unwrap().view.scroll().1;
+        press(&mut app, "j");
+        let after = app.session.as_ref().unwrap().view.scroll().1;
+        assert!(after > before);
+    }
+
+    #[test]
+    fn paragraph_without_document_does_not_crash() {
+        let mut app = App::new(Config::default(), None);
+        press(&mut app, "cp");
+        assert!(app.paragraph_screen_rect().is_none());
+        press(&mut app, "j");
+        assert!(app.paragraph_mark().is_none());
     }
 
     #[test]

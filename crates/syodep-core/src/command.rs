@@ -69,6 +69,24 @@ pub enum Command {
     WordFocusUp,
     /// Move down a line, landing on the word nearest the goal column.
     WordFocusDown,
+    // Sentence focus (modal whole-sentence highlight over content).
+    /// Enter sentence focus mode, highlighting the nearest sentence.
+    SentenceFocusEnter,
+    /// Leave sentence focus mode, returning to scrolling (the sentence is remembered).
+    SentenceFocusExit,
+    /// Move the highlight to the next sentence.
+    SentenceFocusNext,
+    /// Move the highlight to the previous sentence.
+    SentenceFocusPrev,
+    // Paragraph focus (modal whole-paragraph highlight over content).
+    /// Enter paragraph focus mode, highlighting the nearest paragraph.
+    ParagraphFocusEnter,
+    /// Leave paragraph focus mode, returning to scrolling (the paragraph is remembered).
+    ParagraphFocusExit,
+    /// Move the highlight to the next paragraph.
+    ParagraphFocusNext,
+    /// Move the highlight to the previous paragraph.
+    ParagraphFocusPrev,
     // Application.
     OpenFile,
     Quit,
@@ -116,6 +134,14 @@ pub const ALL_COMMANDS: &[(&str, Command)] = &[
     ("word_focus_right", Command::WordFocusRight),
     ("word_focus_up", Command::WordFocusUp),
     ("word_focus_down", Command::WordFocusDown),
+    ("sentence_focus_enter", Command::SentenceFocusEnter),
+    ("sentence_focus_exit", Command::SentenceFocusExit),
+    ("sentence_focus_next", Command::SentenceFocusNext),
+    ("sentence_focus_prev", Command::SentenceFocusPrev),
+    ("paragraph_focus_enter", Command::ParagraphFocusEnter),
+    ("paragraph_focus_exit", Command::ParagraphFocusExit),
+    ("paragraph_focus_next", Command::ParagraphFocusNext),
+    ("paragraph_focus_prev", Command::ParagraphFocusPrev),
     ("open_file", Command::OpenFile),
     ("quit", Command::Quit),
     ("cancel", Command::Cancel),

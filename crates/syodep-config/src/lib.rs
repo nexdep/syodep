@@ -42,6 +42,14 @@ pub struct Config {
     /// `caret_focus_keys` and `line_focus_keys`.
     #[serde(default)]
     pub word_focus_keys: BTreeMap<String, String>,
+    /// Sentence-focus-mode keybindings (the `[sentence_focus_keys]` table). These
+    /// overlay the normal `keys` while sentence focus mode is active.
+    #[serde(default)]
+    pub sentence_focus_keys: BTreeMap<String, String>,
+    /// Paragraph-focus-mode keybindings (the `[paragraph_focus_keys]` table).
+    /// These overlay the normal `keys` while paragraph focus mode is active.
+    #[serde(default)]
+    pub paragraph_focus_keys: BTreeMap<String, String>,
     /// `[files]` section: file-dialog and path behaviour.
     #[serde(default)]
     pub files: FilesConfig,
@@ -100,6 +108,8 @@ impl Default for Config {
             caret_focus_keys: default_caret_focus_keybindings(),
             line_focus_keys: default_line_focus_keybindings(),
             word_focus_keys: default_word_focus_keybindings(),
+            sentence_focus_keys: default_sentence_focus_keybindings(),
+            paragraph_focus_keys: default_paragraph_focus_keybindings(),
             files: FilesConfig::default(),
         }
     }
@@ -136,6 +146,8 @@ pub fn default_keybindings() -> BTreeMap<String, String> {
         ("cc", "caret_focus_enter"),
         ("cl", "line_focus_enter"),
         ("cw", "word_focus_enter"),
+        ("cs", "sentence_focus_enter"),
+        ("cp", "paragraph_focus_enter"),
         ("o", "open_file"),
         ("q", "quit"),
         ("<Esc>", "cancel"),
@@ -218,6 +230,52 @@ pub fn default_word_focus_keybindings() -> BTreeMap<String, String> {
     .collect()
 }
 
+/// Built-in sentence-focus-mode keybindings (the `[sentence_focus_keys]` table).
+/// These overlay the normal bindings while sentence focus mode is active.
+/// Sentences are a linear sequence, so all of `hjkl`/arrows collapse to
+/// previous/next and `<Esc>` leaves the mode; everything else keeps its meaning.
+///
+/// Every entry here must be documented in `docs/keybindings.md`.
+pub fn default_sentence_focus_keybindings() -> BTreeMap<String, String> {
+    [
+        ("h", "sentence_focus_prev"),
+        ("k", "sentence_focus_prev"),
+        ("<Up>", "sentence_focus_prev"),
+        ("<Left>", "sentence_focus_prev"),
+        ("l", "sentence_focus_next"),
+        ("j", "sentence_focus_next"),
+        ("<Down>", "sentence_focus_next"),
+        ("<Right>", "sentence_focus_next"),
+        ("<Esc>", "sentence_focus_exit"),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_owned(), v.to_owned()))
+    .collect()
+}
+
+/// Built-in paragraph-focus-mode keybindings (the `[paragraph_focus_keys]`
+/// table). These overlay the normal bindings while paragraph focus mode is
+/// active, mirroring `sentence_focus_keys`: `hjkl`/arrows collapse to
+/// previous/next and `<Esc>` leaves the mode.
+///
+/// Every entry here must be documented in `docs/keybindings.md`.
+pub fn default_paragraph_focus_keybindings() -> BTreeMap<String, String> {
+    [
+        ("h", "paragraph_focus_prev"),
+        ("k", "paragraph_focus_prev"),
+        ("<Up>", "paragraph_focus_prev"),
+        ("<Left>", "paragraph_focus_prev"),
+        ("l", "paragraph_focus_next"),
+        ("j", "paragraph_focus_next"),
+        ("<Down>", "paragraph_focus_next"),
+        ("<Right>", "paragraph_focus_next"),
+        ("<Esc>", "paragraph_focus_exit"),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_owned(), v.to_owned()))
+    .collect()
+}
+
 /// Errors produced while loading or parsing configuration.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -250,6 +308,12 @@ impl Config {
         let mut word_focus_keys = default_word_focus_keybindings();
         word_focus_keys.extend(std::mem::take(&mut config.word_focus_keys));
         config.word_focus_keys = word_focus_keys;
+        let mut sentence_focus_keys = default_sentence_focus_keybindings();
+        sentence_focus_keys.extend(std::mem::take(&mut config.sentence_focus_keys));
+        config.sentence_focus_keys = sentence_focus_keys;
+        let mut paragraph_focus_keys = default_paragraph_focus_keybindings();
+        paragraph_focus_keys.extend(std::mem::take(&mut config.paragraph_focus_keys));
+        config.paragraph_focus_keys = paragraph_focus_keys;
         Ok(config)
     }
 
@@ -407,6 +471,74 @@ mod tests {
         assert_eq!(
             config.keys.get("cw").map(String::as_str),
             Some("word_focus_enter")
+        );
+    }
+
+    #[test]
+    fn sentence_focus_keys_default_and_user_override() {
+        let config = Config::from_toml(
+            r#"
+            [sentence_focus_keys]
+            "n" = "sentence_focus_next"
+            "#,
+        )
+        .unwrap();
+        // Built-in sentence-focus bindings survive.
+        assert_eq!(
+            config.sentence_focus_keys.get("h").map(String::as_str),
+            Some("sentence_focus_prev")
+        );
+        assert_eq!(
+            config.sentence_focus_keys.get("l").map(String::as_str),
+            Some("sentence_focus_next")
+        );
+        assert_eq!(
+            config.sentence_focus_keys.get("<Esc>").map(String::as_str),
+            Some("sentence_focus_exit")
+        );
+        // User override is merged in.
+        assert_eq!(
+            config.sentence_focus_keys.get("n").map(String::as_str),
+            Some("sentence_focus_next")
+        );
+        // The enter binding (`cs`) lives in the normal table.
+        assert_eq!(
+            config.keys.get("cs").map(String::as_str),
+            Some("sentence_focus_enter")
+        );
+    }
+
+    #[test]
+    fn paragraph_focus_keys_default_and_user_override() {
+        let config = Config::from_toml(
+            r#"
+            [paragraph_focus_keys]
+            "n" = "paragraph_focus_next"
+            "#,
+        )
+        .unwrap();
+        // Built-in paragraph-focus bindings survive.
+        assert_eq!(
+            config.paragraph_focus_keys.get("h").map(String::as_str),
+            Some("paragraph_focus_prev")
+        );
+        assert_eq!(
+            config.paragraph_focus_keys.get("j").map(String::as_str),
+            Some("paragraph_focus_next")
+        );
+        assert_eq!(
+            config.paragraph_focus_keys.get("<Esc>").map(String::as_str),
+            Some("paragraph_focus_exit")
+        );
+        // User override is merged in.
+        assert_eq!(
+            config.paragraph_focus_keys.get("n").map(String::as_str),
+            Some("paragraph_focus_next")
+        );
+        // The enter binding (`cp`) lives in the normal table.
+        assert_eq!(
+            config.keys.get("cp").map(String::as_str),
+            Some("paragraph_focus_enter")
         );
     }
 

@@ -7,6 +7,57 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-06-26 — Sentence focus & paragraph focus modes
+
+### Implemented
+
+- **Sentence focus mode** (`syodep-core`): added `Mode::SentenceFocus`, entered
+  with `cs` (`sentence_focus_enter`) and left with `<Esc>`. It highlights a whole
+  sentence (`SentenceMark { page, start_line, start_cell, end_line, end_cell }`),
+  which may span several lines but never crosses a page. Boundaries are detected
+  over the cell stream at sentence-terminating punctuation (`.`/`!`/`?`, via
+  `is_sentence_terminator`) plus trailing closing quotes/brackets
+  (`is_sentence_trailer`), reusing the caret's cross-line `next_cell`/`prev_cell`
+  walkers.
+- **Paragraph focus mode**: added `Mode::ParagraphFocus`, entered with `cp`
+  (`paragraph_focus_enter`). It highlights a block of lines
+  (`ParagraphMark { page, start_line, end_line }`). The pure `paragraph_segments`
+  splits a page's lines on column changes (reusing `column_ranges`/
+  `column_index_of`) and on vertical gaps larger than `PARAGRAPH_GAP_FACTOR`
+  times the median line height.
+- **Navigation**: both modes are a linear sequence, so all of `hjkl` and the
+  arrow keys collapse to previous/next (`*_focus_prev`/`*_focus_next`); counts
+  repeat the motion and motion wraps across pages. Scroll and page jumps carry
+  the highlight to visible content; zoom leaves it in place.
+- **Config/FFI/Qt**: added `[sentence_focus_keys]` and `[paragraph_focus_keys]`
+  overlay tables. Paragraph reuses the single-rect `SyoCaret` path
+  (`syo_app_paragraph`, purple Qt highlight); sentence renders a text-selection
+  shape via a new `syo_app_sentence`/`syo_sentence_free` array FFI
+  (`SyoRect`/`SyoSentence`) drawn as one red rectangle per spanned line.
+- **Docs**: added the sentence- and paragraph-focus command pages, keybinding/
+  config references, and docs-check coverage for the new commands and default
+  bindings.
+
+### Tests
+
+- Pure `caret` tests cover the sentence classifiers and `paragraph_segments`
+  (tight grouping, large-gap split, column-change split, single/empty).
+- App-level tests cover enter/mark/status, next/prev stepping, a sentence
+  spanning lines (multi-rect), cross-page motion, within-page paragraph
+  stepping, exit behavior and no-document safety.
+- FFI round-trip toggles paragraph validity and exercises the sentence rect
+  array + `syo_sentence_free`.
+
+### Decisions
+
+- Marks are **page-confined** (every overlay goes through the per-page
+  `page_rect_to_screen`); navigation crosses pages while a single mark never
+  straddles one, matching `WordMark`/`LineMark`.
+- Decimal points and abbreviations (`3.14`, `Mr.`) are treated as sentence
+  terminators — a deliberate v1 simplification.
+
+---
+
 ## 2026-06-26 — Word focus mode
 
 ### Implemented

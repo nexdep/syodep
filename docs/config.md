@@ -113,6 +113,34 @@ the `word_focus_*` command names.
 "e" = "word_focus_right"   # extra binding, only in word focus mode
 ```
 
+## `[sentence_focus_keys]`
+
+Keybindings that apply only in **sentence focus mode** (entered with `cs`). They
+overlay the normal `[keys]` while sentence focus mode is active. Defaults:
+`h`/`k` (and `<Left>`/`<Up>`) move to the previous sentence, `l`/`j` (and
+`<Right>`/`<Down>`) move to the next, and `<Esc>` exits. See
+`docs/keybindings.md` for the full description and `docs/commands.md` for the
+`sentence_focus_*` command names.
+
+```toml
+[sentence_focus_keys]
+"n" = "sentence_focus_next"   # extra binding, only in sentence focus mode
+```
+
+## `[paragraph_focus_keys]`
+
+Keybindings that apply only in **paragraph focus mode** (entered with `cp`). They
+overlay the normal `[keys]` while paragraph focus mode is active. Defaults:
+`h`/`k` (and `<Left>`/`<Up>`) move to the previous paragraph, `l`/`j` (and
+`<Right>`/`<Down>`) move to the next, and `<Esc>` exits. See
+`docs/keybindings.md` for the full description and `docs/commands.md` for the
+`paragraph_focus_*` command names.
+
+```toml
+[paragraph_focus_keys]
+"n" = "paragraph_focus_next"   # extra binding, only in paragraph focus mode
+```
+
 ## Planned config sections
 
 Later phases add: theme/colors beyond the background, annotation

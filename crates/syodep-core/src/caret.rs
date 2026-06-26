@@ -29,6 +29,12 @@ pub enum Mode {
     /// Word focus mode: a whole word is highlighted; `h`/`l` (and `w`/`b`) step
     /// word-wise and `j`/`k` move by line, keeping a goal column like the caret.
     WordFocus,
+    /// Sentence focus mode: a whole sentence (possibly spanning several lines) is
+    /// highlighted; `hjkl`/arrows step sentence-wise (a linear sequence).
+    SentenceFocus,
+    /// Paragraph focus mode: a whole paragraph (a block of lines) is highlighted;
+    /// `hjkl`/arrows step paragraph-wise (a linear sequence).
+    ParagraphFocus,
 }
 
 /// A word-focus position: the run of cells `start_cell..=end_cell` within a line
@@ -40,6 +46,27 @@ pub struct WordMark {
     pub line: usize,
     pub start_cell: usize,
     pub end_cell: usize,
+}
+
+/// A sentence-focus position: the run of cells from `[start_line, start_cell]`
+/// to `[end_line, end_cell]` (inclusive) within a single page. Unlike a
+/// [`WordMark`] a sentence may span several lines, but never crosses a page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SentenceMark {
+    pub page: usize,
+    pub start_line: usize,
+    pub start_cell: usize,
+    pub end_line: usize,
+    pub end_cell: usize,
+}
+
+/// A paragraph-focus position: the inclusive run of lines `start_line..=end_line`
+/// within a single page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParagraphMark {
+    pub page: usize,
+    pub start_line: usize,
+    pub end_line: usize,
 }
 
 /// A line-focus position: a line within a page. Both indices are zero-based and
@@ -106,6 +133,70 @@ pub fn continues_word_run(left: WordClass, right: WordClass, same_line: bool) ->
             (left, right),
             (WordClass::Word, WordClass::Word) | (WordClass::Punctuation, WordClass::Punctuation)
         )
+}
+
+/// Whether `c` ends a sentence. Decimal points and abbreviations (`3.14`,
+/// `Mr.`) are treated as terminators too — a deliberate v1 simplification.
+pub fn is_sentence_terminator(c: char) -> bool {
+    matches!(c, '.' | '!' | '?')
+}
+
+/// Whether `c` is a closing character that stays attached to the end of a
+/// sentence after its terminator (so `."` / `.)` close together).
+pub fn is_sentence_trailer(c: char) -> bool {
+    matches!(c, '"' | '\'' | ')' | ']' | '}' | '»' | '”' | '’')
+}
+
+/// A new paragraph starts when the vertical gap between consecutive lines
+/// exceeds this fraction of the median line height.
+pub const PARAGRAPH_GAP_FACTOR: f32 = 0.75;
+
+/// Split a page's lines into paragraphs, returned as inclusive
+/// `(start_line, end_line)` index ranges over `lines`.
+///
+/// Consecutive non-empty lines belong to the same paragraph until a break is
+/// detected: a column change (reusing [`column_ranges`]/[`column_index_of`]), a
+/// vertical gap larger than [`PARAGRAPH_GAP_FACTOR`] times the median line
+/// height, or the y-coordinate jumping back upward (a column/region reset).
+/// Empty lines are skipped, mirroring the rest of the navigation code.
+///
+/// Pure so it can be unit-tested in isolation, like [`column_ranges`].
+pub fn paragraph_segments(lines: &[ContentLine]) -> Vec<(usize, usize)> {
+    let cols = column_ranges(lines);
+    let non_empty: Vec<usize> = (0..lines.len())
+        .filter(|&i| !lines[i].cells.is_empty())
+        .collect();
+    if non_empty.is_empty() {
+        return Vec::new();
+    }
+    // Median height of non-empty lines, for the gap threshold.
+    let mut heights: Vec<f32> = non_empty
+        .iter()
+        .map(|&i| lines[i].bbox.y1 - lines[i].bbox.y0)
+        .collect();
+    heights.sort_by(f32::total_cmp);
+    let median_height = heights[heights.len() / 2];
+    let threshold = PARAGRAPH_GAP_FACTOR * median_height;
+
+    let col_of = |i: usize| {
+        let b = lines[i].bbox;
+        column_index_of(&cols, b.x0, b.x1)
+    };
+
+    let mut segments = Vec::new();
+    let mut start = non_empty[0];
+    for w in non_empty.windows(2) {
+        let (prev, cur) = (w[0], w[1]);
+        let pb = lines[prev].bbox;
+        let cb = lines[cur].bbox;
+        let breaks = col_of(prev) != col_of(cur) || cb.y0 - pb.y1 > threshold || cb.y0 < pb.y0;
+        if breaks {
+            segments.push((start, prev));
+            start = cur;
+        }
+    }
+    segments.push((start, *non_empty.last().unwrap()));
+    segments
 }
 
 /// Index of the cell whose horizontal extent is nearest `goal_x` (the
@@ -348,6 +439,59 @@ mod tests {
         assert_eq!(column_index_of(&cols, 10.0, 90.0), Some(0));
         assert_eq!(column_index_of(&cols, 210.0, 290.0), Some(1));
         assert_eq!(column_index_of(&[], 0.0, 1.0), None);
+    }
+
+    #[test]
+    fn sentence_classifiers() {
+        assert!(is_sentence_terminator('.'));
+        assert!(is_sentence_terminator('!'));
+        assert!(is_sentence_terminator('?'));
+        assert!(!is_sentence_terminator(','));
+        assert!(is_sentence_trailer('"'));
+        assert!(is_sentence_trailer(')'));
+        assert!(!is_sentence_trailer('a'));
+    }
+
+    #[test]
+    fn paragraph_segments_groups_tightly_spaced_lines() {
+        // Three lines stacked with ~line-height spacing: one paragraph.
+        let lines = [
+            line(0.0, 0.0, 100.0, 10.0),
+            line(0.0, 12.0, 100.0, 22.0),
+            line(0.0, 24.0, 100.0, 34.0),
+        ];
+        assert_eq!(paragraph_segments(&lines), vec![(0, 2)]);
+    }
+
+    #[test]
+    fn paragraph_segments_splits_on_large_gap() {
+        // A big vertical gap before the third line starts a new paragraph.
+        let lines = [
+            line(0.0, 0.0, 100.0, 10.0),
+            line(0.0, 12.0, 100.0, 22.0),
+            line(0.0, 80.0, 100.0, 90.0),
+        ];
+        assert_eq!(paragraph_segments(&lines), vec![(0, 1), (2, 2)]);
+    }
+
+    #[test]
+    fn paragraph_segments_splits_on_column_change() {
+        // Two columns: left lines, then a right-column line.
+        let lines = [
+            line(0.0, 0.0, 100.0, 10.0),
+            line(0.0, 12.0, 100.0, 22.0),
+            line(200.0, 0.0, 300.0, 10.0),
+        ];
+        assert_eq!(paragraph_segments(&lines), vec![(0, 1), (2, 2)]);
+    }
+
+    #[test]
+    fn paragraph_segments_single_line_and_empty() {
+        assert_eq!(
+            paragraph_segments(&[line(0.0, 0.0, 100.0, 10.0)]),
+            vec![(0, 0)]
+        );
+        assert!(paragraph_segments(&[]).is_empty());
     }
 
     #[test]

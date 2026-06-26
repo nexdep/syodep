@@ -151,6 +151,40 @@ void CanvasWidget::paintGL()
         painter.setBrush(Qt::NoBrush);
         painter.drawRect(box);
     }
+
+    // Paragraph-focus overlay (only present in paragraph focus mode). A single
+    // block rectangle in a distinct purple accent.
+    const SyoCaret paragraph = syo_app_paragraph(m_app);
+    if (paragraph.valid) {
+        QRectF box(paragraph.x / dpr, paragraph.y / dpr, paragraph.width / dpr,
+                   paragraph.height / dpr);
+        if (box.height() < 2.0)
+            box.setHeight(2.0);
+        const QColor accent(160, 120, 220);
+        painter.fillRect(box, QColor(160, 120, 220, 70));
+        painter.setPen(accent);
+        painter.setBrush(Qt::NoBrush);
+        painter.drawRect(box);
+    }
+
+    // Sentence-focus overlay (only present in sentence focus mode). One rectangle
+    // per spanned line (a text-selection shape), in a distinct red accent. The
+    // rect buffer is owned by the core and must be freed.
+    const SyoSentence sentence = syo_app_sentence(m_app);
+    if (sentence.valid) {
+        const QColor accent(220, 110, 110);
+        for (uintptr_t i = 0; i < sentence.rect_count; ++i) {
+            const SyoRect r = sentence.rects[i];
+            QRectF box(r.x / dpr, r.y / dpr, r.width / dpr, r.height / dpr);
+            if (box.width() < 2.0)
+                box.setWidth(2.0);
+            painter.fillRect(box, QColor(220, 110, 110, 70));
+            painter.setPen(accent);
+            painter.setBrush(Qt::NoBrush);
+            painter.drawRect(box);
+        }
+    }
+    syo_sentence_free(sentence);
 }
 
 } // namespace syodep

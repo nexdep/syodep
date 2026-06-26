@@ -72,6 +72,22 @@ suite green, lints clean, and documentation consistent with the code
 Never push red. CI mirrors these checks in `.github/workflows/ci.yml`
 (plus Windows `cargo test`).
 
+**Before pushing to `main`** (directly or via merge): always verify the
+documentation is consistent with the code before the push — this is a hard
+gate, never skipped. Run `./scripts/check-docs.sh` and confirm it passes,
+and additionally review by hand that the docs indexed under "Definition of
+done" still match what the code does:
+
+- per-mode command pages (`docs/commands-normal-mode.md`,
+  `docs/commands-caret-focus-mode.md`) match `Command`/`ALL_COMMANDS`,
+- `docs/keybindings.md` matches `syodep-config::default_keybindings()`,
+- `docs/config.md` matches the config registry,
+- `docs/architecture.md` and `docs/roadmap.md` still reflect current
+  behavior, and a dev-log entry covers any behavior change in the push.
+
+If any doc is stale, update it (or the code) so they agree before pushing.
+Do not push to `main` with inconsistent documentation.
+
 ## Conventions & gotchas
 
 - Adding a command: extend `Command` + `ALL_COMMANDS` in

@@ -64,6 +64,8 @@ Caret (see "Caret focus mode" below):
 | `cc` | `caret_focus_enter` |
 | `cl` | `line_focus_enter` |
 | `cw` | `word_focus_enter` |
+| `cs` | `sentence_focus_enter` |
+| `cp` | `paragraph_focus_enter` |
 
 Application:
 
@@ -162,6 +164,57 @@ shows `-- WORD FOCUS --` with the current line and column. See
 
 Customize word-focus-mode keys with a `[word_focus_keys]` table (see
 `docs/config.md`); it overlays the normal bindings while word focus mode is
+active.
+
+## Sentence focus mode
+
+Press `cs` (`sentence_focus_enter`) to switch to **sentence focus mode**, where
+a whole sentence is highlighted — possibly spanning several lines:
+
+| Keys | Command |
+|---|---|
+| `h`, `k`, `<Left>`, `<Up>` | `sentence_focus_prev` — previous sentence |
+| `l`, `j`, `<Right>`, `<Down>` | `sentence_focus_next` — next sentence |
+| `<Esc>` | `sentence_focus_exit` — back to normal mode |
+
+A sentence is a run of cells ending at sentence-terminating punctuation
+(`.`, `!`, `?`) plus any trailing closing quotes/brackets. Because sentences are
+a linear sequence, all of `hjkl` and the arrow keys collapse to previous/next
+(there are no Vim `(`/`)` aliases). The highlight spans lines as a
+text-selection shape, wraps across pages, and counts work (`3l`). As in the
+other focus modes, every other binding still works; scroll / page-jump commands
+carry the highlight to visible content while zoom leaves it in place. The status
+bar shows `-- SENTENCE FOCUS --` with the current line. See
+`docs/commands-sentence-focus-mode.md` for the full list.
+
+Note: decimal points and abbreviations (`3.14`, `Mr.`) are treated as sentence
+terminators — a deliberate simplification.
+
+Customize sentence-focus-mode keys with a `[sentence_focus_keys]` table (see
+`docs/config.md`); it overlays the normal bindings while sentence focus mode is
+active.
+
+## Paragraph focus mode
+
+Press `cp` (`paragraph_focus_enter`) to switch to **paragraph focus mode**, where
+a whole paragraph (a block of content lines) is highlighted:
+
+| Keys | Command |
+|---|---|
+| `h`, `k`, `<Left>`, `<Up>` | `paragraph_focus_prev` — previous paragraph |
+| `l`, `j`, `<Right>`, `<Down>` | `paragraph_focus_next` — next paragraph |
+| `<Esc>` | `paragraph_focus_exit` — back to normal mode |
+
+Paragraphs are detected from the line layout: consecutive lines form a paragraph
+until a larger-than-normal vertical gap or a column change. As with sentence
+focus, all of `hjkl`/arrows collapse to previous/next (no Vim `{`/`}` aliases),
+motion wraps across pages, and counts work (`3j`). Every other binding still
+works; scroll / page-jump commands carry the highlight to visible content while
+zoom leaves it in place. The status bar shows `-- PARAGRAPH FOCUS --` with the
+current line range. See `docs/commands-paragraph-focus-mode.md` for the full list.
+
+Customize paragraph-focus-mode keys with a `[paragraph_focus_keys]` table (see
+`docs/config.md`); it overlays the normal bindings while paragraph focus mode is
 active.
 
 ## Customizing

@@ -130,6 +130,28 @@ pub struct SyoCaret {
     pub height: f32,
 }
 
+/// One rectangle (canvas pixels) of a multi-rect overlay, e.g. a sentence.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SyoRect {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+/// The sentence-focus overlay: zero or more rectangles (one per spanned line) in
+/// canvas pixels. `valid` is 0 when not in sentence focus mode or no sentence is
+/// marked, in which case `rects` is NULL and `rect_count` is 0. The `rects`
+/// buffer is owned by the core and must be released with [`syo_sentence_free`].
+#[repr(C)]
+pub struct SyoSentence {
+    pub valid: u8,
+    pub page: usize,
+    pub rects: *const SyoRect,
+    pub rect_count: usize,
+}
+
 /// A tightly packed RGBA8 image (stride = width * 4).
 #[repr(C)]
 pub struct SyoBitmap {
@@ -444,6 +466,103 @@ pub unsafe extern "C" fn syo_app_word(app: *const SyoApp) -> SyoCaret {
     .unwrap_or(invalid)
 }
 
+/// The paragraph-focus rectangle (canvas pixels) for the overlay. Reuses the
+/// [`SyoCaret`] layout; `valid` is 0 unless paragraph focus mode is active with a
+/// paragraph marked.
+///
+/// # Safety
+/// `app` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn syo_app_paragraph(app: *const SyoApp) -> SyoCaret {
+    let invalid = SyoCaret {
+        valid: 0,
+        page: 0,
+        x: 0.0,
+        y: 0.0,
+        width: 0.0,
+        height: 0.0,
+    };
+    let Some(app) = (unsafe { app.as_ref() }) else {
+        return invalid;
+    };
+    catch_unwind(AssertUnwindSafe(|| match app.app.paragraph_screen_rect() {
+        Some((page, rect)) => SyoCaret {
+            valid: 1,
+            page,
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+        },
+        None => invalid,
+    }))
+    .unwrap_or(invalid)
+}
+
+/// The sentence-focus overlay: one rectangle per spanned line (a text-selection
+/// shape). `valid` is 0 unless sentence focus mode is active with a sentence
+/// marked. The returned `rects` buffer is owned by the core and must be released
+/// with [`syo_sentence_free`].
+///
+/// # Safety
+/// `app` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn syo_app_sentence(app: *const SyoApp) -> SyoSentence {
+    // `SyoSentence` owns a raw pointer and so is not `Copy`; build a fresh
+    // "invalid" value wherever one is needed rather than moving a shared one.
+    fn invalid() -> SyoSentence {
+        SyoSentence {
+            valid: 0,
+            page: 0,
+            rects: std::ptr::null(),
+            rect_count: 0,
+        }
+    }
+    let Some(app) = (unsafe { app.as_ref() }) else {
+        return invalid();
+    };
+    catch_unwind(AssertUnwindSafe(|| match app.app.sentence_screen_rects() {
+        Some((page, rects)) if !rects.is_empty() => {
+            let boxed: Box<[SyoRect]> = rects
+                .into_iter()
+                .map(|r| SyoRect {
+                    x: r.x,
+                    y: r.y,
+                    width: r.width,
+                    height: r.height,
+                })
+                .collect();
+            let rect_count = boxed.len();
+            let rects = Box::into_raw(boxed) as *const SyoRect;
+            SyoSentence {
+                valid: 1,
+                page,
+                rects,
+                rect_count,
+            }
+        }
+        _ => invalid(),
+    }))
+    .unwrap_or_else(|_| invalid())
+}
+
+/// Free the `rects` buffer of a [`SyoSentence`] returned by `syo_app_sentence`.
+///
+/// # Safety
+/// `sentence` must be a value returned by `syo_app_sentence`, not freed before.
+#[no_mangle]
+pub unsafe extern "C" fn syo_sentence_free(sentence: SyoSentence) {
+    if sentence.rects.is_null() || sentence.rect_count == 0 {
+        return;
+    }
+    unsafe {
+        drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(
+            sentence.rects as *mut SyoRect,
+            sentence.rect_count,
+        )));
+    }
+}
+
 /// Render a page at the current zoom. Returns NULL on failure. The result
 /// must be freed with `syo_bitmap_free`.
 ///
@@ -715,6 +834,30 @@ mod tests {
             assert_eq!(syo_app_line(app).valid, 1);
             syo_app_key_event(app, esc.as_ptr());
             assert_eq!(syo_app_line(app).valid, 0);
+
+            // Paragraph focus: inactive until entered with `cp`, then valid.
+            let p_key = CString::new("p").unwrap();
+            assert_eq!(syo_app_paragraph(app).valid, 0);
+            syo_app_key_event(app, c_key.as_ptr());
+            syo_app_key_event(app, p_key.as_ptr());
+            assert_eq!(syo_app_paragraph(app).valid, 1);
+            syo_app_key_event(app, esc.as_ptr());
+            assert_eq!(syo_app_paragraph(app).valid, 0);
+
+            // Sentence focus: inactive until entered with `cs`, then valid with
+            // at least one rect; the rect buffer must be freed.
+            let s_key = CString::new("s").unwrap();
+            assert_eq!(syo_app_sentence(app).valid, 0);
+            syo_app_key_event(app, c_key.as_ptr());
+            syo_app_key_event(app, s_key.as_ptr());
+            let sentence = syo_app_sentence(app);
+            assert_eq!(sentence.valid, 1);
+            assert!(sentence.rect_count >= 1);
+            syo_sentence_free(sentence);
+            syo_app_key_event(app, esc.as_ptr());
+            let empty = syo_app_sentence(app);
+            assert_eq!(empty.valid, 0);
+            syo_sentence_free(empty);
 
             // Out-of-range render fails cleanly.
             let bad = syo_app_render_page(app, 99);
