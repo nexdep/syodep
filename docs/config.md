@@ -98,6 +98,21 @@ highlight line-wise, `h`/`l` (and `<Left>`/`<Right>`) move between columns,
 "w" = "line_focus_right"   # extra binding, only in line focus mode
 ```
 
+## `[word_focus_keys]`
+
+Keybindings that apply only in **word focus mode** (entered with `cw`). They
+overlay the normal `[keys]` while word focus mode is active, mirroring the
+other focus-mode key tables. Defaults: `h`/`b` (and `<Left>`) move to the
+previous word run, `l`/`w` (and `<Right>`) move to the next word run, `j`/`k`
+(and `<Down>`/`<Up>`) move line-wise, and `<Esc>` exits. See
+`docs/keybindings.md` for the full description and `docs/commands.md` for
+the `word_focus_*` command names.
+
+```toml
+[word_focus_keys]
+"e" = "word_focus_right"   # extra binding, only in word focus mode
+```
+
 ## Planned config sections
 
 Later phases add: theme/colors beyond the background, annotation

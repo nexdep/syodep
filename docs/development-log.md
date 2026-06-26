@@ -7,6 +7,35 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-06-26 — Word focus mode
+
+### Implemented
+
+- **Word focus mode** (`syodep-core`): added `Mode::WordFocus`, entered with
+  `cw` (`word_focus_enter`) and left with `<Esc>`. It highlights a whole
+  Vim-like word run (`WordMark { page, line, start_cell, end_cell }`), using
+  the same word classes as caret word motions: letters/digits/underscore
+  together, punctuation/symbols as separate runs, whitespace skipped and each
+  image as one stop.
+- **Navigation**: `h`/`b` move to the previous run, `l`/`w` move to the next,
+  and `j`/`k` move line-wise while keeping a goal column. Counts repeat the
+  motion. Scroll and page jumps carry the highlight to visible content; zoom
+  leaves it on the same word.
+- **Config/FFI/Qt**: added `[word_focus_keys]` with default overlay semantics,
+  `syo_app_word` for the overlay rectangle and a green Qt highlight distinct
+  from caret and line focus.
+- **Docs**: added the word-focus command page, keybinding/config references
+  and docs-check coverage for the new commands and default bindings.
+
+### Tests
+
+- Config test covers `[word_focus_keys]` default merging and user overrides.
+- App-level tests cover enter/mark/status, horizontal and vertical motion
+  across lines/pages, inherited bindings, exit behavior and no-document safety.
+- Docs check covers the new command page and word-focus default bindings.
+
+---
+
 ## 2026-06-25 — Graphics diagnostics & WSL auto-fallback (0.3.0)
 
 ### Implemented

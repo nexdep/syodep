@@ -63,6 +63,7 @@ Caret (see "Caret focus mode" below):
 |---|---|
 | `cc` | `caret_focus_enter` |
 | `cl` | `line_focus_enter` |
+| `cw` | `word_focus_enter` |
 
 Application:
 
@@ -77,9 +78,9 @@ this is a convenience, not the primary workflow.
 
 ## Caret focus mode
 
-syodep has two input modes. In **normal mode** (the default) `hjkl` scroll
-the page. Press `cc` (`caret_focus_enter`) to switch to **caret focus mode**, where a
-cursor moves through the document's content — text characters and images:
+In **normal mode** (the default) `hjkl` scroll the page. Press `cc`
+(`caret_focus_enter`) to switch to **caret focus mode**, where a cursor moves
+through the document's content — text characters and images:
 
 | Keys | Command |
 |---|---|
@@ -134,6 +135,33 @@ current line. See `docs/commands-line-focus-mode.md` for the full list.
 
 Customize line-focus-mode keys with a `[line_focus_keys]` table (see
 `docs/config.md`); it overlays the normal bindings while line focus mode is
+active.
+
+## Word focus mode
+
+Press `cw` (`word_focus_enter`) to switch to **word focus mode**, where a
+whole Vim-like word run is highlighted:
+
+| Keys | Command |
+|---|---|
+| `h`, `b`, `<Left>` | `word_focus_left` — previous word run |
+| `l`, `w`, `<Right>` | `word_focus_right` — next word run |
+| `k`, `<Up>` | `word_focus_up` — one line up |
+| `j`, `<Down>` | `word_focus_down` — one line down |
+| `<Esc>` | `word_focus_exit` — back to normal mode |
+
+Word runs use the same boundaries as caret word motions:
+letters/digits/underscore together, punctuation/symbols separately,
+whitespace skipped, and each image as a single stop. `j`/`k` move line by
+line while keeping a goal column. The view scrolls to keep the highlighted
+word visible, and counts work (`3w`, `2j`). As in the other focus modes,
+every other binding still works; scroll / page-jump commands carry the
+highlight to visible content while zoom leaves it in place. The status bar
+shows `-- WORD FOCUS --` with the current line and column. See
+`docs/commands-word-focus-mode.md` for the full list.
+
+Customize word-focus-mode keys with a `[word_focus_keys]` table (see
+`docs/config.md`); it overlays the normal bindings while word focus mode is
 active.
 
 ## Customizing

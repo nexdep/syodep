@@ -20,7 +20,7 @@ use syodep_storage::{Position, Storage};
 
 use crate::caret::{
     column_index_of, column_ranges, continues_word_run, is_word_target, nearest_cell_in_line,
-    nearest_line_in_column, word_class, Caret, Dir, LineMark, Mode, WordClass,
+    nearest_line_in_column, word_class, Caret, Dir, LineMark, Mode, WordClass, WordMark,
 };
 use crate::command::Command;
 use crate::input::{InputState, KeyOutcome, Keymap, KeymapError};
@@ -89,6 +89,9 @@ pub struct App {
     /// Keymap used while in line focus mode: the normal keymap plus the
     /// `[line_focus_keys]` overrides.
     line_focus_keymap: Keymap,
+    /// Keymap used while in word focus mode: the normal keymap plus the
+    /// `[word_focus_keys]` overrides.
+    word_focus_keymap: Keymap,
     input: InputState,
     storage: Option<Storage>,
     session: Option<Session>,
@@ -103,6 +106,10 @@ pub struct App {
     line_mark: Option<LineMark>,
     /// Remembered goal row (page-space y center) for horizontal column motion.
     line_goal_y: f32,
+    /// Current word-focus position, remembered across mode toggles.
+    word_mark: Option<WordMark>,
+    /// Remembered goal column (page-space x) for vertical word motion.
+    word_goal_x: f32,
     /// Config/keymap problems collected at startup, for the UI to surface.
     startup_warnings: Vec<String>,
     last_error: Option<String>,
@@ -132,12 +139,20 @@ impl App {
             .iter()
             .map(|(k, v)| (k.as_str(), v.as_str()));
         keymap_errors.extend(line_focus_keymap.overlay(line_entries));
+        // The word-focus keymap is built the same way, from `[word_focus_keys]`.
+        let mut word_focus_keymap = keymap.clone();
+        let word_entries = config
+            .word_focus_keys
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()));
+        keymap_errors.extend(word_focus_keymap.overlay(word_entries));
         let startup_warnings = keymap_errors.iter().map(KeymapError::to_string).collect();
         Self {
             config,
             keymap,
             caret_focus_keymap,
             line_focus_keymap,
+            word_focus_keymap,
             input: InputState::new(),
             storage,
             session: None,
@@ -147,6 +162,8 @@ impl App {
             caret_goal_x: 0.0,
             line_mark: None,
             line_goal_y: 0.0,
+            word_mark: None,
+            word_goal_x: 0.0,
             startup_warnings,
             last_error: None,
         }
@@ -221,6 +238,8 @@ impl App {
         self.caret_goal_x = 0.0;
         self.line_mark = None;
         self.line_goal_y = 0.0;
+        self.word_mark = None;
+        self.word_goal_x = 0.0;
         self.last_error = None;
         Ok(())
     }
@@ -279,6 +298,7 @@ impl App {
             Mode::Normal => &self.keymap,
             Mode::CaretFocus => &self.caret_focus_keymap,
             Mode::LineFocus => &self.line_focus_keymap,
+            Mode::WordFocus => &self.word_focus_keymap,
         };
         match self.input.handle(keymap, chord) {
             // Redraw on pending input so the status line shows it.
@@ -336,6 +356,15 @@ impl App {
             Command::LineFocusRight => return self.line_move(Dir::Right, count),
             Command::LineFocusUp => return self.line_move(Dir::Up, count),
             Command::LineFocusDown => return self.line_move(Dir::Down, count),
+            Command::WordFocusEnter => return self.enter_word_focus(),
+            Command::WordFocusExit => {
+                self.mode = Mode::Normal;
+                return Effects::redraw();
+            }
+            Command::WordFocusLeft => return self.word_move(Dir::Left, count),
+            Command::WordFocusRight => return self.word_move(Dir::Right, count),
+            Command::WordFocusUp => return self.word_move(Dir::Up, count),
+            Command::WordFocusDown => return self.word_move(Dir::Down, count),
             _ => {}
         }
 
@@ -385,7 +414,13 @@ impl App {
             | Command::LineFocusLeft
             | Command::LineFocusRight
             | Command::LineFocusUp
-            | Command::LineFocusDown => unreachable!("handled above"),
+            | Command::LineFocusDown
+            | Command::WordFocusEnter
+            | Command::WordFocusExit
+            | Command::WordFocusLeft
+            | Command::WordFocusRight
+            | Command::WordFocusUp
+            | Command::WordFocusDown => unreachable!("handled above"),
         }
         // In caret focus mode, scroll and page jumps carry the caret to the
         // newly visible content; zoom commands leave it where it is.
@@ -405,6 +440,9 @@ impl App {
         }
         if self.mode == Mode::LineFocus && moves_caret {
             self.reposition_line_to_viewport();
+        }
+        if self.mode == Mode::WordFocus && moves_caret {
+            self.reposition_word_to_viewport();
         }
         self.save_position();
         Effects::redraw()
@@ -1100,6 +1138,216 @@ impl App {
             .map(|rect| (mark.page, rect))
     }
 
+    // ---- Word focus navigation -----------------------------------------
+
+    pub fn word_mark(&self) -> Option<WordMark> {
+        self.word_mark
+    }
+
+    /// Build a word-focus mark from a landed caret cell by expanding it to the
+    /// full word run on that line (reusing the caret word-run helpers).
+    fn word_mark_from_caret(&mut self, caret: Caret) -> WordMark {
+        let start = self.word_run_start(caret);
+        let end = self.word_run_end(caret);
+        WordMark {
+            page: caret.page,
+            line: caret.line,
+            start_cell: start.cell,
+            end_cell: end.cell,
+        }
+    }
+
+    /// A caret at the mark's first cell — the representative position used to
+    /// drive the shared caret motion helpers.
+    fn word_mark_caret(mark: WordMark) -> Caret {
+        Caret {
+            page: mark.page,
+            line: mark.line,
+            cell: mark.start_cell,
+        }
+    }
+
+    /// Update the remembered goal column from the marked word's first cell.
+    fn update_word_goal_x(&mut self, mark: WordMark) {
+        if let Some(r) = self.cell_rect(mark.page, mark.line, mark.start_cell) {
+            self.word_goal_x = (r.x0 + r.x1) / 2.0;
+        }
+    }
+
+    fn enter_word_focus(&mut self) -> Effects {
+        if self.session.is_none() {
+            return Effects::default();
+        }
+        self.mode = Mode::WordFocus;
+        if self.word_mark.is_none() {
+            let from_visible =
+                if let Some(view_top) = self.session.as_ref().map(|s| s.view.scroll().1) {
+                    self.topmost_visible_line(view_top)
+                        .map(|(page, line)| Caret {
+                            page,
+                            line,
+                            cell: 0,
+                        })
+                } else {
+                    None
+                };
+            let from = from_visible.or_else(|| {
+                let start = self.current_page();
+                self.content_page_from(start).map(|page| Caret {
+                    page,
+                    line: 0,
+                    cell: 0,
+                })
+            });
+            if let Some(target) = from.and_then(|from| self.next_word_target_from(from)) {
+                let mark = self.word_mark_from_caret(target);
+                self.word_mark = Some(mark);
+                self.update_word_goal_x(mark);
+            }
+        }
+        self.ensure_word_visible();
+        self.save_position();
+        Effects::redraw()
+    }
+
+    fn word_move(&mut self, dir: Dir, count: Option<u32>) -> Effects {
+        if self.session.is_none() {
+            return Effects::default();
+        }
+        let Some(mut mark) = self.word_mark else {
+            return self.enter_word_focus();
+        };
+        let steps = count.unwrap_or(1).max(1);
+        let goal_x = self.word_goal_x;
+        for _ in 0..steps {
+            let moved = match dir {
+                Dir::Right => self.word_step_next(&mut mark),
+                Dir::Left => self.word_step_prev(&mut mark),
+                Dir::Down => self.word_step_vertical(&mut mark, goal_x, true),
+                Dir::Up => self.word_step_vertical(&mut mark, goal_x, false),
+            };
+            if !moved {
+                break; // reached a document edge
+            }
+        }
+        self.word_mark = Some(mark);
+        // Horizontal (word) motion sets a new goal column; vertical keeps it.
+        if matches!(dir, Dir::Left | Dir::Right) {
+            self.update_word_goal_x(mark);
+        }
+        self.ensure_word_visible();
+        self.save_position();
+        Effects::redraw()
+    }
+
+    fn word_step_next(&mut self, mark: &mut WordMark) -> bool {
+        let mut caret = Self::word_mark_caret(*mark);
+        if !self.step_next_word_start(&mut caret) {
+            return false;
+        }
+        *mark = self.word_mark_from_caret(caret);
+        true
+    }
+
+    fn word_step_prev(&mut self, mark: &mut WordMark) -> bool {
+        let mut caret = Self::word_mark_caret(*mark);
+        if !self.step_prev_word_start(&mut caret) {
+            return false;
+        }
+        *mark = self.word_mark_from_caret(caret);
+        true
+    }
+
+    /// Move the mark one line up or down, landing on the word nearest `goal_x`.
+    fn word_step_vertical(&mut self, mark: &mut WordMark, goal_x: f32, down: bool) -> bool {
+        let mut caret = Self::word_mark_caret(*mark);
+        let moved = if down {
+            self.step_down(&mut caret, goal_x)
+        } else {
+            self.step_up(&mut caret, goal_x)
+        };
+        if !moved {
+            return false;
+        }
+        *mark = self.word_mark_from_caret(caret);
+        true
+    }
+
+    /// After a scroll or page jump in word focus mode, move the mark to the
+    /// first word of the top-most content line now visible.
+    fn reposition_word_to_viewport(&mut self) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        let view_top = session.view.scroll().1;
+        let goal_x = self.word_goal_x;
+        if let Some((page, line)) = self.topmost_visible_line(view_top) {
+            let cell = self.nearest_cell(page, line, goal_x);
+            let mark = self.word_mark_from_caret(Caret { page, line, cell });
+            self.word_mark = Some(mark);
+        }
+    }
+
+    /// Bounding box (page points) of the marked word's run, unioning its cells.
+    fn word_bbox(&mut self, mark: WordMark) -> Option<Rect> {
+        let start = self.cell_rect(mark.page, mark.line, mark.start_cell)?;
+        let end = self
+            .cell_rect(mark.page, mark.line, mark.end_cell)
+            .unwrap_or(start);
+        Some(Rect {
+            x0: start.x0.min(end.x0),
+            y0: start.y0.min(end.y0),
+            x1: start.x1.max(end.x1),
+            y1: start.y1.max(end.y1),
+        })
+    }
+
+    /// Scroll the minimum amount needed to keep the marked word on screen.
+    fn ensure_word_visible(&mut self) {
+        let Some(mark) = self.word_mark else {
+            return;
+        };
+        let Some(rect) = self.word_bbox(mark) else {
+            return;
+        };
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+        let Some(page) = session.view.layout().page(mark.page) else {
+            return;
+        };
+        let (px, py) = (page.x, page.y);
+        session.view.scroll_doc_rect_into_view(
+            px + rect.x0,
+            py + rect.y0,
+            px + rect.x1,
+            py + rect.y1,
+        );
+    }
+
+    /// The marked word's rectangle in canvas pixels, with its page. `None`
+    /// outside word focus mode or when no word is marked. The shell paints this.
+    pub fn word_screen_rect(&self) -> Option<(usize, ScreenRect)> {
+        if self.mode != Mode::WordFocus {
+            return None;
+        }
+        let mark = self.word_mark?;
+        let session = self.session.as_ref()?;
+        let cells = &session.content.get(&mark.page)?.get(mark.line)?.cells;
+        let start = cells.get(mark.start_cell)?.bbox;
+        let end = cells.get(mark.end_cell).map_or(start, |c| c.bbox);
+        session
+            .view
+            .page_rect_to_screen(
+                mark.page,
+                start.x0.min(end.x0),
+                start.y0.min(end.y0),
+                start.x1.max(end.x1),
+                start.y1.max(end.y1),
+            )
+            .map(|rect| (mark.page, rect))
+    }
+
     /// One-line status text: file, current page, zoom, pending keys.
     pub fn status_text(&self) -> String {
         let mut out = String::new();
@@ -1129,6 +1377,16 @@ impl App {
             out.push_str("  -- LINE FOCUS --");
             if let Some(mark) = self.line_mark {
                 out.push_str(&format!("  Ln {}", mark.line + 1));
+            }
+        }
+        if self.mode == Mode::WordFocus {
+            out.push_str("  -- WORD FOCUS --");
+            if let Some(mark) = self.word_mark {
+                out.push_str(&format!(
+                    "  Ln {}, Col {}",
+                    mark.line + 1,
+                    mark.start_cell + 1
+                ));
             }
         }
         if self.input.has_pending() {
@@ -1811,6 +2069,128 @@ mod tests {
         assert!(app.line_screen_rect().is_none());
         press(&mut app, "j");
         assert!(app.line_mark().is_none());
+    }
+
+    #[test]
+    fn word_enter_marks_word_and_shows_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta"]);
+        assert_eq!(app.mode(), Mode::Normal);
+        // A single `c` is only the first half of `cw`: still pending.
+        press(&mut app, "c");
+        assert_eq!(app.mode(), Mode::Normal);
+        press(&mut app, "w");
+        assert_eq!(app.mode(), Mode::WordFocus);
+        let mark = app.word_mark().expect("word marked");
+        // The first word "alpha" is the run cells 0..=4.
+        assert_eq!(
+            (mark.page, mark.line, mark.start_cell, mark.end_cell),
+            (0, 0, 0, 4)
+        );
+        assert!(app.word_screen_rect().is_some());
+        assert!(app.status_text().contains("-- WORD FOCUS --"));
+        assert!(app.status_text().contains("Ln 1, Col 1"));
+    }
+
+    #[test]
+    fn word_enter_starts_at_topmost_visible_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_two_line_pdf(dir.path(), "alpha beta", "gamma delta");
+        let first_line_bottom = app.line_bbox(0, 0).unwrap().y1;
+        app.scroll_by_px(0.0, first_line_bottom + 1.0);
+        press(&mut app, "cw");
+        let mark = app.word_mark().expect("word marked");
+        assert_eq!((mark.page, mark.line, mark.start_cell), (0, 1, 0));
+    }
+
+    #[test]
+    fn word_right_and_left_step_between_words() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta-gamma"]);
+        press(&mut app, "cw");
+        // `l`/`w` advance to the next word run (the "beta" before the hyphen).
+        press(&mut app, "l");
+        let mark = app.word_mark().unwrap();
+        assert_eq!((mark.start_cell, mark.end_cell), (6, 9));
+        press(&mut app, "w");
+        let mark = app.word_mark().unwrap();
+        // The "-" punctuation run is its own word-like stop.
+        assert_eq!(mark.start_cell, 10);
+        // `h`/`b` move back.
+        press(&mut app, "b");
+        let mark = app.word_mark().unwrap();
+        assert_eq!((mark.start_cell, mark.end_cell), (6, 9));
+        press(&mut app, "h");
+        let mark = app.word_mark().unwrap();
+        assert_eq!((mark.start_cell, mark.end_cell), (0, 4));
+    }
+
+    #[test]
+    fn word_right_crosses_lines_and_pages() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_two_line_pdf(dir.path(), "one two", "three four");
+        press(&mut app, "cw");
+        press(&mut app, "2l");
+        let mark = app.word_mark().unwrap();
+        assert_eq!((mark.line, mark.start_cell), (1, 0)); // "three" on line 2
+
+        let page_dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(page_dir.path(), &["one two", "three four"]);
+        press(&mut app, "cw");
+        press(&mut app, "2l");
+        let mark = app.word_mark().unwrap();
+        assert_eq!((mark.page, mark.start_cell), (1, 0));
+    }
+
+    #[test]
+    fn word_vertical_crosses_pages() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta", "gamma delta"]);
+        press(&mut app, "cw");
+        // Each page has a single line, so `j` crosses to the next page.
+        press(&mut app, "j");
+        assert_eq!(app.word_mark().unwrap().page, 1);
+        press(&mut app, "k");
+        assert_eq!(app.word_mark().unwrap().page, 0);
+        // `k` at the document start is clamped.
+        press(&mut app, "k");
+        assert_eq!(app.word_mark().unwrap().page, 0);
+    }
+
+    #[test]
+    fn word_exit_restores_scrolling() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_doc(dir.path(), 3);
+        press(&mut app, "cw");
+        assert_eq!(app.mode(), Mode::WordFocus);
+        press(&mut app, "<Esc>");
+        assert_eq!(app.mode(), Mode::Normal);
+        assert!(app.word_screen_rect().is_none());
+        let before = app.session.as_ref().unwrap().view.scroll().1;
+        press(&mut app, "j");
+        let after = app.session.as_ref().unwrap().view.scroll().1;
+        assert!(after > before);
+    }
+
+    #[test]
+    fn word_focus_keeps_non_hjkl_bindings_and_carries_mark() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_doc(dir.path(), 5);
+        press(&mut app, "cw");
+        press(&mut app, "G");
+        assert_eq!(app.current_page(), 4);
+        assert_eq!(app.word_mark().unwrap().page, 4);
+        press(&mut app, "gg");
+        assert_eq!(app.word_mark().unwrap().page, 0);
+    }
+
+    #[test]
+    fn word_without_document_does_not_crash() {
+        let mut app = App::new(Config::default(), None);
+        press(&mut app, "cw");
+        assert!(app.word_screen_rect().is_none());
+        press(&mut app, "l");
+        assert!(app.word_mark().is_none());
     }
 
     #[test]

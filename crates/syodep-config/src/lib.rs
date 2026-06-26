@@ -37,6 +37,11 @@ pub struct Config {
     /// `caret_focus_keys`.
     #[serde(default)]
     pub line_focus_keys: BTreeMap<String, String>,
+    /// Word-focus-mode keybindings (the `[word_focus_keys]` table). These overlay
+    /// the normal `keys` while word focus mode is active, mirroring
+    /// `caret_focus_keys` and `line_focus_keys`.
+    #[serde(default)]
+    pub word_focus_keys: BTreeMap<String, String>,
     /// `[files]` section: file-dialog and path behaviour.
     #[serde(default)]
     pub files: FilesConfig,
@@ -94,6 +99,7 @@ impl Default for Config {
             keys: default_keybindings(),
             caret_focus_keys: default_caret_focus_keybindings(),
             line_focus_keys: default_line_focus_keybindings(),
+            word_focus_keys: default_word_focus_keybindings(),
             files: FilesConfig::default(),
         }
     }
@@ -129,6 +135,7 @@ pub fn default_keybindings() -> BTreeMap<String, String> {
         ("z0", "zoom_reset"),
         ("cc", "caret_focus_enter"),
         ("cl", "line_focus_enter"),
+        ("cw", "word_focus_enter"),
         ("o", "open_file"),
         ("q", "quit"),
         ("<Esc>", "cancel"),
@@ -186,6 +193,31 @@ pub fn default_line_focus_keybindings() -> BTreeMap<String, String> {
     .collect()
 }
 
+/// Built-in word-focus-mode keybindings (the `[word_focus_keys]` table). These
+/// overlay the normal bindings while word focus mode is active: `h`/`l` (and
+/// `w`/`b`) step word-wise, `j`/`k` move by line, and `<Esc>` leaves the mode,
+/// while everything else keeps its normal meaning.
+///
+/// Every entry here must be documented in `docs/keybindings.md`.
+pub fn default_word_focus_keybindings() -> BTreeMap<String, String> {
+    [
+        ("h", "word_focus_left"),
+        ("j", "word_focus_down"),
+        ("k", "word_focus_up"),
+        ("l", "word_focus_right"),
+        ("w", "word_focus_right"),
+        ("b", "word_focus_left"),
+        ("<Left>", "word_focus_left"),
+        ("<Down>", "word_focus_down"),
+        ("<Up>", "word_focus_up"),
+        ("<Right>", "word_focus_right"),
+        ("<Esc>", "word_focus_exit"),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_owned(), v.to_owned()))
+    .collect()
+}
+
 /// Errors produced while loading or parsing configuration.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -215,6 +247,9 @@ impl Config {
         let mut line_focus_keys = default_line_focus_keybindings();
         line_focus_keys.extend(std::mem::take(&mut config.line_focus_keys));
         config.line_focus_keys = line_focus_keys;
+        let mut word_focus_keys = default_word_focus_keybindings();
+        word_focus_keys.extend(std::mem::take(&mut config.word_focus_keys));
+        config.word_focus_keys = word_focus_keys;
         Ok(config)
     }
 
@@ -334,6 +369,44 @@ mod tests {
         assert_eq!(
             config.keys.get("cc").map(String::as_str),
             Some("caret_focus_enter")
+        );
+    }
+
+    #[test]
+    fn word_focus_keys_default_and_user_override() {
+        let config = Config::from_toml(
+            r#"
+            [word_focus_keys]
+            "w" = "word_focus_down"
+            "#,
+        )
+        .unwrap();
+        // Built-in word-focus bindings survive.
+        assert_eq!(
+            config.word_focus_keys.get("h").map(String::as_str),
+            Some("word_focus_left")
+        );
+        assert_eq!(
+            config.word_focus_keys.get("l").map(String::as_str),
+            Some("word_focus_right")
+        );
+        assert_eq!(
+            config.word_focus_keys.get("j").map(String::as_str),
+            Some("word_focus_down")
+        );
+        assert_eq!(
+            config.word_focus_keys.get("<Esc>").map(String::as_str),
+            Some("word_focus_exit")
+        );
+        // User override is merged in.
+        assert_eq!(
+            config.word_focus_keys.get("w").map(String::as_str),
+            Some("word_focus_down")
+        );
+        // The enter binding (`cw`) lives in the normal table.
+        assert_eq!(
+            config.keys.get("cw").map(String::as_str),
+            Some("word_focus_enter")
         );
     }
 

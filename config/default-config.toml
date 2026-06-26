@@ -50,3 +50,15 @@ background = "#1e1e1e"
 # binding keeps its normal meaning. See docs/keybindings.md.
 [caret_focus_keys]
 # "w" = "caret_focus_right"           # example addition (caret focus mode only)
+
+# Line-focus-mode keybindings (active after pressing "cl").
+# These overlay the normal [keys] while line focus mode is active: j/k move
+# the highlighted line, h/l move between columns and <Esc> exits.
+[line_focus_keys]
+# "w" = "line_focus_right"            # example addition (line focus mode only)
+
+# Word-focus-mode keybindings (active after pressing "cw").
+# These overlay the normal [keys] while word focus mode is active: h/b move to
+# the previous word run, l/w move to the next, j/k move by line and <Esc> exits.
+[word_focus_keys]
+# "e" = "word_focus_right"            # example addition (word focus mode only)

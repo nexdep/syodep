@@ -136,6 +136,21 @@ void CanvasWidget::paintGL()
         painter.setBrush(Qt::NoBrush);
         painter.drawRect(box);
     }
+
+    // Word-focus overlay (only present in word focus mode). Same translucent
+    // fill plus border, in a distinct green accent so all three focus modes are
+    // visually distinguishable (caret blue, line orange, word green).
+    const SyoCaret word = syo_app_word(m_app);
+    if (word.valid) {
+        QRectF box(word.x / dpr, word.y / dpr, word.width / dpr, word.height / dpr);
+        if (box.width() < 2.0)
+            box.setWidth(2.0); // keep zero-width stops visible
+        const QColor accent(100, 200, 120);
+        painter.fillRect(box, QColor(100, 200, 120, 70));
+        painter.setPen(accent);
+        painter.setBrush(Qt::NoBrush);
+        painter.drawRect(box);
+    }
 }
 
 } // namespace syodep

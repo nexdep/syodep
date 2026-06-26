@@ -411,6 +411,39 @@ pub unsafe extern "C" fn syo_app_line(app: *const SyoApp) -> SyoCaret {
     .unwrap_or(invalid)
 }
 
+/// The word-focus rectangle (canvas pixels) for the overlay. Reuses the
+/// [`SyoCaret`] layout; `valid` is 0 unless word focus mode is active with a
+/// word marked.
+///
+/// # Safety
+/// `app` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn syo_app_word(app: *const SyoApp) -> SyoCaret {
+    let invalid = SyoCaret {
+        valid: 0,
+        page: 0,
+        x: 0.0,
+        y: 0.0,
+        width: 0.0,
+        height: 0.0,
+    };
+    let Some(app) = (unsafe { app.as_ref() }) else {
+        return invalid;
+    };
+    catch_unwind(AssertUnwindSafe(|| match app.app.word_screen_rect() {
+        Some((page, rect)) => SyoCaret {
+            valid: 1,
+            page,
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+        },
+        None => invalid,
+    }))
+    .unwrap_or(invalid)
+}
+
 /// Render a page at the current zoom. Returns NULL on failure. The result
 /// must be freed with `syo_bitmap_free`.
 ///

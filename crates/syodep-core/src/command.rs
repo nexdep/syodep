@@ -56,6 +56,19 @@ pub enum Command {
     LineFocusRight,
     LineFocusUp,
     LineFocusDown,
+    // Word focus (modal whole-word highlight over content).
+    /// Enter word focus mode, highlighting the nearest word.
+    WordFocusEnter,
+    /// Leave word focus mode, returning to scrolling (the word is remembered).
+    WordFocusExit,
+    /// Move the highlight to the previous word.
+    WordFocusLeft,
+    /// Move the highlight to the next word.
+    WordFocusRight,
+    /// Move up a line, landing on the word nearest the goal column.
+    WordFocusUp,
+    /// Move down a line, landing on the word nearest the goal column.
+    WordFocusDown,
     // Application.
     OpenFile,
     Quit,
@@ -97,6 +110,12 @@ pub const ALL_COMMANDS: &[(&str, Command)] = &[
     ("line_focus_right", Command::LineFocusRight),
     ("line_focus_up", Command::LineFocusUp),
     ("line_focus_down", Command::LineFocusDown),
+    ("word_focus_enter", Command::WordFocusEnter),
+    ("word_focus_exit", Command::WordFocusExit),
+    ("word_focus_left", Command::WordFocusLeft),
+    ("word_focus_right", Command::WordFocusRight),
+    ("word_focus_up", Command::WordFocusUp),
+    ("word_focus_down", Command::WordFocusDown),
     ("open_file", Command::OpenFile),
     ("quit", Command::Quit),
     ("cancel", Command::Cancel),

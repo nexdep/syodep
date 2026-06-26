@@ -50,14 +50,17 @@ The "current page" is the page under the center of the window.
 Zoom keeps the document point at the window center fixed and is clamped to
 5%–1600%.
 
-## Caret focus
+## Focus modes
 
 | Command | Effect | Count |
 |---|---|---|
 | `caret_focus_enter` | enter caret focus mode, placing the caret on the nearest content | — |
+| `line_focus_enter` | enter line focus mode, highlighting the nearest content line | — |
+| `word_focus_enter` | enter word focus mode, highlighting the first visible word run | — |
 
 See `docs/commands-caret-focus-mode.md` for everything available once in
-caret focus mode.
+caret focus mode, `docs/commands-line-focus-mode.md` for line focus mode and
+`docs/commands-word-focus-mode.md` for word focus mode.
 
 ## Application
 

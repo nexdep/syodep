@@ -26,6 +26,20 @@ pub enum Mode {
     /// Line focus mode: a whole line is highlighted; `j`/`k` move it line-wise
     /// and `H`/`L` move between columns (multi-column pages only).
     LineFocus,
+    /// Word focus mode: a whole word is highlighted; `h`/`l` (and `w`/`b`) step
+    /// word-wise and `j`/`k` move by line, keeping a goal column like the caret.
+    WordFocus,
+}
+
+/// A word-focus position: the run of cells `start_cell..=end_cell` within a line
+/// within a page. All indices are zero-based and only meaningful against the
+/// document the mark belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WordMark {
+    pub page: usize,
+    pub line: usize,
+    pub start_cell: usize,
+    pub end_cell: usize,
 }
 
 /// A line-focus position: a line within a page. Both indices are zero-based and
