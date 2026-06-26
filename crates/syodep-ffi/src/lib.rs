@@ -705,6 +705,14 @@ pub extern "C" fn syo_default_config_path() -> *mut c_char {
     )
 }
 
+/// Documented default configuration as TOML text: every option set to its
+/// built-in default. Written to disk by the shell's `--defaults`. Free with
+/// `syo_string_free`.
+#[no_mangle]
+pub extern "C" fn syo_default_config_toml() -> *mut c_char {
+    to_c_string(syodep_config::default_config_doc())
+}
+
 /// Default database path for this platform. Free with `syo_string_free`.
 #[no_mangle]
 pub extern "C" fn syo_default_db_path() -> *mut c_char {

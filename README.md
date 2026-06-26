@@ -83,7 +83,9 @@ cargo test --workspace
 ## Configuration
 
 `~/.config/syodep/config.toml` (Linux) or `%APPDATA%\syodep\config.toml`
-(Windows). A documented sample lives at `config/default-config.toml`.
+(Windows). A documented sample lives at `config/default-config.toml`, and
+`syodep --defaults` writes an up-to-date `syodep_defaults.config.toml` (every
+option at its default) into the current directory.
 Reference: `docs/config.md`, `docs/keybindings.md`, `docs/commands.md`.
 
 User data (reading positions, and later bookmarks/highlights/notes) is

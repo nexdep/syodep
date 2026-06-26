@@ -10,6 +10,8 @@
 
 #include <QApplication>
 #include <QCommandLineParser>
+#include <QFile>
+#include <QFileInfo>
 #include <QTimer>
 
 #include <cstdio>
@@ -62,6 +64,33 @@ int runSmokeTest(const QString &pdfPath)
     return 0;
 }
 
+// Write a documented config template (every option at its default) to
+// `syodep_defaults.config.toml` in the current working directory, overwriting
+// any existing file. Returns a process exit code.
+int writeDefaultsConfig()
+{
+    char *raw = syo_default_config_toml();
+    const QByteArray toml = raw ? QByteArray(raw) : QByteArray();
+    syo_string_free(raw);
+
+    const QString path = QStringLiteral("syodep_defaults.config.toml");
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        std::fprintf(stderr, "syodep: cannot write %s: %s\n",
+                     qPrintable(QFileInfo(path).absoluteFilePath()),
+                     qPrintable(file.errorString()));
+        return 1;
+    }
+    if (file.write(toml) != toml.size()) {
+        std::fprintf(stderr, "syodep: failed writing %s: %s\n",
+                     qPrintable(QFileInfo(path).absoluteFilePath()),
+                     qPrintable(file.errorString()));
+        return 1;
+    }
+    std::printf("Wrote %s\n", qPrintable(QFileInfo(path).absoluteFilePath()));
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char *argv[])
@@ -79,14 +108,17 @@ int main(int argc, char *argv[])
         syodep::diag::decideFallbacks(platform);
     syodep::diag::applyFallbacks(decision);
 
-    // --version needs neither a display nor a GL context, so handle it before
-    // constructing QApplication (which would pull in the platform plugin).
+    // --version and --defaults need neither a display nor a GL context, so
+    // handle them before constructing QApplication (which would pull in the
+    // platform plugin and fail on a headless machine).
     for (int i = 1; i < argc; ++i) {
         const QByteArray arg(argv[i]);
         if (arg == "--version" || arg == "-v") {
             std::fputs(qPrintable(syodep::diag::buildVersionReport(platform)), stdout);
             return 0;
         }
+        if (arg == "--defaults")
+            return writeDefaultsConfig();
     }
 
     QApplication app(argc, argv);
@@ -102,6 +134,11 @@ int main(int argc, char *argv[])
     QCommandLineOption checkOption(QStringLiteral("check"),
                                    QStringLiteral("print graphics/config diagnostics and exit"));
     parser.addOption(checkOption);
+    QCommandLineOption defaultsOption(
+        QStringLiteral("defaults"),
+        QStringLiteral("write a documented syodep_defaults.config.toml to the "
+                       "current directory and exit"));
+    parser.addOption(defaultsOption);
     parser.addPositionalArgument(QStringLiteral("file"),
                                  QStringLiteral("PDF document to open"));
     QCommandLineOption smokeOption(QStringLiteral("smoke-test"),
@@ -113,6 +150,9 @@ int main(int argc, char *argv[])
         std::fputs(qPrintable(syodep::diag::buildCheckReport(platform, decision)), stdout);
         return 0;
     }
+
+    // --defaults is handled in the early argv scan above (no display needed);
+    // the option is registered only so it appears in --help.
 
     const QStringList args = parser.positionalArguments();
 

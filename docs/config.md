@@ -10,6 +10,11 @@ syodep reads a single human-editable TOML file:
 A fully commented sample lives at `config/default-config.toml` in the
 repository. Every value is optional; omitted values use built-in defaults.
 
+Run `syodep --defaults` to write a `syodep_defaults.config.toml` into the
+current directory: a complete, always-current template with every option set
+to its built-in default (generated from the running build, so it never drifts).
+Copy it to the config path above to use it.
+
 **Error handling:** an unreadable or invalid config never prevents syodep
 from starting. The parse error (with the offending field) is shown in the
 status bar and built-in defaults are used. Unknown fields are rejected (to
