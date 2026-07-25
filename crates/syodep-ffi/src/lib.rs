@@ -152,6 +152,20 @@ pub struct SyoSentence {
     pub rect_count: usize,
 }
 
+/// The visual-mode selection overlay: zero or more rectangles (one per spanned
+/// line) in canvas pixels. `valid` is 0 when not in visual mode, in which case
+/// `rects` is NULL and `rect_count` is 0. The `rects` buffer is owned by the
+/// core and must be released with [`syo_selection_free`].
+///
+/// Unlike the single-unit overlays there is no `page` field: a selection may
+/// span pages, and the rectangles are already in absolute canvas coordinates.
+#[repr(C)]
+pub struct SyoSelection {
+    pub valid: u8,
+    pub rects: *const SyoRect,
+    pub rect_count: usize,
+}
+
 /// A tightly packed RGBA8 image (stride = width * 4).
 #[repr(C)]
 pub struct SyoBitmap {
@@ -563,6 +577,69 @@ pub unsafe extern "C" fn syo_sentence_free(sentence: SyoSentence) {
     }
 }
 
+/// The visual-mode selection overlay, one rectangle per spanned visible line.
+/// `valid` is 0 outside visual mode. The result must be released with
+/// [`syo_selection_free`].
+///
+/// # Safety
+/// `app` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn syo_app_selection(app: *const SyoApp) -> SyoSelection {
+    // Owns a raw pointer and so is not `Copy`; build a fresh "invalid" value
+    // wherever one is needed rather than moving a shared one.
+    fn invalid() -> SyoSelection {
+        SyoSelection {
+            valid: 0,
+            rects: std::ptr::null(),
+            rect_count: 0,
+        }
+    }
+    let Some(app) = (unsafe { app.as_ref() }) else {
+        return invalid();
+    };
+    catch_unwind(AssertUnwindSafe(|| match app.app.visual_screen_rects() {
+        Some(rects) if !rects.is_empty() => {
+            let boxed: Box<[SyoRect]> = rects
+                .into_iter()
+                .map(|r| SyoRect {
+                    x: r.x,
+                    y: r.y,
+                    width: r.width,
+                    height: r.height,
+                })
+                .collect();
+            let rect_count = boxed.len();
+            let rects = Box::into_raw(boxed) as *const SyoRect;
+            SyoSelection {
+                valid: 1,
+                rects,
+                rect_count,
+            }
+        }
+        _ => invalid(),
+    }))
+    .unwrap_or_else(|_| invalid())
+}
+
+/// Free the `rects` buffer of a [`SyoSelection`] returned by
+/// `syo_app_selection`. A no-op for an invalid selection, so the shell can call
+/// it unconditionally.
+///
+/// # Safety
+/// `selection` must be a value returned by `syo_app_selection`, not freed before.
+#[no_mangle]
+pub unsafe extern "C" fn syo_selection_free(selection: SyoSelection) {
+    if selection.rects.is_null() || selection.rect_count == 0 {
+        return;
+    }
+    unsafe {
+        drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(
+            selection.rects as *mut SyoRect,
+            selection.rect_count,
+        )));
+    }
+}
+
 /// Render a page at the current zoom. Returns NULL on failure. The result
 /// must be freed with `syo_bitmap_free`.
 ///
@@ -866,6 +943,31 @@ mod tests {
             let empty = syo_app_sentence(app);
             assert_eq!(empty.valid, 0);
             syo_sentence_free(empty);
+
+            // Visual mode: inactive until entered with `vw`, then valid with at
+            // least one rect; the rect buffer must be freed. Unlike the focus
+            // overlays the selection may span pages, so it carries no page.
+            let v_key = CString::new("v").unwrap();
+            let w_key = CString::new("w").unwrap();
+            let l_key = CString::new("l").unwrap();
+            assert_eq!(syo_app_selection(app).valid, 0);
+            syo_app_key_event(app, v_key.as_ptr());
+            syo_app_key_event(app, w_key.as_ptr());
+            let selection = syo_app_selection(app);
+            assert_eq!(selection.valid, 1);
+            assert!(selection.rect_count >= 1);
+            syo_selection_free(selection);
+            // Growing the selection keeps it valid.
+            syo_app_key_event(app, l_key.as_ptr());
+            let grown = syo_app_selection(app);
+            assert_eq!(grown.valid, 1);
+            syo_selection_free(grown);
+            syo_app_key_event(app, esc.as_ptr());
+            let gone = syo_app_selection(app);
+            assert_eq!(gone.valid, 0);
+            // Freeing an invalid selection is a no-op, so the shell can call it
+            // unconditionally.
+            syo_selection_free(gone);
 
             // Out-of-range render fails cleanly.
             let bad = syo_app_render_page(app, 99);

@@ -35,6 +35,75 @@ pub enum Mode {
     /// Paragraph focus mode: a whole paragraph (a block of lines) is highlighted;
     /// `hjkl`/arrows step paragraph-wise (a linear sequence).
     ParagraphFocus,
+    /// Visual mode: a two-ended selection. `hjkl`/arrows grow it by one unit of
+    /// the active end's [`VisualScope`]; `o` swaps which end moves.
+    Visual,
+}
+
+/// The granularity one end of a [`VisualSelection`] moves and snaps by.
+///
+/// Each end carries its own scope, so a selection can be line-granular at one
+/// edge and word-granular at the other (`vl` then `ow`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VisualScope {
+    Char,
+    Word,
+    Line,
+    Sentence,
+    Paragraph,
+}
+
+impl VisualScope {
+    /// The scope a focus mode hands to visual mode when entered with a bare
+    /// `v`. Modes without a natural granularity select by character.
+    pub fn from_mode(mode: Mode) -> Self {
+        match mode {
+            Mode::WordFocus => Self::Word,
+            Mode::LineFocus => Self::Line,
+            Mode::SentenceFocus => Self::Sentence,
+            Mode::ParagraphFocus => Self::Paragraph,
+            Mode::Normal | Mode::CaretFocus | Mode::Visual => Self::Char,
+        }
+    }
+
+    /// Lower-case name for the status line.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Char => "char",
+            Self::Word => "word",
+            Self::Line => "line",
+            Self::Sentence => "sentence",
+            Self::Paragraph => "paragraph",
+        }
+    }
+}
+
+/// A visual-mode selection: two positions, each with its own granularity.
+///
+/// `head` is the end motions move; `anchor` stays put. `o` swaps the two
+/// wholesale (positions *and* scopes), which is why there is no separate
+/// "which end is active" flag — the invariant is simply *head moves, anchor
+/// stays*, and it cannot drift out of sync.
+///
+/// The rendered selection runs from the outer edge of the earlier snapped end
+/// to the outer edge of the later one, so the ends crossing needs no special
+/// case and `o` provably never changes what is drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VisualSelection {
+    pub anchor: Caret,
+    pub anchor_scope: VisualScope,
+    pub head: Caret,
+    pub head_scope: VisualScope,
+    /// The mode to restore when visual mode is left with `<Esc>`.
+    pub return_mode: Mode,
+}
+
+impl VisualSelection {
+    /// Exchange the two ends, scopes included (`o`).
+    pub fn swap_ends(&mut self) {
+        std::mem::swap(&mut self.anchor, &mut self.head);
+        std::mem::swap(&mut self.anchor_scope, &mut self.head_scope);
+    }
 }
 
 /// A word-focus position: the run of cells `start_cell..=end_cell` within a line
@@ -79,7 +148,11 @@ pub struct LineMark {
 
 /// A caret position: a cell within a line within a page. All indices are
 /// zero-based and only meaningful against the document the caret belongs to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// The field order makes the derived ordering *document order*, which visual
+/// mode relies on to find the earlier and later end of a selection without
+/// caring which one the user is currently moving.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Caret {
     pub page: usize,
     pub line: usize,
@@ -300,6 +373,58 @@ pub fn column_index_of(cols: &[(f32, f32)], x0: f32, x1: f32) -> Option<usize> {
 mod tests {
     use super::*;
     use syodep_pdf::{CellKind, Rect};
+
+    #[test]
+    fn caret_ordering_is_document_order() {
+        let at = |page, line, cell| Caret { page, line, cell };
+        // Page dominates line, which dominates cell.
+        assert!(at(0, 9, 9) < at(1, 0, 0));
+        assert!(at(0, 0, 9) < at(0, 1, 0));
+        assert!(at(0, 0, 0) < at(0, 0, 1));
+        // min/max pick the document-order ends regardless of argument order.
+        let (a, b) = (at(2, 1, 3), at(0, 5, 0));
+        assert_eq!(a.min(b), at(0, 5, 0));
+        assert_eq!(a.max(b), at(2, 1, 3));
+    }
+
+    #[test]
+    fn visual_scope_is_inherited_from_the_focus_mode() {
+        assert_eq!(VisualScope::from_mode(Mode::WordFocus), VisualScope::Word);
+        assert_eq!(VisualScope::from_mode(Mode::LineFocus), VisualScope::Line);
+        assert_eq!(
+            VisualScope::from_mode(Mode::SentenceFocus),
+            VisualScope::Sentence
+        );
+        assert_eq!(
+            VisualScope::from_mode(Mode::ParagraphFocus),
+            VisualScope::Paragraph
+        );
+        // Normal and caret focus have no larger unit, so they select by char.
+        assert_eq!(VisualScope::from_mode(Mode::Normal), VisualScope::Char);
+        assert_eq!(VisualScope::from_mode(Mode::CaretFocus), VisualScope::Char);
+    }
+
+    #[test]
+    fn swapping_ends_exchanges_positions_and_scopes() {
+        let at = |page, line, cell| Caret { page, line, cell };
+        let mut sel = VisualSelection {
+            anchor: at(0, 0, 0),
+            anchor_scope: VisualScope::Line,
+            head: at(0, 3, 7),
+            head_scope: VisualScope::Word,
+            return_mode: Mode::Normal,
+        };
+        sel.swap_ends();
+        assert_eq!(sel.anchor, at(0, 3, 7));
+        assert_eq!(sel.anchor_scope, VisualScope::Word);
+        assert_eq!(sel.head, at(0, 0, 0));
+        assert_eq!(sel.head_scope, VisualScope::Line);
+        // Swapping is an involution, so `oo` is a no-op.
+        let once = sel;
+        sel.swap_ends();
+        sel.swap_ends();
+        assert_eq!(sel, once);
+    }
 
     fn char_cell_at(c: char, x0: f32, x1: f32) -> Cell {
         Cell {

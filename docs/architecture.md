@@ -53,7 +53,12 @@ input take plain data). Key pieces:
 - **Input state machine** (`input.rs`): keymap trie + pending state
   (count prefix, partial sequence). Disambiguation: a sequence that is both
   a binding and a prefix of a longer binding waits for more input; `<Esc>`
-  cancels. Timer-free, hence deterministic and easily tested.
+  cancels. If the wait ends in an unbound sequence, the longest bound prefix
+  fires and the leftover chords are queued for replay, so a binding that is
+  also a prefix stays reachable. Timer-free throughout, hence deterministic
+  and easily tested. The replay queue is drained by `App::handle_key` rather
+  than resolved inside `InputState`, because the fired command may switch
+  modes and the replayed chords must use the new mode's keymap.
 - **Layout** (`layout.rs`): pages stacked vertically in *document space*
   (PDF points), centered on the widest page. Scroll offsets are stored in
   document space so they survive zoom changes. `View` provides clamped
@@ -75,6 +80,16 @@ input take plain data). Key pieces:
   command still works in caret focus mode.
   Extracted page content is cached per page in the session; the pure
   goal-column and word-boundary helpers live in `caret.rs`.
+- **Visual mode** (`caret.rs` + `app.rs`): a two-ended selection over the same
+  content layer. `VisualSelection` holds an `anchor` and a `head` — the head is
+  what motions move — each with its own `VisualScope`. `o` swaps the two
+  wholesale, so there is no separate "which end is active" flag to drift.
+  Rendering expands each end by its own scope and takes the outermost edges,
+  which makes the ends crossing a non-case and `o` provably invisible. Motion
+  reuses the focus modes' steppers rather than adding traversal logic, so a
+  scope is little more than a pair of function choices. A selection is the one
+  overlay that may span pages; it is drawn per *visible* page so the cost does
+  not grow with its length.
 
 ### syodep-pdf
 
@@ -155,7 +170,9 @@ Four small files; intentionally boring:
 | 2 | `mupdf-rs` bindings instead of own bindgen layer | reproducible cross-platform builds, less unsafe to own | MuPDF features we can't reach |
 | 3 | Content fingerprint (SHA-256) as document identity | state survives moves/renames | huge files make hashing slow → partial hash |
 | 4 | Scroll state in document space (points) | zoom changes don't displace the view | — |
-| 5 | Timer-free key disambiguation (prefix waits) | predictability, testability | users demand Vim `timeoutlen` |
+| 5 | Timer-free key disambiguation (prefix waits, then longest-prefix fallback + replay) | predictability, testability; a binding that is also a prefix stays reachable without a timer | users demand Vim `timeoutlen` |
+| 12 | Visual-mode scope belongs to each *endpoint*, not to the start/end role | crossing the anchor and coming back is the identity, so the selection never silently changes shape on an overshoot | a use case needs "the first edge is always line-granular" |
+| 13 | Selection overlay is computed per visible page, not per selected page | cost is O(visible lines) however long the selection is, and page content is never force-extracted off-screen | selections need to be exported/persisted whole (then resolve the span separately from drawing it) |
 | 6 | Synchronous rendering + byte-bounded LRU cache | simplest correct thing for M1 | phase 3 (async tiles) |
 | 7 | Counts are runtime input, not part of binding syntax | matches Vim; keeps keymap finite | — |
 | 8 | `0` counts only after a nonzero digit (Vim rule) | lets `0`-prefixed bindings exist later | — |

@@ -76,6 +76,7 @@ caret focus mode, `docs/commands-line-focus-mode.md` for line focus mode,
 
 ## Planned (not yet implemented)
 
-Phase 2 adds selection/highlight/search/bookmark/mark/jump commands;
-phase 3 adds text-object commands (`select_word`, `highlight_sentence`,
-…) and smart jump. See `docs/roadmap.md`.
+Phase 2 adds highlight/search/bookmark/mark/jump commands on top of the
+selection visual mode provides (mouse selection is still to come); phase 3
+adds text-object commands (`select_word`, `highlight_sentence`, …) and smart
+jump. See `docs/roadmap.md`.

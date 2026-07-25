@@ -7,9 +7,21 @@
 //! Disambiguation policy (documented in `docs/keybindings.md`): if a
 //! sequence is both a complete binding and a prefix of a longer one, we wait
 //! for more input instead of firing eagerly; `<Esc>` cancels. This keeps the
-//! state machine timer-free and predictable. Defaults avoid such overlaps.
+//! state machine timer-free and predictable.
+//!
+//! When the wait ends in a miss, we fall back to the **longest pending prefix
+//! that is itself a complete binding**: that command fires and the leftover
+//! chords are queued for replay (see [`InputState::next_replay`]). So with
+//! `o` and `ow` both bound, `ow` resolves directly while `oj` runs `o` and
+//! then `j`. Without this a bound sequence that is also a prefix would be
+//! unreachable. Still timer-free: the decision is made by the *next* key
+//! press, never by elapsed time.
+//!
+//! The replay queue is drained by the caller rather than resolved here,
+//! because the fired command may change the mode — and the replayed chords
+//! must resolve against the *new* mode's keymap.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use syodep_config::keys::{self, Chord, Key, KeyParseError, NamedKey};
 
@@ -104,6 +116,11 @@ impl Keymap {
         }
         Some(node)
     }
+
+    /// The command bound to exactly `chords`, if any.
+    fn command_at(&self, chords: &[Chord]) -> Option<Command> {
+        self.lookup(chords)?.command
+    }
 }
 
 /// Result of feeding one chord into [`InputState::handle`].
@@ -125,6 +142,7 @@ pub enum KeyOutcome {
 pub struct InputState {
     count: Option<u32>,
     pending: Vec<Chord>,
+    replay: VecDeque<Chord>,
 }
 
 impl InputState {
@@ -133,8 +151,21 @@ impl InputState {
     }
 
     /// True when a count or partial sequence is buffered.
+    ///
+    /// The replay queue deliberately does not count: it is always drained
+    /// within the same [`handle`](Self::handle) cycle, so it is never
+    /// observable from the status line.
     pub fn has_pending(&self) -> bool {
         self.count.is_some() || !self.pending.is_empty()
+    }
+
+    /// The next chord to re-feed after a longest-prefix fallback fired a
+    /// command, or `None` when the queue is empty.
+    ///
+    /// Callers must re-select the keymap before each call, so that a
+    /// mode-changing command takes effect on the chords that follow it.
+    pub fn next_replay(&mut self) -> Option<Chord> {
+        self.replay.pop_front()
     }
 
     /// Human-readable pending input for the status line, e.g. `12g`.
@@ -152,6 +183,7 @@ impl InputState {
     pub fn clear(&mut self) {
         self.count = None;
         self.pending.clear();
+        self.replay.clear();
     }
 
     /// Feed one key press through the state machine.
@@ -189,6 +221,19 @@ impl InputState {
         self.pending.push(chord);
         match keymap.lookup(&self.pending) {
             None => {
+                // Longest-prefix fallback: the pending sequence went nowhere,
+                // but a prefix of it may be a complete binding. Fire the
+                // longest such prefix and queue the rest for replay. The full
+                // sequence is skipped (it is the miss we are handling) and so
+                // is the empty one.
+                for len in (1..self.pending.len()).rev() {
+                    if let Some(command) = keymap.command_at(&self.pending[..len]) {
+                        let count = self.count.take();
+                        self.replay.extend(self.pending[len..].iter().copied());
+                        self.pending.clear();
+                        return KeyOutcome::Command { command, count };
+                    }
+                }
                 self.clear();
                 KeyOutcome::Unmatched
             }
@@ -222,6 +267,10 @@ mod tests {
             ("zw", "fit_width"),
             ("z0", "zoom_reset"),
             ("<Esc>", "cancel"),
+            // `o` is both a complete binding and a prefix of `ow` -- the case
+            // the longest-prefix fallback exists for.
+            ("o", "open_file"),
+            ("ow", "fit_width"),
         ]);
         assert!(errors.is_empty(), "{errors:?}");
         keymap
@@ -386,6 +435,130 @@ mod tests {
         input.handle(&keymap, chord('2'));
         input.handle(&keymap, chord('g'));
         assert_eq!(input.pending_display(), "12g");
+    }
+
+    /// Feed a whole sequence, draining replays, and collect what resolved.
+    fn run(keymap: &Keymap, input: &mut InputState, chords: &[Chord]) -> Vec<KeyOutcome> {
+        let mut out = Vec::new();
+        for chord in chords {
+            let mut next = Some(*chord);
+            while let Some(chord) = next.take() {
+                out.push(input.handle(keymap, chord));
+                next = input.next_replay();
+            }
+        }
+        out
+    }
+
+    fn command(command: Command, count: Option<u32>) -> KeyOutcome {
+        KeyOutcome::Command { command, count }
+    }
+
+    #[test]
+    fn prefix_command_fires_when_next_key_misses() {
+        let keymap = test_keymap();
+        let mut input = InputState::new();
+        // `o` waits (it is also a prefix of `ow`), then `oj` misses -- so `o`
+        // fires and `j` is replayed.
+        assert_eq!(input.handle(&keymap, chord('o')), KeyOutcome::Pending);
+        assert_eq!(
+            input.handle(&keymap, chord('j')),
+            command(Command::OpenFile, None)
+        );
+        assert_eq!(input.next_replay(), Some(chord('j')));
+        assert_eq!(
+            input.handle(&keymap, chord('j')),
+            command(Command::ScrollDown, None)
+        );
+        assert_eq!(input.next_replay(), None);
+        assert!(!input.has_pending());
+    }
+
+    #[test]
+    fn prefix_binding_still_resolves_directly() {
+        let keymap = test_keymap();
+        let mut input = InputState::new();
+        assert_eq!(
+            run(&keymap, &mut input, &[chord('o'), chord('w')]),
+            vec![KeyOutcome::Pending, command(Command::FitWidth, None)]
+        );
+        assert_eq!(input.next_replay(), None);
+    }
+
+    #[test]
+    fn fallback_gives_the_count_to_the_prefix_command() {
+        let keymap = test_keymap();
+        let mut input = InputState::new();
+        // `5oj`: the count is consumed by the command that resolved, and the
+        // replayed `j` runs countless.
+        let outcomes = run(&keymap, &mut input, &[chord('5'), chord('o'), chord('j')]);
+        assert_eq!(
+            outcomes,
+            vec![
+                KeyOutcome::Pending,
+                KeyOutcome::Pending,
+                command(Command::OpenFile, Some(5)),
+                command(Command::ScrollDown, None),
+            ]
+        );
+    }
+
+    #[test]
+    fn digit_after_a_prefix_becomes_a_count_via_replay() {
+        let keymap = test_keymap();
+        let mut input = InputState::new();
+        // `o5j`: `o5` misses, so `o` fires and `5` replays into an empty
+        // pending buffer -- where it re-enters the count branch and applies
+        // to the `j` that follows.
+        let outcomes = run(&keymap, &mut input, &[chord('o'), chord('5'), chord('j')]);
+        assert_eq!(
+            outcomes,
+            vec![
+                KeyOutcome::Pending,
+                command(Command::OpenFile, None),
+                KeyOutcome::Pending,
+                command(Command::ScrollDown, Some(5)),
+            ]
+        );
+    }
+
+    #[test]
+    fn escape_clears_the_replay_queue() {
+        let keymap = test_keymap();
+        let mut input = InputState::new();
+        input.handle(&keymap, chord('o'));
+        input.handle(&keymap, chord('j'));
+        assert!(input.next_replay().is_some() || !input.has_pending());
+        input.clear();
+        assert_eq!(input.next_replay(), None);
+        assert!(!input.has_pending());
+    }
+
+    #[test]
+    fn escape_cancels_a_pending_prefix_instead_of_firing_it() {
+        let keymap = test_keymap();
+        let mut input = InputState::new();
+        // Escape is intercepted while input is pending, before lookup -- so
+        // `o<Esc>` cancels the half-typed `o` rather than running it.
+        input.handle(&keymap, chord('o'));
+        assert_eq!(
+            input.handle(&keymap, Chord::named(NamedKey::Escape)),
+            KeyOutcome::Pending
+        );
+        assert_eq!(input.next_replay(), None);
+        assert!(!input.has_pending());
+    }
+
+    #[test]
+    fn total_miss_without_a_prefix_command_still_resets() {
+        let keymap = test_keymap();
+        let mut input = InputState::new();
+        // `g` is a prefix with no command of its own, so there is nothing to
+        // fall back to and the old reset behavior stands.
+        input.handle(&keymap, chord('g'));
+        assert_eq!(input.handle(&keymap, chord('x')), KeyOutcome::Unmatched);
+        assert_eq!(input.next_replay(), None);
+        assert!(!input.has_pending());
     }
 
     #[test]
