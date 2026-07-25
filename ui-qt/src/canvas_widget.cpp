@@ -189,9 +189,9 @@ void CanvasWidget::paintGL()
     // Visual-mode selection (only present in visual mode). One rectangle per
     // spanned visible line, in a teal accent. Filled without a per-rect border:
     // a selection is often many stacked line rects, and drawing each outline
-    // would leave a ladder of internal edges across the block. The alpha is
-    // lower than the single-unit overlays for the same reason -- a selection
-    // can cover most of a page. The rect buffer is owned by the core.
+    // would leave a ladder of internal edges across the block. The fill is
+    // correspondingly more opaque than the bordered single-unit overlays, or it
+    // reads as washed out next to them. The rect buffer is owned by the core.
     const SyoSelection selection = syo_app_selection(m_app);
     if (selection.valid) {
         for (uintptr_t i = 0; i < selection.rect_count; ++i) {
@@ -199,7 +199,7 @@ void CanvasWidget::paintGL()
             QRectF box(r.x / dpr, r.y / dpr, r.width / dpr, r.height / dpr);
             if (box.width() < 2.0)
                 box.setWidth(2.0);
-            painter.fillRect(box, QColor(90, 190, 210, 55));
+            painter.fillRect(box, QColor(90, 190, 210, 110));
         }
     }
     syo_selection_free(selection);
