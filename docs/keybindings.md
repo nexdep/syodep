@@ -19,10 +19,20 @@ and the internals):
 a count that has already started (so `0` itself is bindable).
 
 **Disambiguation rule:** if a sequence is both a complete binding and a
-prefix of a longer one (e.g. binding both `g` and `gg`), syodep waits for
+prefix of a longer one (e.g. binding both `o` and `ow`), syodep waits for
 more input rather than firing eagerly; press `<Esc>` to cancel pending
-input. There is no timeout — behavior is fully deterministic. The defaults
-avoid such overlaps.
+input. There is no timeout — behavior is fully deterministic.
+
+If the wait ends in a sequence that is bound to nothing, syodep falls back
+to the **longest prefix that is itself a complete binding**: that command
+runs, and the leftover keys are replayed. So with both `o` and `ow` bound,
+`ow` runs `ow`, while `oj` runs `o` and then `j`. Without this, a binding
+that is also a prefix of a longer one could never be triggered on its own.
+The decision is still made by the next key press, never by elapsed time.
+
+Counts survive the replay, and they go to the command that resolves first:
+`5oj` gives the count to `o`, whereas `o5j` runs `o` and then gives the
+count to `j`.
 
 ## Default bindings
 

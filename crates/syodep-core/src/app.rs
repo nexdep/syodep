@@ -46,6 +46,16 @@ impl Effects {
             ..Self::default()
         }
     }
+
+    /// Combine the effects of two commands run for one key press (see
+    /// [`App::handle_key`]); every effect is a request, so they OR together.
+    fn merge(self, other: Self) -> Self {
+        Self {
+            redraw: self.redraw || other.redraw,
+            quit: self.quit || other.quit,
+            open_file_dialog: self.open_file_dialog || other.open_file_dialog,
+        }
+    }
 }
 
 /// A page to draw, in canvas pixel coordinates.
@@ -324,21 +334,47 @@ impl App {
     }
 
     /// Feed one key press; returns the side effects for the shell.
+    ///
+    /// One press can resolve more than one command: a longest-prefix fallback
+    /// (see `input.rs`) fires the prefix binding and replays the leftover
+    /// chords. The keymap is re-selected on every iteration, so a
+    /// mode-changing command applies to the chords that follow it.
     pub fn handle_key(&mut self, chord: Chord) -> Effects {
-        let keymap = match self.mode {
-            Mode::Normal => &self.keymap,
-            Mode::CaretFocus => &self.caret_focus_keymap,
-            Mode::LineFocus => &self.line_focus_keymap,
-            Mode::WordFocus => &self.word_focus_keymap,
-            Mode::SentenceFocus => &self.sentence_focus_keymap,
-            Mode::ParagraphFocus => &self.paragraph_focus_keymap,
-        };
-        match self.input.handle(keymap, chord) {
-            // Redraw on pending input so the status line shows it.
-            KeyOutcome::Pending => Effects::redraw(),
-            KeyOutcome::Unmatched => Effects::redraw(),
-            KeyOutcome::Command { command, count } => self.execute(command, count),
+        let mut effects = Effects::default();
+        let mut next = Some(chord);
+        // The replay queue shrinks on every pass, so this always terminates;
+        // the bound only guards against a future bug turning it into a spin.
+        for _ in 0..32 {
+            let Some(chord) = next.take() else {
+                return effects;
+            };
+            // Scoped so the keymap borrow ends before `execute`. Borrowing the
+            // field directly (rather than through a `&self` helper) keeps it
+            // disjoint from `self.input`.
+            let outcome = {
+                let keymap = match self.mode {
+                    Mode::Normal => &self.keymap,
+                    Mode::CaretFocus => &self.caret_focus_keymap,
+                    Mode::LineFocus => &self.line_focus_keymap,
+                    Mode::WordFocus => &self.word_focus_keymap,
+                    Mode::SentenceFocus => &self.sentence_focus_keymap,
+                    Mode::ParagraphFocus => &self.paragraph_focus_keymap,
+                };
+                self.input.handle(keymap, chord)
+            };
+            effects = effects.merge(match outcome {
+                // Redraw on pending input so the status line shows it.
+                KeyOutcome::Pending => Effects::redraw(),
+                KeyOutcome::Unmatched => Effects::redraw(),
+                KeyOutcome::Command { command, count } => self.execute(command, count),
+            });
+            if effects.quit {
+                break;
+            }
+            next = self.input.next_replay();
         }
+        self.input.clear();
+        effects
     }
 
     /// Execute a command. Public so a future command palette can reuse it.
