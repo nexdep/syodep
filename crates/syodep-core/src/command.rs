@@ -87,6 +87,57 @@ pub enum Command {
     ParagraphFocusNext,
     /// Move the highlight to the previous paragraph.
     ParagraphFocusPrev,
+    // Visual mode (a two-ended selection over content).
+    /// Enter visual mode, inheriting the current focus mode's granularity.
+    VisualEnter,
+    /// Enter visual mode selecting character by character.
+    VisualEnterChar,
+    /// Enter visual mode selecting word by word.
+    VisualEnterWord,
+    /// Enter visual mode selecting line by line.
+    VisualEnterLine,
+    /// Enter visual mode selecting sentence by sentence.
+    VisualEnterSentence,
+    /// Enter visual mode selecting paragraph by paragraph.
+    VisualEnterParagraph,
+    /// Leave visual mode, returning to the mode it was entered from.
+    VisualExit,
+    /// Grow or shrink the selection leftwards by one unit of the active scope.
+    VisualLeft,
+    /// Grow or shrink the selection rightwards by one unit of the active scope.
+    VisualRight,
+    /// Move the active end up (line-wise for char/word scope, else previous unit).
+    VisualUp,
+    /// Move the active end down (line-wise for char/word scope, else next unit).
+    VisualDown,
+    /// Move the active end to the start of the next word, whatever the scope.
+    VisualNextWord,
+    /// Move the active end to the start of the previous word, whatever the scope.
+    VisualPrevWord,
+    /// Move the active end to the end of the current word, whatever the scope.
+    VisualEndWord,
+    /// Make the other end of the selection the active one.
+    VisualSwapEnds,
+    /// Set the active end's granularity to characters.
+    VisualScopeChar,
+    /// Set the active end's granularity to words.
+    VisualScopeWord,
+    /// Set the active end's granularity to lines.
+    VisualScopeLine,
+    /// Set the active end's granularity to sentences.
+    VisualScopeSentence,
+    /// Set the active end's granularity to paragraphs.
+    VisualScopeParagraph,
+    /// Switch to the other end and set its granularity to characters.
+    VisualOtherChar,
+    /// Switch to the other end and set its granularity to words.
+    VisualOtherWord,
+    /// Switch to the other end and set its granularity to lines.
+    VisualOtherLine,
+    /// Switch to the other end and set its granularity to sentences.
+    VisualOtherSentence,
+    /// Switch to the other end and set its granularity to paragraphs.
+    VisualOtherParagraph,
     // Application.
     OpenFile,
     Quit,
@@ -142,6 +193,31 @@ pub const ALL_COMMANDS: &[(&str, Command)] = &[
     ("paragraph_focus_exit", Command::ParagraphFocusExit),
     ("paragraph_focus_next", Command::ParagraphFocusNext),
     ("paragraph_focus_prev", Command::ParagraphFocusPrev),
+    ("visual_enter", Command::VisualEnter),
+    ("visual_enter_char", Command::VisualEnterChar),
+    ("visual_enter_word", Command::VisualEnterWord),
+    ("visual_enter_line", Command::VisualEnterLine),
+    ("visual_enter_sentence", Command::VisualEnterSentence),
+    ("visual_enter_paragraph", Command::VisualEnterParagraph),
+    ("visual_exit", Command::VisualExit),
+    ("visual_left", Command::VisualLeft),
+    ("visual_right", Command::VisualRight),
+    ("visual_up", Command::VisualUp),
+    ("visual_down", Command::VisualDown),
+    ("visual_next_word", Command::VisualNextWord),
+    ("visual_prev_word", Command::VisualPrevWord),
+    ("visual_end_word", Command::VisualEndWord),
+    ("visual_swap_ends", Command::VisualSwapEnds),
+    ("visual_scope_char", Command::VisualScopeChar),
+    ("visual_scope_word", Command::VisualScopeWord),
+    ("visual_scope_line", Command::VisualScopeLine),
+    ("visual_scope_sentence", Command::VisualScopeSentence),
+    ("visual_scope_paragraph", Command::VisualScopeParagraph),
+    ("visual_other_char", Command::VisualOtherChar),
+    ("visual_other_word", Command::VisualOtherWord),
+    ("visual_other_line", Command::VisualOtherLine),
+    ("visual_other_sentence", Command::VisualOtherSentence),
+    ("visual_other_paragraph", Command::VisualOtherParagraph),
     ("open_file", Command::OpenFile),
     ("quit", Command::Quit),
     ("cancel", Command::Cancel),

@@ -7,6 +7,89 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-07-25 — Visual selection mode
+
+### Implemented
+
+- **Longest-prefix fallback in the input state machine** (`input.rs`): a
+  sequence that was both a complete binding and a prefix of a longer one could
+  never fire — the machine waited, and a miss discarded the whole buffer. Now a
+  miss walks back to the longest pending prefix that is itself a binding, fires
+  it, and queues the leftover chords for replay. Still timer-free. The queue is
+  drained by `App::handle_key`, **not** inside `InputState`, because the fired
+  command may change mode and the replayed chords must resolve against the new
+  mode's keymap (`cw` then `vj` must run `visual_down`, not `word_focus_down`).
+  `Effects::merge` keeps one key press resolving several commands from losing an
+  effect bit. No-op for the previous defaults: `c`/`g`/`z` were prefixes with no
+  command of their own and `o` was nobody's prefix, so every bound sequence was
+  a trie leaf.
+- **Visual mode** (`caret.rs`, `app.rs`): `Mode::Visual` plus `VisualScope`
+  (char/word/line/sentence/paragraph) and `VisualSelection { anchor,
+  anchor_scope, head, head_scope, return_mode }`. Entered with `v` — inheriting
+  the scope of the mode it was entered from — or `vc`/`vl`/`vw`/`vs`/`vp` to
+  name it. `<Esc>` restores the prior mode and carries its mark to the head, so
+  the highlight does not snap back.
+- **Two independently-scoped ends**: `v` acts on the end that is moving, `o` on
+  the other one. `ow` switches ends and makes *that* end word-granular while the
+  other stays as it was; `vw` re-scopes the moving end without switching. `oo`
+  swaps without waiting for a motion.
+- **Motion** reuses the focus modes' steppers wholesale (`step_next_word_start`,
+  `line_step_down`, `sentence_step_next`, `paragraph_step_next`, …), so no new
+  traversal logic was written; `w`/`b`/`e` stay word-granular in every scope.
+- **Config/FFI/Qt**: a `[visual_keys]` overlay table, `syo_app_selection` /
+  `syo_selection_free` returning a `SyoRect` array (modelled on the sentence
+  path but with no `page` field, since a selection may span pages), and a teal
+  fill-only Qt overlay.
+- **Docs**: the visual-mode command page, keybinding/config references, and a
+  `check-docs.sh` block for the new binding table.
+
+### Tests
+
+- `input.rs`: prefix fires on a miss and the leftover replays; a directly-bound
+  longer sequence still wins; `5oj` gives the count to the first command while
+  `o5j` replays the digit into the count branch; Escape still cancels pending
+  input instead of triggering the fallback; a total miss with no bound prefix
+  still resets.
+- `caret.rs`: `Caret` ordering is document order; scope inheritance; swapping is
+  an involution.
+- `app.rs`: entry from normal and from each focus mode; growing at each scope;
+  `o` is a render no-op but does move the other end afterwards; `ow` changes one
+  end only; crossing the anchor and returning restores the span exactly;
+  selections spanning pages; rect count bounded by the visible pages; exit
+  restoring mode *and* mark; entering a focus mode dropping the selection; and
+  the replay resolving against the new mode's keymap.
+- FFI round-trip covers `syo_app_selection` validity, growth and the free.
+
+### Decisions
+
+- **Scope belongs to the endpoint, not to the start/end role.** The alternative
+  (the "first" edge owns a granularity) means overshooting and coming back
+  silently trades the two granularities and lands on a different selection.
+  Binding scope to the endpoint makes cross-and-return the identity.
+- **No `active: SelEnd` flag.** `o` swaps the anchor and head records outright,
+  so the invariant is just *head moves, anchor stays* and nothing can drift.
+  The one subtlety: the swap must recompute the goal column, or the next `j`
+  aims at the old head's column.
+- **Selections are drawn per visible page**, unlike the page-confined focus
+  marks. Overlay getters are `&self` and cannot lazily extract content, so the
+  resolved span is cached on `App` and refreshed after each mutation.
+- **Scroll and page jumps leave the selection alone**, unlike the focus modes
+  where they carry the highlight. A selection is an explicit range; dragging it
+  out from under the reader would lose work.
+- `v` and `o` now take effect together with the key that follows them, a direct
+  consequence of the prefix design the fallback enables.
+
+### Known limitations / next steps
+
+- Mouse selection is still to come; roadmap phase 2 item 2 stays 🚧.
+- The selection is not persisted: `Position` stores page/scroll/zoom only, so a
+  restart starts in normal mode with nothing selected. Deliberate.
+- Nothing consumes the selection yet — highlighting (phase 2 item 3, SQLite
+  migration v2) and clipboard yank are the obvious next steps. The span is
+  already exposed as `App::visual_span`.
+
+---
+
 ## 2026-06-26 — Sentence focus & paragraph focus modes
 
 ### Implemented

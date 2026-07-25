@@ -51,6 +51,10 @@ pub struct Config {
     /// These overlay the normal `keys` while paragraph focus mode is active.
     #[serde(default)]
     pub paragraph_focus_keys: BTreeMap<String, String>,
+    /// Visual-mode keybindings (the `[visual_keys]` table). These overlay the
+    /// normal `keys` while visual mode is active.
+    #[serde(default)]
+    pub visual_keys: BTreeMap<String, String>,
     /// `[files]` section: file-dialog and path behaviour.
     #[serde(default)]
     pub files: FilesConfig,
@@ -111,6 +115,7 @@ impl Default for Config {
             word_focus_keys: default_word_focus_keybindings(),
             sentence_focus_keys: default_sentence_focus_keybindings(),
             paragraph_focus_keys: default_paragraph_focus_keybindings(),
+            visual_keys: default_visual_keybindings(),
             files: FilesConfig::default(),
         }
     }
@@ -149,6 +154,15 @@ pub fn default_keybindings() -> BTreeMap<String, String> {
         ("cw", "word_focus_enter"),
         ("cs", "sentence_focus_enter"),
         ("cp", "paragraph_focus_enter"),
+        // `v` alone inherits the current mode's granularity; `v` plus a scope
+        // letter names it. `v` is a binding *and* a prefix, which the input
+        // state machine resolves by longest-prefix fallback.
+        ("v", "visual_enter"),
+        ("vc", "visual_enter_char"),
+        ("vw", "visual_enter_word"),
+        ("vl", "visual_enter_line"),
+        ("vs", "visual_enter_sentence"),
+        ("vp", "visual_enter_paragraph"),
         ("o", "open_file"),
         ("q", "quit"),
         ("<Esc>", "cancel"),
@@ -277,6 +291,49 @@ pub fn default_paragraph_focus_keybindings() -> BTreeMap<String, String> {
     .collect()
 }
 
+/// Built-in visual-mode keybindings (the `[visual_keys]` table).
+///
+/// `v` acts on the end that is moving, `o` on the other one: `vw` makes the
+/// active end word-granular, `ow` switches ends and makes *that* one word
+/// granular. Both are bindings and prefixes, resolved by the input state
+/// machine's longest-prefix fallback.
+///
+/// Every entry here must be documented in `docs/keybindings.md`.
+pub fn default_visual_keybindings() -> BTreeMap<String, String> {
+    [
+        ("h", "visual_left"),
+        ("j", "visual_down"),
+        ("k", "visual_up"),
+        ("l", "visual_right"),
+        ("<Left>", "visual_left"),
+        ("<Down>", "visual_down"),
+        ("<Up>", "visual_up"),
+        ("<Right>", "visual_right"),
+        ("w", "visual_next_word"),
+        ("e", "visual_end_word"),
+        ("b", "visual_prev_word"),
+        ("o", "visual_swap_ends"),
+        // `o` waits for the next key (it is also a prefix), so it only takes
+        // effect together with whatever follows. `oo` swaps immediately.
+        ("oo", "visual_swap_ends"),
+        ("oc", "visual_other_char"),
+        ("ow", "visual_other_word"),
+        ("ol", "visual_other_line"),
+        ("os", "visual_other_sentence"),
+        ("op", "visual_other_paragraph"),
+        ("v", "visual_exit"),
+        ("vc", "visual_scope_char"),
+        ("vw", "visual_scope_word"),
+        ("vl", "visual_scope_line"),
+        ("vs", "visual_scope_sentence"),
+        ("vp", "visual_scope_paragraph"),
+        ("<Esc>", "visual_exit"),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_owned(), v.to_owned()))
+    .collect()
+}
+
 /// Errors produced while loading or parsing configuration.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -315,6 +372,9 @@ impl Config {
         let mut paragraph_focus_keys = default_paragraph_focus_keybindings();
         paragraph_focus_keys.extend(std::mem::take(&mut config.paragraph_focus_keys));
         config.paragraph_focus_keys = paragraph_focus_keys;
+        let mut visual_keys = default_visual_keybindings();
+        visual_keys.extend(std::mem::take(&mut config.visual_keys));
+        config.visual_keys = visual_keys;
         Ok(config)
     }
 
@@ -460,6 +520,14 @@ pub fn default_config_doc() -> String {
         "paragraph_focus_keys",
         &default_paragraph_focus_keybindings(),
     );
+
+    out.push_str(
+        "\n# Visual-mode keybindings (active after pressing \"v\"). hjkl/arrows grow the\n\
+         # selection by one unit of the active end's scope. \"v\" plus a scope letter\n\
+         # changes the moving end's scope, \"o\" switches ends and \"o\" plus a scope\n\
+         # letter does both. <Esc> exits to the mode visual mode was entered from.\n",
+    );
+    push_keytable(&mut out, "visual_keys", &default_visual_keybindings());
 
     out
 }
@@ -616,6 +684,57 @@ mod tests {
         assert_eq!(
             config.keys.get("cw").map(String::as_str),
             Some("word_focus_enter")
+        );
+    }
+
+    #[test]
+    fn visual_keys_default_and_user_override() {
+        let config = Config::from_toml(
+            r#"
+            [visual_keys]
+            "y" = "visual_exit"
+            "#,
+        )
+        .unwrap();
+        // Built-in visual bindings survive.
+        assert_eq!(
+            config.visual_keys.get("h").map(String::as_str),
+            Some("visual_left")
+        );
+        assert_eq!(
+            config.visual_keys.get("<Esc>").map(String::as_str),
+            Some("visual_exit")
+        );
+        // `v` acts on the moving end, `o` on the other one.
+        assert_eq!(
+            config.visual_keys.get("vw").map(String::as_str),
+            Some("visual_scope_word")
+        );
+        assert_eq!(
+            config.visual_keys.get("ow").map(String::as_str),
+            Some("visual_other_word")
+        );
+        assert_eq!(
+            config.visual_keys.get("o").map(String::as_str),
+            Some("visual_swap_ends")
+        );
+        assert_eq!(
+            config.visual_keys.get("oo").map(String::as_str),
+            Some("visual_swap_ends")
+        );
+        // User override is merged in.
+        assert_eq!(
+            config.visual_keys.get("y").map(String::as_str),
+            Some("visual_exit")
+        );
+        // The enter bindings live in the normal table.
+        assert_eq!(
+            config.keys.get("v").map(String::as_str),
+            Some("visual_enter")
+        );
+        assert_eq!(
+            config.keys.get("vp").map(String::as_str),
+            Some("visual_enter_paragraph")
         );
     }
 

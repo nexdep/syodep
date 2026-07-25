@@ -25,7 +25,9 @@ Ordered roughly by dependency:
 1. ✅ Character/image-geometry content layer (per-page character + image
    boxes from `syodep-pdf::Document::page_content`; foundation for
    everything below)
-2. ⬜ Mouse + keyboard text selection; selection overlay rendering
+2. 🚧 Keyboard text selection + selection overlay rendering (done: visual
+   mode, `v`/`vc`/`vw`/`vl`/`vs`/`vp`, two independently-scoped ends, `o` to
+   switch ends); mouse selection still to come
 3. ⬜ Highlight selected text; SQLite `highlights` table (migration v2);
    highlight overlays rendered on reload
 4. ⬜ Search within document; result overlays; `/`, `n`, `N`
@@ -39,12 +41,14 @@ Ordered roughly by dependency:
 
 Delivered ahead of the rest: a **modal caret** (`c` to enter, then `hjkl`)
 navigates the content layer character- and line-wise across text and images,
-auto-scrolling to follow. It is the seam selection/highlight build on. See
-the development log.
+auto-scrolling to follow, plus word/line/sentence/paragraph focus modes over
+the same layer. **Visual mode** (item 2) builds a two-ended selection on top of
+them, and is the seam highlighting builds on. See the development log.
 
 ## Phase 3 — text objects and smart navigation ⬜
 
-- ⬜ Text objects: word / sentence / paragraph over the text layer
+- ✅ Text objects: word / sentence / paragraph over the text layer
+  (focus modes, and as visual-mode selection scopes)
 - ⬜ Text-object selection, highlighting, annotation (`viw`-style
   composability on top of the existing command/count system)
 - ⬜ Smart jump to references, figures, tables, equations

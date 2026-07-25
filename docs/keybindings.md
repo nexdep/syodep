@@ -77,6 +77,17 @@ Caret (see "Caret focus mode" below):
 | `cs` | `sentence_focus_enter` |
 | `cp` | `paragraph_focus_enter` |
 
+Selection (see "Visual mode" below):
+
+| Keys | Command |
+|---|---|
+| `v` | `visual_enter` — inherit the current mode's scope |
+| `vc` | `visual_enter_char` |
+| `vl` | `visual_enter_line` |
+| `vw` | `visual_enter_word` |
+| `vs` | `visual_enter_sentence` |
+| `vp` | `visual_enter_paragraph` |
+
 Application:
 
 | Keys | Command |
@@ -226,6 +237,52 @@ current line range. See `docs/commands-paragraph-focus-mode.md` for the full lis
 Customize paragraph-focus-mode keys with a `[paragraph_focus_keys]` table (see
 `docs/config.md`); it overlays the normal bindings while paragraph focus mode is
 active.
+
+## Visual mode
+
+Press `v` (`visual_enter`) to switch to **visual mode** and select a range. A
+bare `v` inherits the granularity of the mode you were in, so `cw` then `v`
+selects word by word; `vc`/`vl`/`vw`/`vs`/`vp` name the granularity instead.
+
+Motion moves one end of the selection — the **head** — while the other stays
+anchored:
+
+| Keys | Command |
+|---|---|
+| `h`, `<Left>` | `visual_left` — back one unit of the active scope |
+| `l`, `<Right>` | `visual_right` — forward one unit of the active scope |
+| `k`, `<Up>` | `visual_up` — up a line, or back one unit for sentence/paragraph |
+| `j`, `<Down>` | `visual_down` — down a line, or forward one unit for sentence/paragraph |
+| `w` | `visual_next_word` — next word, whatever the scope |
+| `b` | `visual_prev_word` — previous word, whatever the scope |
+| `e` | `visual_end_word` — end of the current word, whatever the scope |
+| `<Esc>` | `visual_exit` — back to the mode visual mode was entered from |
+
+Each end has its own scope. `v` acts on the end that is moving, `o` on the
+other one:
+
+| Keys | Command |
+|---|---|
+| `o` | `visual_swap_ends` — move the other end from now on |
+| `oo` | `visual_swap_ends` — swap without waiting for a motion |
+| `oc`, `ol`, `ow`, `os`, `op` | `visual_other_char`, `visual_other_line`, `visual_other_word`, `visual_other_sentence`, `visual_other_paragraph` — switch ends *and* set that end's scope |
+| `vc`, `vl`, `vw`, `vs`, `vp` | `visual_scope_char`, `visual_scope_line`, `visual_scope_word`, `visual_scope_sentence`, `visual_scope_paragraph` — set the active end's scope |
+| `v` | `visual_exit` |
+
+So from a line selection, `o` then `j`/`k` moves the beginning of the selection
+line by line, while `ow` moves that same beginning word by word and leaves the
+other end line-granular. Note that `v` and `o` are each both a binding and the
+start of longer ones, so they take effect together with the key that follows
+(see the disambiguation rule above); `oo` swaps ends on its own.
+
+The ends may cross freely, and counts work (`3l`). Scroll and page jumps leave
+the selection where it is rather than dragging it to the visible content, and
+only the on-screen part of a selection is drawn. The status bar shows
+`-- VISUAL (scope) --`, or `-- VISUAL (head/anchor) --` when the two ends have
+different scopes. See `docs/commands-visual-mode.md` for the full list.
+
+Customize visual-mode keys with a `[visual_keys]` table (see `docs/config.md`);
+it overlays the normal bindings while visual mode is active.
 
 ## Customizing
 
