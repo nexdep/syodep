@@ -30,6 +30,13 @@ jobs:
     container: ubuntu:22.04
     steps:
       - uses: actions/checkout@v5
+      # `unzip` is needed by MuPDF's build: its Makefile runs
+      # docx_template_build.py when python3 is present (skipping it only when
+      # python3 is *missing*), and that script shells out to unzip to unpack an
+      # ODT template. python3 is not requested here but arrives transitively
+      # through the recommends chain of these packages, so the unzip dependency
+      # is invisible until it fires. Pull it in explicitly rather than relying
+      # on apt recommends staying as they are.
       - name: Install build dependencies
         run: |
           apt-get update
@@ -37,7 +44,7 @@ jobs:
             build-essential clang libclang-dev cmake ninja-build \
             qt6-base-dev libqt6opengl6-dev qt6-wayland libgl1-mesa-dev \
             libfontconfig1-dev libfreetype-dev \
-            curl file ca-certificates
+            curl file ca-certificates unzip
       - name: Install Rust
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \

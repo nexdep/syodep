@@ -7,6 +7,61 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-07-25 — Fix the AppImage release build (missing `unzip`)
+
+### Implemented
+
+- Added `unzip` to the apt list of the `release-build-linux` container
+  (`.github/workflows/release.yml`). Nothing else changed.
+
+### Why
+
+The Release workflow started failing on `main` at the `Build (release)` step,
+while the CI workflow stayed green:
+
+```
+command failed: unzip -q -d thirdparty/extract/src/template.odt.dir ...
+sh: 1: unzip: not found
+make: *** [Makethird:358: thirdparty/extract/src/odt_template.c] Error 1
+```
+
+MuPDF's `Makethird` runs `thirdparty/extract/src/docx_template_build.py` when
+python3 is available, and that script shells out to `unzip` to unpack an ODT
+template. The guard is `if python3 -c '...'; then <run it>; else <skip>; fi`,
+so the step is skipped only when python3 is **missing** — the `unzip`
+dependency is invisible right up until python3 appears.
+
+Verified against the real image rather than guessed. In a bare `ubuntu:22.04`
+neither `python3` nor `unzip` is present; simulating an install of exactly the
+list this job uses shows `python3` (plus `python3-gi`, `python3-dbus`) being
+pulled in transitively through apt *recommends*, while `unzip` is not. So the
+container ends up with the one binary that enables the code path and without
+the one that path needs.
+
+This is why CI stayed green: `qt-build-linux` runs on a normal `ubuntu-latest`
+runner, which ships `unzip` preinstalled. Only the containerized release job
+has a minimal userland. The Windows release job was unaffected and passed.
+
+The trigger was an upstream change in that recommends chain, not anything in
+this repository — the previous release run (2026-06-26, `d4694a5`) succeeded
+with identical workflow and lockfile content.
+
+### Test strategy
+
+CI-only change, no core logic touched, so no new Rust tests. Verified by
+dispatching the release workflow on the fix branch and watching
+`release-build-linux` reach a packaged, smoke-tested AppImage.
+
+### Notes / remaining
+
+- The job still depends on apt recommends for python3. That is now harmless
+  either way: with `unzip` present, both branches of the guard work.
+- Pinning the `ubuntu:22.04` container to a digest would make this class of
+  drift impossible, at the cost of manual bumps for security updates.
+  Deliberately not done here — that is a policy decision, not a bug fix.
+
+---
+
 ## 2026-07-25 — Visual selection mode
 
 ### Implemented
