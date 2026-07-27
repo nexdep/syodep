@@ -271,10 +271,18 @@ jobs:
 
           # --- negative test: without this, SetErrorLevel is unproven and every
           #     assertion above rests on an installer that may always exit 0.
+          #
+          #     The target must be unwritable regardless of privilege. A system
+          #     directory is not: CI runs elevated, so C:\Windows\System32 is
+          #     writable here and the install legitimately succeeded. Putting a
+          #     *file* where a parent directory is required fails for everyone.
+          $blocker = "$PWD\blocker"
+          Set-Content $blocker "not a directory"
           $p = Start-Process .\syodep-setup.exe `
-            -ArgumentList "/S","/D=C:\Windows\System32\syodep-citest" -Wait -PassThru
+            -ArgumentList "/S","/D=$blocker\syodep" -Wait -PassThru
           if ($p.ExitCode -eq 0) { throw "install into an unwritable path reported success" }
           Write-Host "unwritable-path install correctly exited $($p.ExitCode)"
+          Remove-Item $blocker -Force
       - uses: actions/upload-artifact@v4
         with:
           name: syodep-win64

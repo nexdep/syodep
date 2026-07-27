@@ -116,7 +116,11 @@ Three traps it is written around:
   creates `%APPDATA%\syodep`.
 - A **negative test** (install into an unwritable path must exit non-zero) is
   what proves `SetErrorLevel` works. Without it every other assertion rests on
-  an installer that might always exit 0.
+  an installer that might always exit 0. The target has to be unwritable
+  *regardless of privilege*: the first attempt used `C:\Windows\System32`,
+  which CI can write to because it runs elevated, so the install succeeded and
+  the assertion fired against a working installer. Placing a **file** where a
+  parent directory is required fails for everyone.
 
 ### Notes / remaining
 
