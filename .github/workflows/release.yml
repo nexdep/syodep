@@ -182,8 +182,11 @@ jobs:
           # the staged LICENSE (and the zip's hash) stay untouched.
           (Get-Content LICENSE -Raw) -replace "`r?`n", "`r`n" |
             Set-Content -NoNewline license-crlf.txt
+          # Every path handed to makensis must be absolute: NSIS resolves
+          # relative paths against the *script's* directory, so -DSRCDIR=x
+          # would be looked up under packaging/x.
           makensis -WX -V3 "-DVERSION=$ver" "-DVERSION_NUMERIC=$vernum" `
-            -DSRCDIR=syodep-win64 "-DLICENSE_FILE=$PWD\license-crlf.txt" `
+            "-DSRCDIR=$PWD\syodep-win64" "-DLICENSE_FILE=$PWD\license-crlf.txt" `
             "-DOUTFILE=$PWD\syodep-setup.exe" packaging\syodep.nsi
           if ($LASTEXITCODE -ne 0) { throw "makensis failed" }
           "SYODEP_INSTALLER_VERSION=$ver" | Out-File -Append $env:GITHUB_ENV

@@ -45,9 +45,22 @@ the script's directory, not the working directory** — the first successful bui
 dropped a 563 KB binary into `packaging/`. `OutFile` is now `${OUTFILE}`, passed
 explicitly, with `packaging/*.exe` gitignored as a backstop.
 
-A fourth only surfaced in CI, because the local machine masked it: Ubuntu's
+Two more only surfaced in CI, both because the local invocation differed from
+the CI one in a way that hid them.
+
+`-DSRCDIR=syodep-win64` (relative) made makensis report *"Error while loading
+icon from syodep-win64\\syodep.ico: can't open file"* — the same
+script-relative resolution rule as `OutFile`, so it hunted for
+`packaging/syodep-win64/`. The error names the icon, which reads like a missing
+file rather than a wrong base directory. Every local test had passed an
+absolute path and never exercised the relative case. All paths handed to
+makensis are now absolute, and the script says so where the defines are
+declared.
+
+The other: Ubuntu's Ubuntu's
 `imagemagick` package is ImageMagick **6**, whose command is `convert`, while
-`magick` exists only in 7. The lint job died with `magick: command not found`.
+`magick` exists only in 7, so the lint job died with `magick: command not
+found`.
 `ui-qt/CMakeLists.txt` already accepted either via
 `find_program(... NAMES magick convert)`; the workflow now does the same.
 

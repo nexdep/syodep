@@ -39,6 +39,13 @@ SetCompressor /SOLID lzma
   !define OUTFILE "syodep-setup.exe"
 !endif
 
+; PASS EVERY PATH ABOVE AS AN ABSOLUTE PATH. The same script-relative rule
+; applies to SRCDIR (via MUI_ICON and `File`) and to LICENSE_FILE, and it fails
+; late and confusingly: a relative -DSRCDIR=syodep-win64 is hunted for at
+; packaging/syodep-win64 and reported as "Error while loading icon ... can't
+; open file", which reads like a missing icon rather than a wrong base
+; directory.
+
 !define APPNAME   "syodep"
 !define PROGID    "syodep.pdf"
 !define PUBLISHER "nexdep"
