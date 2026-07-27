@@ -109,6 +109,12 @@ grep -q 'project(syodep VERSION \${SYODEP_VERSION_NUMERIC}' CMakeLists.txt \
 grep -q 'setApplicationVersion(QStringLiteral(SYODEP_VERSION))' ui-qt/src/main.cpp \
     || err "ui-qt must report SYODEP_VERSION, not a hardcoded version string"
 
+# The installer script is a shipped artifact source, not a doc, but losing it
+# would silently drop the Windows installer from releases.
+[ -s packaging/syodep.nsi ] || err "missing or empty: packaging/syodep.nsi"
+grep -q "NSIS" docs/packaging.md \
+    || err "docs/packaging.md no longer documents the NSIS installer"
+
 if [ "$fail" -eq 0 ]; then
     echo "docs check OK"
 fi

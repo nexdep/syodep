@@ -31,7 +31,7 @@ and on pushes to `main` for the rolling continuous prerelease:
 |---|---|---|
 | Linux AppImage | linuxdeploy + Qt plugin | **implemented** (`release-build-linux`) |
 | Windows portable zip | `windeployqt` into a folder, zip it | **implemented** (`release-build-windows`) |
-| Windows installer | NSIS over the portable tree | **planned** |
+| Windows installer | NSIS over the portable tree | **implemented** (`release-build-windows`) |
 
 ### Windows (implemented)
 
@@ -101,10 +101,40 @@ The `publish-release` job rewrites the manifest's `version`/`url`/`hash`
 prerelease does not update Scoop metadata. The manifest commit comes from
 `github-actions[bot]`.
 
-### Still planned
+### Windows installer (implemented)
 
-- **Windows NSIS installer:** silent-install capable script over the
-  portable tree produced above.
+`packaging/syodep.nsi`, compiled by `makensis` in `release-build-windows` over
+the same `syodep-win64/` tree the staged smoke test has already validated, and
+attached to tagged releases as `syodep-vX.Y.Z-win64-setup.exe`. The rolling
+`continuous` prerelease carries only the zip and the AppImage: an installer that
+writes registry entries is a poor fit for a build that changes on every merge.
+
+- **Per-user.** Installs to `%LOCALAPPDATA%\Programs\syodep`, no UAC prompt,
+  works without administrator rights. This is also what lets CI verify a real
+  install/uninstall round trip, which an elevated installer could not do.
+- **Silent capable.** `/S` installs without UI; `/D=<dir>` overrides the
+  location and **must be the last argument, unquoted, with no trailing
+  backslash**. `/ASSOCIATE` opts into the PDF registration. `uninstall.exe /S`
+  uninstalls, and the Add/Remove Programs entry publishes a
+  `QuietUninstallString` for winget/MDM tooling.
+- **The PDF association is opt-in and cannot claim the default.** Since
+  Windows 8 the effective handler lives in a hash-protected `UserChoice` key no
+  installer can forge. The checkbox registers a ProgID plus
+  `Applications\syodep.exe` and `OpenWithProgids`, which makes syodep *appear*
+  in "Open with" and in Settings → Default apps, where the user confirms.
+  The "Open with" registration happens unconditionally; only the picker entry
+  is gated on the checkbox.
+- **Uninstall leaves `%APPDATA%\syodep` alone.** Config and reading positions
+  are shared with Scoop and portable installs, so deleting them would destroy
+  state this installer never owned.
+- **Unsigned.** SmartScreen will show "Windows protected your PC" until the
+  binary earns reputation, and reputation is per-publisher so an unsigned build
+  can never accrue any. Users who would rather avoid the prompt should install
+  via Scoop, which downloads the zip programmatically.
+
+The script is syntax-checked on **Linux** in the `rust-lint` CI job -- `makensis`
+is cross-platform, so a broken script fails in about a minute instead of after
+the twelve-minute Windows build.
 
 ## Versioning
 

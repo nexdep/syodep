@@ -158,10 +158,127 @@ jobs:
       - name: Zip portable tree
         shell: pwsh
         run: Compress-Archive -Path syodep-win64 -DestinationPath syodep-win64.zip
+      # NSIS 3.10 is preinstalled on windows-2022. The script is already
+      # syntax-checked on Linux by the CI lint job; this builds it for real
+      # over the tree the smoke test above just validated.
+      - name: Build installer (NSIS)
+        shell: pwsh
+        run: |
+          $cargo = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          if ($env:GITHUB_REF -like 'refs/tags/v*') {
+            $ver = $env:GITHUB_REF_NAME -replace '^v',''
+            # A tag that disagrees with Cargo.toml would ship an installer and a
+            # Scoop manifest asserting a version the binary does not report.
+            if ($ver -ne $cargo) {
+              throw "tag $env:GITHUB_REF_NAME does not match Cargo.toml version $cargo"
+            }
+          } else {
+            $ver = "$cargo-continuous"
+          }
+          # VIProductVersion accepts exactly four numeric components.
+          $vernum = ($ver -replace '-.*','') + '.0'
+          Write-Host "building installer for $ver ($vernum)"
+          # NSIS's license control expects CRLF; convert a build-only copy so
+          # the staged LICENSE (and the zip's hash) stay untouched.
+          (Get-Content LICENSE -Raw) -replace "`r?`n", "`r`n" |
+            Set-Content -NoNewline license-crlf.txt
+          makensis -WX -V3 "-DVERSION=$ver" "-DVERSION_NUMERIC=$vernum" `
+            -DSRCDIR=syodep-win64 "-DLICENSE_FILE=$PWD\license-crlf.txt" `
+            "-DOUTFILE=$PWD\syodep-setup.exe" packaging\syodep.nsi
+          if ($LASTEXITCODE -ne 0) { throw "makensis failed" }
+          "SYODEP_INSTALLER_VERSION=$ver" | Out-File -Append $env:GITHUB_ENV
+      # Install it, run the installed binary, uninstall it. Anything less is a
+      # compile check, not a gate.
+      - name: Verify the installer end to end
+        shell: pwsh
+        run: |
+          $dst = "$env:LOCALAPPDATA\Programs\syodep-citest"
+          $fixture = "$PWD\fixture.pdf"
+
+          # --- silent install; /D= must be last, unquoted, no trailing slash
+          $p = Start-Process .\syodep-setup.exe -ArgumentList "/S","/D=$dst" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "silent install exited $($p.ExitCode)" }
+          foreach ($f in "syodep.exe","Uninstall.exe","syodep.ico","LICENSE") {
+            if (-not (Test-Path "$dst\$f")) { throw "installed tree is missing $f" }
+          }
+          if (-not (Test-Path "$dst\platforms\qwindows.dll")) { throw "no Qt platform plugin" }
+
+          # --- Add/Remove Programs entry
+          $k = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\syodep"
+          $arp = Get-ItemProperty $k -ErrorAction Stop
+          if ($arp.DisplayVersion -ne $env:SYODEP_INSTALLER_VERSION) {
+            throw "DisplayVersion=$($arp.DisplayVersion), expected $env:SYODEP_INSTALLER_VERSION"
+          }
+          if (-not $arp.QuietUninstallString) { throw "QuietUninstallString missing" }
+          # KiB, not bytes: a unit slip here reports ~1.5 GB for a 60 MB app.
+          if ($arp.EstimatedSize -lt 20000 -or $arp.EstimatedSize -gt 500000) {
+            throw "EstimatedSize $($arp.EstimatedSize) KiB is implausible"
+          }
+          if (-not (Test-Path "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\syodep.lnk")) {
+            throw "Start-menu shortcut missing"
+          }
+
+          # --- "Open with" is unconditional; the association is opt-in and
+          #     must NOT have happened under a plain /S.
+          if (-not (Test-Path "HKCU:\Software\Classes\Applications\syodep.exe\shell\open\command")) {
+            throw "Open-With registration missing"
+          }
+          $owp = Get-ItemProperty "HKCU:\Software\Classes\.pdf\OpenWithProgids" -ErrorAction SilentlyContinue
+          if ($owp -and $owp.PSObject.Properties.Name -contains 'syodep.pdf') {
+            throw "/S associated .pdf without /ASSOCIATE"
+          }
+
+          # --- run what was installed, with Qt stripped from PATH
+          $env:PATH = ($env:PATH -split ';' | Where-Object { $_ -notlike '*Qt*' }) -join ';'
+          $env:QT_QPA_PLATFORM = 'offscreen'
+          $p = Start-Process "$dst\syodep.exe" -ArgumentList "--smoke-test",$fixture -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "installed binary smoke test exited $($p.ExitCode)" }
+
+          # --- user data must survive uninstall. --smoke-test runs without
+          #     persistence, so plant a sentinel or this assertion is vacuous.
+          New-Item -ItemType Directory -Force "$env:APPDATA\syodep" | Out-Null
+          Set-Content "$env:APPDATA\syodep\sentinel.txt" "keep me"
+
+          # --- _?= keeps the uninstaller in place instead of relaunching from
+          #     %TEMP% and returning immediately, which would race every
+          #     assertion below. It must be the last argument.
+          $p = Start-Process "$dst\Uninstall.exe" -ArgumentList "/S","_?=$dst" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "silent uninstall exited $($p.ExitCode)" }
+          if (Test-Path "$dst\syodep.exe") { throw "payload survived uninstall" }
+          if (Test-Path "$dst\platforms") { throw "Qt plugins survived uninstall" }
+          if (Test-Path $k) { throw "ARP key survived uninstall" }
+          if (Test-Path "HKCU:\Software\Classes\Applications\syodep.exe") {
+            throw "Open-With registration survived uninstall"
+          }
+          if (-not (Test-Path "$env:APPDATA\syodep\sentinel.txt")) {
+            throw "uninstall deleted user data it does not own"
+          }
+          Remove-Item -Recurse -Force $dst -ErrorAction SilentlyContinue
+
+          # --- opt-in association really opts in
+          $p = Start-Process .\syodep-setup.exe -ArgumentList "/S","/ASSOCIATE","/D=$dst" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "install with /ASSOCIATE exited $($p.ExitCode)" }
+          $owp = Get-ItemProperty "HKCU:\Software\Classes\.pdf\OpenWithProgids"
+          if ($owp.PSObject.Properties.Name -notcontains 'syodep.pdf') {
+            throw "/ASSOCIATE did not register the ProgID"
+          }
+          Start-Process "$dst\Uninstall.exe" -ArgumentList "/S","_?=$dst" -Wait
+          Remove-Item -Recurse -Force $dst -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force "$env:APPDATA\syodep" -ErrorAction SilentlyContinue
+
+          # --- negative test: without this, SetErrorLevel is unproven and every
+          #     assertion above rests on an installer that may always exit 0.
+          $p = Start-Process .\syodep-setup.exe `
+            -ArgumentList "/S","/D=C:\Windows\System32\syodep-citest" -Wait -PassThru
+          if ($p.ExitCode -eq 0) { throw "install into an unwritable path reported success" }
+          Write-Host "unwritable-path install correctly exited $($p.ExitCode)"
       - uses: actions/upload-artifact@v4
         with:
           name: syodep-win64
-          path: syodep-win64.zip
+          path: |
+            syodep-win64.zip
+            syodep-setup.exe
+          if-no-files-found: error
 
   publish-release:
     name: Publish GitHub release
@@ -187,9 +304,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           mv syodep-win64.zip "syodep-${GITHUB_REF_NAME}-win64.zip"
+          mv syodep-setup.exe "syodep-${GITHUB_REF_NAME}-win64-setup.exe"
           mv syodep-x86_64.AppImage "syodep-${GITHUB_REF_NAME}-x86_64.AppImage"
           gh release create "$GITHUB_REF_NAME" \
             "syodep-${GITHUB_REF_NAME}-win64.zip" \
+            "syodep-${GITHUB_REF_NAME}-win64-setup.exe" \
             "syodep-${GITHUB_REF_NAME}-x86_64.AppImage" \
             --repo "$GITHUB_REPOSITORY" \
             --title "syodep $GITHUB_REF_NAME" \

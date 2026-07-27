@@ -7,6 +7,111 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-07-27 — Windows NSIS installer
+
+### Implemented
+
+- **`packaging/syodep.nsi`**, compiled by `makensis` in `release-build-windows`
+  over the `syodep-win64/` tree the staged smoke test has already validated. The
+  script installs files; it never builds them.
+- Per-user install to `%LOCALAPPDATA%\Programs\syodep` (no UAC), Start-menu
+  shortcut, Add/Remove Programs entry including `QuietUninstallString`, silent
+  `/S` install and uninstall, `/ASSOCIATE` to opt into the PDF picker.
+- Attached to **tagged releases only** as `syodep-vX.Y.Z-win64-setup.exe`;
+  `continuous` still carries just the zip and AppImage.
+- **A tag-vs-`Cargo.toml` assertion** in the installer build: tagging `v0.5.0`
+  without bumping would otherwise ship an installer and a Scoop manifest
+  asserting a version the binary does not report — the same class of bug as the
+  version drift fixed earlier today, one layer up.
+- **The script is compiled on Linux in the `rust-lint` CI job.** `makensis` is
+  cross-platform, so a broken script fails in ~1 minute rather than after the
+  12-minute Windows build.
+
+### Why the local-first workflow mattered
+
+Installing `nsis` locally (3.10, the same version the runner has) paid for
+itself immediately: the very first compile failed with
+
+    warning 6000: unknown variable/constant "{SecAssoc}" detected, ignoring
+
+because `.onInit` referenced the section before it was defined — NSIS resolves
+`${SecAssoc}` at parse time, so the reference silently expanded to nothing and
+`/ASSOCIATE` would have been a no-op. Caught in seconds; it would otherwise have
+been a twelve-minute round trip, and `-WX` is what turned the warning into a
+failure rather than a silently broken installer.
+
+The same compile also revealed that **NSIS resolves a relative `OutFile` against
+the script's directory, not the working directory** — the first successful build
+dropped a 563 KB binary into `packaging/`. `OutFile` is now `${OUTFILE}`, passed
+explicitly, with `packaging/*.exe` gitignored as a backstop.
+
+And running the CI lint step locally caught a third: **`makensis` aborts with
+`free(): double free detected` (SIGABRT, exit 134) when `MUI_ICON` points at an
+invalid `.ico`**, rather than reporting a readable error. The stub tree had
+created the icon with `touch`, so it was zero bytes. The lint job now generates
+a real icon from `packaging/syodep.svg`, which has the side benefit of failing
+that job if the SVG ever stops rendering.
+
+### Decisions
+
+- **Uninstall leaves `%APPDATA%\syodep` alone.** It is shared with Scoop and
+  portable installs, so wiping it would destroy reading positions belonging to a
+  syodep this installer never owned — silently, via `uninstall.exe /S`. This
+  reverses an earlier decision, taken before that sharing was noticed.
+- **The PDF checkbox cannot claim the default handler**, and does not pretend
+  to. Since Windows 8 the effective association lives in a hash-protected
+  `UserChoice` key; the script registers a ProgID, `Applications\syodep.exe`
+  and `OpenWithProgids` so syodep *appears* in the picker, and the wizard text
+  says "Offer syodep as a PDF handler" rather than promising a default.
+- **`SetErrorLevel 2` before every `Abort`.** NSIS exits 0 by default, so a
+  silent install can fail invisibly — which would have made the whole CI gate
+  theatre.
+- **`RMDir /r "$INSTDIR"` is guarded** (path length, plus `syodep.exe` and
+  `Uninstall.exe` present) because `$INSTDIR` is user-controllable through
+  `/D=`. A hand-maintained file manifest was rejected: `windeployqt` emits a
+  Qt-version-dependent tree that would go stale on every Qt bump.
+- **Upgrades delete the stale payload in place** rather than running the old
+  uninstaller. `File /r` overwrites but never removes, and a leftover Qt DLL
+  from an older Qt is a startup crash with no useful message.
+
+### Test strategy
+
+CI-only change; no core logic touched, so no new Rust tests. The script compiles
+locally against a stub tree and produces a valid PE.
+
+The CI verification is a real gate rather than a compile check: silent install,
+assert the payload and Qt plugin, assert the ARP values (including a
+plausibility range on `EstimatedSize`, which catches the classic bytes-for-KiB
+slip), assert the association was **not** set under a plain `/S`, run the
+*installed* binary offscreen with Qt stripped from `PATH`, then uninstall and
+assert everything is gone.
+
+Three traps it is written around:
+
+- `uninstall.exe /S` normally relaunches from `%TEMP%` and returns immediately,
+  so every assertion after it races and passes only on a fast runner. `_?=`
+  keeps it in place; it must be the last argument, and it means the uninstaller
+  cannot delete itself.
+- The "user data survives" assertion would be **vacuous** without planting a
+  sentinel first: `--smoke-test` runs `syo_app_new(nullptr, nullptr)` and never
+  creates `%APPDATA%\syodep`.
+- A **negative test** (install into an unwritable path must exit non-zero) is
+  what proves `SetErrorLevel` works. Without it every other assertion rests on
+  an installer that might always exit 0.
+
+### Notes / remaining
+
+- **Unsigned.** SmartScreen will warn until the binary earns reputation, and
+  reputation is per-publisher, so an unsigned build never accrues any. Signing
+  needs an Authenticode certificate on FIPS hardware, meaning a cloud signing
+  service rather than a secret in CI. Tracked as a new roadmap bullet.
+- Antivirus false positives are common for unsigned NSIS installers.
+- Scoop and the installer can coexist (Scoop shortcuts live under
+  `Scoop Apps\`), but both appear in the picker and whichever `syodep.exe` is
+  on `PATH` wins for CLI use.
+
+---
+
 ## 2026-07-27 — App icon: font-free SVG, generated .ico, Windows resource
 
 ### Implemented
