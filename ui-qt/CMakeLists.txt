@@ -33,3 +33,39 @@ target_compile_definitions(syodep PRIVATE
 
 set_target_properties(syodep PROPERTIES
     WIN32_EXECUTABLE TRUE)
+
+# --- Windows icon + version resource -----------------------------------------
+# The .ico is generated from packaging/syodep.svg rather than committed, since
+# AGENTS.md forbids checked-in generated binaries. ImageMagick is preinstalled
+# on the CI runners; when it is missing the resource is skipped entirely so a
+# developer without it still gets a working (if generic-looking) build.
+if(WIN32)
+    find_program(MAGICK_EXECUTABLE NAMES magick convert)
+    if(MAGICK_EXECUTABLE)
+        set(SYODEP_ICON "${CMAKE_CURRENT_BINARY_DIR}/syodep.ico")
+        set(SYODEP_ICON_SVG "${CMAKE_SOURCE_DIR}/packaging/syodep.svg")
+        add_custom_command(
+            OUTPUT "${SYODEP_ICON}"
+            COMMAND "${MAGICK_EXECUTABLE}" -background none "${SYODEP_ICON_SVG}"
+                    -define icon:auto-resize=256,128,64,48,32,24,16
+                    "${SYODEP_ICON}"
+            DEPENDS "${SYODEP_ICON_SVG}"
+            COMMENT "Generating syodep.ico from packaging/syodep.svg"
+            VERBATIM)
+
+        # rc.exe accepts forward slashes; backslashes would need escaping.
+        set(SYODEP_ICON_RC_PATH "${SYODEP_ICON}")
+        # VERSIONINFO wants four comma-separated numbers.
+        string(REPLACE "." "," SYODEP_VERSION_COMMA "${SYODEP_VERSION_NUMERIC}")
+        set(SYODEP_VERSION_COMMA "${SYODEP_VERSION_COMMA},0")
+        configure_file(syodep.rc.in "${CMAKE_CURRENT_BINARY_DIR}/syodep.rc" @ONLY)
+
+        target_sources(syodep PRIVATE
+            "${CMAKE_CURRENT_BINARY_DIR}/syodep.rc"
+            "${SYODEP_ICON}")
+    else()
+        message(WARNING
+            "ImageMagick not found: syodep.exe will have no icon or version "
+            "resource. Install it to build a properly branded binary.")
+    endif()
+endif()
