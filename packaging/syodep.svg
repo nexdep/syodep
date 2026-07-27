@@ -8,6 +8,9 @@
   <rect x="74" y="118" width="86" height="10" rx="5" fill="#f5c542"/>
   <rect x="74" y="142" width="108" height="10" rx="5" fill="#9aa3b2"/>
   <rect x="74" y="166" width="64" height="10" rx="5" fill="#9aa3b2"/>
-  <text x="186" y="206" font-family="monospace" font-size="40" font-weight="bold"
-        fill="#2b303b" text-anchor="middle">:</text>
+  <!-- The Vim-style ':' prompt, drawn as shapes rather than text: an icon
+       that depends on a font renders differently on every machine, and at
+       16px an unhinted glyph turns to mush. -->
+  <circle cx="186" cy="187" r="5" fill="#2b303b"/>
+  <circle cx="186" cy="201" r="5" fill="#2b303b"/>
 </svg>

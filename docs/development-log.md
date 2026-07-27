@@ -7,6 +7,68 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-07-27 — App icon: font-free SVG, generated .ico, Windows resource
+
+### Implemented
+
+- **`packaging/syodep.svg` no longer contains text.** The Vim-style `:` was a
+  `<text>` element at `font-family="monospace"`; it is now two `<circle>`s.
+- **`syodep.ico` is generated, not committed** (`AGENTS.md:66` forbids checked-in
+  generated binaries): the Qt build runs ImageMagick over the SVG to produce a
+  7-frame icon (16/24/32/48/64/128/256).
+- **`syodep.exe` now carries an icon and a VERSIONINFO block**, via
+  `ui-qt/syodep.rc.in` configured by CMake. `enable_language(RC)` is called only
+  under `if(WIN32)`, so non-Windows builds never look for a resource compiler.
+  Version strings come from `SYODEP_VERSION`, so the file-properties dialog
+  cannot disagree with `--version`.
+- **Graceful degradation**: `find_program(magick)` — when ImageMagick is absent
+  the whole resource is skipped with a warning and the build still works.
+- The release job copies the generated icon into `syodep-win64/` and verifies
+  it before shipping.
+
+### Why
+
+An icon built from a font glyph renders differently on every machine: the face,
+weight and metrics depend on what the system resolves for `monospace`, and at
+16px an unhinted glyph turns to mush. This was already live in the **AppImage**,
+which ships this SVG as its icon — so the fix is not merely preparatory for
+Windows.
+
+Separately, `syodep.exe` had no icon or version resource at all, so Explorer,
+the taskbar and Add/Remove Programs showed a blank generic document.
+
+A design review claimed ImageMagick's internal renderer ignores `text-anchor`
+outright, which would have meant the glyph was clipping outside the page rect.
+**That could not be reproduced**: the local ImageMagick has the rsvg delegate,
+renders the two anchorings differently, and `msvg:` did not bypass it. The
+change was made on the ground that a shape-only icon renders identically under
+every renderer — not on the unverified claim.
+
+### Test strategy
+
+No core logic touched, so no new Rust tests. Verified by rendering and *looking
+at* the output rather than trusting exit codes: before/after at 256px, and the
+16/32/48px frames pixel-magnified. At 16px the dots disappear and the icon
+reduces to "document with a yellow highlight" — acceptable, and no worse than
+the glyph, which was equally invisible there.
+
+The CI blank-icon guard was validated both ways locally: the real icon scores
+sd=0.387 and passes; a deliberately empty `.ico` scores sd=0 and is rejected.
+A broken SVG render produces a structurally *valid* but empty icon, which a
+frame count alone would not catch.
+
+Linux builds were confirmed unaffected — a from-scratch configure and build
+emits no warnings, generates no `.ico`, and produces a working binary.
+
+### Notes / remaining
+
+- The 16px frame is muddy: the outer rounded square plus the page inset leaves
+  little room. Worth revisiting if the placeholder art is ever replaced.
+- The taskbar prefers the *window* icon over the exe resource. Fully fixing the
+  taskbar would need `QApplication::setWindowIcon` fed from a `.qrc`; not done.
+
+---
+
 ## 2026-07-27 — One version source, not three
 
 ### Implemented

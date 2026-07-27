@@ -27,6 +27,11 @@ endif()
 # its suffix for display while project() gets the numeric part.
 string(REGEX MATCH "^[0-9]+(\\.[0-9]+)*" SYODEP_VERSION_NUMERIC "${SYODEP_VERSION}")
 project(syodep VERSION ${SYODEP_VERSION_NUMERIC} LANGUAGES CXX)
+# Windows resources (icon + VERSIONINFO). Enabled here rather than in
+# project(LANGUAGES) so non-Windows builds never look for a resource compiler.
+if(WIN32)
+    enable_language(RC)
+endif()
 # Re-run configure when the version changes, so a bump is picked up without a
 # manual cmake invocation.
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
