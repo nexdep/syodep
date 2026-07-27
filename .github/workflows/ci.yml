@@ -47,7 +47,12 @@ jobs:
           # makensis aborts with a double-free rather than a clean error when
           # handed an invalid .ico. Generating it here also means this job
           # fails if packaging/syodep.svg stops rendering.
-          magick -background none packaging/syodep.svg \
+          #
+          # Ubuntu's imagemagick package is ImageMagick 6, whose command is
+          # `convert`; `magick` only exists in 7. Accept either, as
+          # ui-qt/CMakeLists.txt already does.
+          magick_bin="$(command -v magick || command -v convert)"
+          "$magick_bin" -background none packaging/syodep.svg \
             -define icon:auto-resize=256,128,64,48,32,24,16 /tmp/stub/syodep.ico
           makensis -WX -V2 \
             -DVERSION=0.0.0-citest -DVERSION_NUMERIC=0.0.0.0 \

@@ -45,6 +45,12 @@ the script's directory, not the working directory** — the first successful bui
 dropped a 563 KB binary into `packaging/`. `OutFile` is now `${OUTFILE}`, passed
 explicitly, with `packaging/*.exe` gitignored as a backstop.
 
+A fourth only surfaced in CI, because the local machine masked it: Ubuntu's
+`imagemagick` package is ImageMagick **6**, whose command is `convert`, while
+`magick` exists only in 7. The lint job died with `magick: command not found`.
+`ui-qt/CMakeLists.txt` already accepted either via
+`find_program(... NAMES magick convert)`; the workflow now does the same.
+
 And running the CI lint step locally caught a third: **`makensis` aborts with
 `free(): double free detected` (SIGABRT, exit 134) when `MUI_ICON` points at an
 invalid `.ico`**, rather than reporting a readable error. The stub tree had
