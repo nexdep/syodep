@@ -98,6 +98,17 @@ while IFS= read -r option; do
 done < <(awk '/pub struct ViewConfig/,/^}/' crates/syodep-config/src/lib.rs \
     | grep -oP '^\s*pub \K[a-z_]+(?=:)')
 
+# Cargo.toml holds the only copy of the version: CMake reads it at configure
+# time and the shell reports it via SYODEP_VERSION. Drift is impossible by
+# construction, so these two checks guard the construction itself rather than
+# comparing copies. It mattered: CMake sat at 0.3.0 through the whole 0.4.0
+# release, so shipped binaries told users the wrong version.
+grep -q 'project(syodep VERSION \${SYODEP_VERSION_NUMERIC}' CMakeLists.txt \
+    || err "CMakeLists.txt must derive the version from Cargo.toml, not hardcode it"
+
+grep -q 'setApplicationVersion(QStringLiteral(SYODEP_VERSION))' ui-qt/src/main.cpp \
+    || err "ui-qt must report SYODEP_VERSION, not a hardcoded version string"
+
 if [ "$fail" -eq 0 ]; then
     echo "docs check OK"
 fi

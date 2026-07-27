@@ -108,7 +108,19 @@ prerelease does not update Scoop metadata. The manifest commit comes from
 
 ## Versioning
 
-Workspace version lives in `Cargo.toml` (`workspace.package.version`) and
-is mirrored in the top-level `project(syodep VERSION …)`. Tags use `vX.Y.Z`.
-The non-version `continuous` tag is force-updated by CI to point at the
-latest successful `main` build and must not be treated as a semantic version.
+Workspace version lives in `Cargo.toml` (`workspace.package.version`) and is
+mirrored in the top-level `project(syodep VERSION …)`, which in turn defines
+`SYODEP_VERSION` for the Qt shell (`ui-qt/CMakeLists.txt`). The shell reports it
+through `QApplication::setApplicationVersion`, so `--version` and `--check`
+cannot disagree with the core they link against. **`Cargo.toml` is the only
+place to edit when bumping**; `scripts/check-docs.sh` fails if CMake drifts from
+it, or if the shell reintroduces a hardcoded version string.
+
+That check exists because the mirror was previously only a claim: CMake sat at
+`0.3.0` through the whole 0.4.0 release and the shell hardcoded `0.3.0` too, so
+shipped 0.4.0 binaries reported `syodep 0.3.0` while their own core reported
+`0.4.0`. Nothing caught it.
+
+Tags use `vX.Y.Z`. The non-version `continuous` tag is force-updated by CI to
+point at the latest successful `main` build and must not be treated as a
+semantic version.

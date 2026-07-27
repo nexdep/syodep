@@ -7,6 +7,69 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-07-27 — One version source, not three
+
+### Implemented
+
+- `CMakeLists.txt` **reads the version out of `Cargo.toml`** at configure time
+  rather than holding a copy: `file(READ)` plus a regex scoped to the
+  `[workspace.package]` section (`[^[]*` stops at the next section header, so a
+  dependency version can never be picked up by mistake). Pre-release suffixes
+  survive for display while `project()` gets the numeric part, and
+  `CMAKE_CONFIGURE_DEPENDS` on `Cargo.toml` makes a bump re-configure by itself.
+- `ui-qt/CMakeLists.txt` defines `SYODEP_VERSION="${SYODEP_VERSION}"` alongside
+  the existing `SYODEP_BUILD_TYPE`, and `ui-qt/src/main.cpp` passes it to
+  `QApplication::setApplicationVersion` instead of a literal.
+- `scripts/check-docs.sh` gained two assertions. Because drift is now impossible
+  by construction, they guard the construction itself: CMake must derive the
+  version rather than hardcode it, and the shell must not reintroduce a literal.
+  These are the script's first content checks about packaging.
+- `docs/packaging.md` "Versioning" rewritten to describe what actually happens.
+
+### Why
+
+The version existed in three places and two were wrong:
+
+| Source | Was |
+|---|---|
+| `Cargo.toml` | 0.4.0 |
+| `CMakeLists.txt` | 0.3.0 |
+| `ui-qt/src/main.cpp` | `"0.3.0"` hardcoded |
+
+The last one feeds `--version` and `--check`, so **every shipped v0.4.0 binary
+told users it was 0.3.0** — and did so incoherently, since the `core:` line on
+the same screen reads the Rust crate version and correctly said 0.4.0.
+
+`docs/packaging.md` claimed CMake mirrored `Cargo.toml`. It never has: the bump
+commits (`accabc8` for 0.4.0, and the same shape for 0.3.0, 0.2.0, 0.1.1) only
+ever touched `Cargo.toml` and `Cargo.lock`. Nothing in CI looked at it, so the
+claim and the code drifted from the first release onwards.
+
+Found while planning the Windows installer, which has to assert a version in
+its Add/Remove Programs entry and its filename — shipping an installer saying
+0.4.0 over an app saying 0.3.0 was not defensible, so this landed first and on
+its own.
+
+### Test strategy
+
+No core logic touched, so no new Rust tests. Verified by deleting `build/`,
+configuring from scratch and running `syodep --version`, which prints 0.4.0 on
+both the shell and core lines.
+
+Single-sourcing was verified the only way that means anything — by editing
+**only** `Cargo.toml` to `0.9.1-rc2`, rebuilding without touching any CMake
+file, and confirming both lines reported `0.9.1-rc2`. That also exercised the
+pre-release path, which bare `project()` would have rejected. Both new guards
+were likewise confirmed to fail when deliberately broken.
+
+### Notes / remaining
+
+- `bucket/syodep.json` also carries a version, but CI owns it
+  (`release.yml` rewrites it on every tag), so it is deliberately not covered
+  by the consistency check.
+
+---
+
 ## 2026-07-25 — Fix the AppImage release build (missing `unzip`)
 
 ### Implemented

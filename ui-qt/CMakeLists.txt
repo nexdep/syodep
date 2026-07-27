@@ -24,8 +24,12 @@ target_link_libraries(syodep PRIVATE
     syodep_ffi)
 
 # Surfaced by `--version`/`--check`. Falls back to "unknown" when unset.
+# SYODEP_VERSION is read straight out of Cargo.toml by the top-level
+# CMakeLists.txt (full string, so pre-release suffixes survive), so the shell
+# cannot report a different version from the core it links against.
 target_compile_definitions(syodep PRIVATE
-    SYODEP_BUILD_TYPE="$<IF:$<BOOL:$<CONFIG>>,$<CONFIG>,unknown>")
+    SYODEP_BUILD_TYPE="$<IF:$<BOOL:$<CONFIG>>,$<CONFIG>,unknown>"
+    SYODEP_VERSION="${SYODEP_VERSION}")
 
 set_target_properties(syodep PROPERTIES
     WIN32_EXECUTABLE TRUE)

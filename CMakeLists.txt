@@ -9,7 +9,28 @@
 # CMake is only required for the desktop shell.
 
 cmake_minimum_required(VERSION 3.21)
-project(syodep VERSION 0.3.0 LANGUAGES CXX)
+# Cargo.toml holds the only copy of the version; read it rather than keeping a
+# second one here. The Rust side already derives its own from CARGO_PKG_VERSION,
+# so with this there is nothing left to drift and `syodep --version` cannot
+# disagree with the core it links against.
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/Cargo.toml" _syodep_cargo_toml)
+# `[^[]*` stops the match at the next section header, so dependency versions in
+# [workspace.dependencies] can never be picked up by mistake.
+string(REGEX MATCH "\\[workspace\\.package\\][^[]*version[ \t]*=[ \t]*\"([^\"]+)\""
+    _syodep_version_match "${_syodep_cargo_toml}")
+set(SYODEP_VERSION "${CMAKE_MATCH_1}")
+if(NOT SYODEP_VERSION)
+    message(FATAL_ERROR
+        "could not read workspace.package.version from Cargo.toml")
+endif()
+# project() accepts digits and dots only, so a pre-release like 0.5.0-rc1 keeps
+# its suffix for display while project() gets the numeric part.
+string(REGEX MATCH "^[0-9]+(\\.[0-9]+)*" SYODEP_VERSION_NUMERIC "${SYODEP_VERSION}")
+project(syodep VERSION ${SYODEP_VERSION_NUMERIC} LANGUAGES CXX)
+# Re-run configure when the version changes, so a bump is picked up without a
+# manual cmake invocation.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/Cargo.toml")
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
