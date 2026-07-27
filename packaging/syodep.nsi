@@ -236,6 +236,15 @@ Function .onInit
     ${IfNot} ${Errors}
         !insertmacro SelectSection ${SecAssoc}
     ${EndIf}
+
+    ; Under /S there is no directory page, so $INSTDIR is already final and a
+    ; bad /D= can be rejected here. This matters for the exit code: Abort in a
+    ; *section* cancels the install but still leaves the process exiting 0,
+    ; whereas Abort in .onInit quits outright and preserves SetErrorLevel --
+    ; without which a failed silent install is indistinguishable from success.
+    ${If} ${Silent}
+        Call CheckWritable
+    ${EndIf}
 FunctionEnd
 
 ; ---------------------------------------------------------------------------

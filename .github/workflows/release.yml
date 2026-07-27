@@ -280,6 +280,12 @@ jobs:
           Set-Content $blocker "not a directory"
           $p = Start-Process .\syodep-setup.exe `
             -ArgumentList "/S","/D=$blocker\syodep" -Wait -PassThru
+          # Assert the outcome as well as the code: "installed nothing" is the
+          # property that actually matters, and it holds regardless of how NSIS
+          # chooses to report failure.
+          if (Test-Path "$blocker\syodep\syodep.exe") {
+            throw "installer wrote a payload into an unwritable path"
+          }
           if ($p.ExitCode -eq 0) { throw "install into an unwritable path reported success" }
           Write-Host "unwritable-path install correctly exited $($p.ExitCode)"
           Remove-Item $blocker -Force

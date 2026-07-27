@@ -116,11 +116,15 @@ Three traps it is written around:
   creates `%APPDATA%\syodep`.
 - A **negative test** (install into an unwritable path must exit non-zero) is
   what proves `SetErrorLevel` works. Without it every other assertion rests on
-  an installer that might always exit 0. The target has to be unwritable
-  *regardless of privilege*: the first attempt used `C:\Windows\System32`,
-  which CI can write to because it runs elevated, so the install succeeded and
-  the assertion fired against a working installer. Placing a **file** where a
-  parent directory is required fails for everyone.
+  an installer that might always exit 0. Two things had to be right for it.
+  The target has to be unwritable *regardless of privilege* — the first attempt
+  used `C:\Windows\System32`, which CI can write to because it runs elevated.
+  And the check has to run in `.onInit`, not in a section: `Abort` in an install
+  section cancels the section but the process still exits 0, so the failure was
+  invisible exactly where it mattered. Under `/S` there is no directory page, so
+  `$INSTDIR` is already final at `.onInit` and can be rejected there. The CI
+  assertion now also checks that nothing was written, which holds whatever exit
+  code NSIS picks.
 
 ### Notes / remaining
 
