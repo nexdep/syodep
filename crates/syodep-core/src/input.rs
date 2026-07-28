@@ -6,16 +6,20 @@
 //!
 //! Disambiguation policy (documented in `docs/keybindings.md`): if a
 //! sequence is both a complete binding and a prefix of a longer one, we wait
-//! for more input instead of firing eagerly; `<Esc>` cancels. This keeps the
-//! state machine timer-free and predictable.
+//! instead of firing eagerly. The wait ends one of three ways — the next key
+//! press, a pause ([`InputState::timeout`]), or `<Esc>`, which cancels.
 //!
-//! When the wait ends in a miss, we fall back to the **longest pending prefix
-//! that is itself a complete binding**: that command fires and the leftover
-//! chords are queued for replay (see [`InputState::next_replay`]). So with
-//! `o` and `ow` both bound, `ow` resolves directly while `oj` runs `o` and
-//! then `j`. Without this a bound sequence that is also a prefix would be
-//! unreachable. Still timer-free: the decision is made by the *next* key
-//! press, never by elapsed time.
+//! When the wait ends without an exact match, we fall back to the **longest
+//! pending prefix that is itself a complete binding**: that command fires and
+//! the leftover chords are queued for replay (see
+//! [`InputState::next_replay`]). So with `o` and `ow` both bound, `ow`
+//! resolves directly while `oj` runs `o` and then `j`. Without this a bound
+//! sequence that is also a prefix would be unreachable.
+//!
+//! The pause is the only time-dependent part, and it lives entirely in
+//! [`InputState::timeout`]: this module never reads a clock. The shell owns
+//! the timer and calls in when it fires, which keeps the core deterministic
+//! and testable — a test "waits" by calling `timeout` directly.
 //!
 //! The replay queue is drained by the caller rather than resolved here,
 //! because the fired command may change the mode — and the replayed chords
@@ -157,6 +161,37 @@ impl InputState {
     /// observable from the status line.
     pub fn has_pending(&self) -> bool {
         self.count.is_some() || !self.pending.is_empty()
+    }
+
+    /// True when a *partial sequence* is buffered — the case a pause can
+    /// resolve. A bare count does not qualify: counts never time out.
+    pub fn has_pending_sequence(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
+    /// End the wait without another key press, because the caller's timer
+    /// fired. Same resolution as a miss in [`handle`](Self::handle), with one
+    /// difference: the full pending sequence is itself a candidate, so a
+    /// sequence that is a complete binding *and* a prefix (`c`, `v`, `o`)
+    /// finally fires on its own.
+    ///
+    /// A bare count is left alone — `12`, a pause, then `G` must still jump to
+    /// page 12, as in Vim. A sequence with no bound prefix is dropped, so a
+    /// half-typed `g` clears itself instead of waiting forever.
+    pub fn timeout(&mut self, keymap: &Keymap) -> KeyOutcome {
+        if self.pending.is_empty() {
+            return KeyOutcome::Pending;
+        }
+        for len in (1..=self.pending.len()).rev() {
+            if let Some(command) = keymap.command_at(&self.pending[..len]) {
+                let count = self.count.take();
+                self.replay.extend(self.pending[len..].iter().copied());
+                self.pending.clear();
+                return KeyOutcome::Command { command, count };
+            }
+        }
+        self.clear();
+        KeyOutcome::Unmatched
     }
 
     /// The next chord to re-feed after a longest-prefix fallback fired a
@@ -583,5 +618,96 @@ mod tests {
                 count: None
             }
         );
+    }
+    // ---- the pause -----------------------------------------------------
+    //
+    // The core never reads a clock: "waiting" in a test is a `timeout` call.
+
+    #[test]
+    fn timeout_fires_a_sequence_that_is_also_a_prefix() {
+        let keymap = test_keymap();
+        let mut input = InputState::new();
+        // `o` is bound *and* the start of `ow`, so a key press alone leaves it
+        // waiting -- this is exactly the case the pause exists for.
+        assert_eq!(input.handle(&keymap, chord('o')), KeyOutcome::Pending);
+        assert!(input.has_pending_sequence());
+        assert_eq!(
+            input.timeout(&keymap),
+            KeyOutcome::Command {
+                command: Command::OpenFile,
+                count: None,
+            }
+        );
+        assert!(!input.has_pending_sequence());
+    }
+
+    #[test]
+    fn timeout_keeps_the_count() {
+        let keymap = test_keymap();
+        let mut input = InputState::new();
+        for c in ['3', 'o'] {
+            input.handle(&keymap, chord(c));
+        }
+        assert_eq!(
+            input.timeout(&keymap),
+            KeyOutcome::Command {
+                command: Command::OpenFile,
+                count: Some(3),
+            }
+        );
+    }
+
+    #[test]
+    fn timeout_leaves_a_bare_count_alone() {
+        let keymap = test_keymap();
+        let mut input = InputState::new();
+        input.handle(&keymap, chord('1'));
+        input.handle(&keymap, chord('2'));
+        // No sequence to resolve, so the pause must not eat the count:
+        // `12`, a pause, then `G` still means "page 12".
+        assert_eq!(input.timeout(&keymap), KeyOutcome::Pending);
+        assert!(input.has_pending());
+        assert_eq!(
+            input.handle(&keymap, chord('G')),
+            KeyOutcome::Command {
+                command: Command::GotoLastPage,
+                count: Some(12),
+            }
+        );
+    }
+
+    #[test]
+    fn timeout_drops_a_partial_sequence_bound_to_nothing() {
+        let keymap = test_keymap();
+        let mut input = InputState::new();
+        // `g` is only ever the start of `gg`; there is nothing to fire.
+        assert_eq!(input.handle(&keymap, chord('g')), KeyOutcome::Pending);
+        assert_eq!(input.timeout(&keymap), KeyOutcome::Unmatched);
+        assert!(!input.has_pending(), "the half-typed g must clear itself");
+    }
+
+    #[test]
+    fn timeout_on_nothing_pending_is_inert() {
+        let keymap = test_keymap();
+        let mut input = InputState::new();
+        assert_eq!(input.timeout(&keymap), KeyOutcome::Pending);
+        assert!(!input.has_pending());
+    }
+
+    #[test]
+    fn timeout_replays_chords_after_the_fired_prefix() {
+        let keymap = test_keymap();
+        let mut input = InputState::new();
+        // `oz` misses, so `o` fires and `z` is queued -- then a pause on the
+        // replayed `z` (itself only a prefix) drops it.
+        input.handle(&keymap, chord('o'));
+        assert_eq!(
+            input.handle(&keymap, chord('z')),
+            KeyOutcome::Command {
+                command: Command::OpenFile,
+                count: None,
+            }
+        );
+        assert_eq!(input.next_replay(), Some(chord('z')));
     }
 }

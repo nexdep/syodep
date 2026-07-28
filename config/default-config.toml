@@ -24,9 +24,9 @@ fit_width_on_open = true
 zoom_step = 1.1
 # Canvas background color (#rrggbb).
 background = "#1e1e1e"
-# Highlight for every focus mode -- caret, line, word, sentence and
-# paragraph all share one colour, so the highlight tells you that focus
-# is active rather than which scope you are in.
+# Highlight for focus mode. Every scope shares one colour, so the
+# highlight tells you that focus is active rather than which
+# granularity you are in.
 focus_color = "#add8e6"
 # Opacity of the focus highlight, 0.0 to 1.0.
 focus_opacity = 0.4
@@ -36,12 +36,21 @@ visual_color = "#d3d3d3"
 visual_opacity = 0.4
 
 [files]
-# Starting directory for the Open dialog (the "o" command). When unset, the
+# Starting directory for the Open dialog (<C-o>). When unset, the
 # dialog opens in the directory syodep was launched from. If the path below
 # does not exist (or is not a directory), syodep falls back to the launch
 # directory. Run `syodep --check` to see which directory is in effect.
 # Use an absolute path ("~" is not expanded). Unset by default:
 # open_dir = "/home/me/papers"
+
+[input]
+# How long (milliseconds) a half-typed key sequence waits before it acts
+# on its own. This is what lets a key that is both a command and the
+# start of a longer one -- "c", "v", or "o" while selecting -- be used
+# by itself: press it, pause, and it acts. Sequences typed at normal
+# speed never reach the pause. Set to 0 to switch it off, so only the
+# next key press ever ends the wait.
+timeout_ms = 500
 
 # Keybindings: "key sequence" = "command". The entries below are the
 # built-in defaults; in your own config you only need to list changes,
@@ -57,6 +66,7 @@ visual_opacity = 0.4
 "<C-b>" = "scroll_page_up"
 "<C-d>" = "scroll_half_page_down"
 "<C-f>" = "scroll_page_down"
+"<C-o>" = "open_file"
 "<C-u>" = "scroll_half_page_up"
 "<Down>" = "scroll_down"
 "<Esc>" = "cancel"
@@ -69,6 +79,7 @@ visual_opacity = 0.4
 "G" = "goto_last_page"
 "J" = "next_page"
 "K" = "prev_page"
+"c" = "focus_enter"
 "cc" = "focus_enter_char"
 "ce" = "focus_enter_line"
 "cp" = "focus_enter_paragraph"
@@ -79,7 +90,6 @@ visual_opacity = 0.4
 "j" = "scroll_down"
 "k" = "scroll_up"
 "l" = "scroll_right"
-"o" = "open_file"
 "q" = "quit"
 "v" = "visual_enter"
 "vc" = "visual_enter_char"

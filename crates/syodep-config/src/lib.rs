@@ -43,6 +43,30 @@ pub struct Config {
     /// `[files]` section: file-dialog and path behaviour.
     #[serde(default)]
     pub files: FilesConfig,
+    /// `[input]` section: key-sequence timing.
+    #[serde(default)]
+    pub input: InputConfig,
+}
+
+/// `[input]` section: how long a partial key sequence waits.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields, default)]
+pub struct InputConfig {
+    /// Milliseconds a partial sequence waits before it resolves on its own.
+    ///
+    /// This is what lets a key that is both a binding and a prefix — `c`, `v`,
+    /// or `o` in visual mode — be used on its own: press it, pause, and it
+    /// acts. Sequences typed at normal speed never reach the pause. `0`
+    /// disables it, restoring "only the next key press ends the wait".
+    pub timeout_ms: u32,
+}
+
+impl Default for InputConfig {
+    fn default() -> Self {
+        // Long enough that ordinary two-key chords never trip it, short enough
+        // that a deliberate pause feels immediate.
+        Self { timeout_ms: 500 }
+    }
 }
 
 /// `[files]` section: file-dialog and path behaviour.
@@ -124,6 +148,7 @@ impl Default for Config {
             focus_keys: default_focus_keybindings(),
             visual_keys: default_visual_keybindings(),
             files: FilesConfig::default(),
+            input: InputConfig::default(),
         }
     }
 }
@@ -159,6 +184,9 @@ pub fn default_keybindings() -> BTreeMap<String, String> {
         // `c` plus a scope letter focuses at that granularity. The same
         // bindings work *inside* focus mode, where they change the scope
         // without moving the highlight.
+        // `c` alone enters focus keeping the current scope, once the pause
+        // resolves it; `c` plus a scope letter names the granularity.
+        ("c", "focus_enter"),
         ("cc", "focus_enter_char"),
         ("ce", "focus_enter_line"),
         ("cw", "focus_enter_word"),
@@ -401,9 +429,9 @@ pub fn default_config_doc() -> String {
     out.push_str("# Canvas background color (#rrggbb).\n");
     let _ = writeln!(out, "background = \"{}\"", view.background);
     out.push_str(
-        "# Highlight for every focus mode -- caret, line, word, sentence and\n\
-         # paragraph all share one colour, so the highlight tells you that focus\n\
-         # is active rather than which scope you are in.\n",
+        "# Highlight for focus mode. Every scope shares one colour, so the\n\
+         # highlight tells you that focus is active rather than which\n\
+         # granularity you are in.\n",
     );
     let _ = writeln!(out, "focus_color = \"{}\"", view.focus_color);
     out.push_str("# Opacity of the focus highlight, 0.0 to 1.0.\n");
@@ -416,13 +444,25 @@ pub fn default_config_doc() -> String {
 
     out.push_str(
         "[files]\n\
-         # Starting directory for the Open dialog (the \"o\" command). When unset, the\n\
+         # Starting directory for the Open dialog (<C-o>). When unset, the\n\
          # dialog opens in the directory syodep was launched from. If the path below\n\
          # does not exist (or is not a directory), syodep falls back to the launch\n\
          # directory. Run `syodep --check` to see which directory is in effect.\n\
          # Use an absolute path (\"~\" is not expanded). Unset by default:\n\
          # open_dir = \"/home/me/papers\"\n\n",
     );
+
+    out.push_str(
+        "[input]\n\
+         # How long (milliseconds) a half-typed key sequence waits before it acts\n\
+         # on its own. This is what lets a key that is both a command and the\n\
+         # start of a longer one -- \"c\", \"v\", or \"o\" while selecting -- be used\n\
+         # by itself: press it, pause, and it acts. Sequences typed at normal\n\
+         # speed never reach the pause. Set to 0 to switch it off, so only the\n\
+         # next key press ever ends the wait.\n",
+    );
+    let _ = writeln!(out, "timeout_ms = {}", InputConfig::default().timeout_ms);
+    out.push('\n');
 
     out.push_str(
         "# Keybindings: \"key sequence\" = \"command\". The entries below are the\n\

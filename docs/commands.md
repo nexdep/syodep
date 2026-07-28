@@ -26,6 +26,11 @@ Focus and visual are the same idea at different arities — a focus highlight is
 a selection whose two ends coincide — so they share one per-scope motion table
 and one set of key meanings. Learning one teaches the other.
 
+Entering a mode takes one key or two: `cw` focuses word-wise straight away,
+while a bare `c` or `v` acts after a brief pause and keeps whatever scope is
+live. Returning to normal mode resets the scope to char, since normal mode has
+no granularity of its own. See `docs/keybindings.md`.
+
 Counts: most commands accept a count prefix typed before the binding
 (`5j`, `3J`, `12G`). Where a count has a special meaning it is noted on the
 per-mode page.

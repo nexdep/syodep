@@ -30,9 +30,10 @@ Counts work here too (`3l`, `2w`).
 | `visual_exit` | leave visual mode, returning to the prior mode | - |
 
 Bound to `v` (inherit) and `vc` / `ve` / `vw` / `vs` / `vp` (explicit). Because
-`v` is both a binding and the start of the longer ones, it takes effect
-together with the next key you press - see the disambiguation rule in
-`docs/keybindings.md`.
+`v` is both a binding and the start of the longer ones, it takes effect either
+with the next key you press or after a brief pause - see the disambiguation
+rule in `docs/keybindings.md`. The same is true of `o`, so pausing after it
+swaps the ends without needing `oo`.
 
 ## Moving the selection
 

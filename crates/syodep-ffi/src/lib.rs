@@ -40,6 +40,8 @@ pub struct SyoApp {
     focus_color: SyoColor,
     /// Highlight for the visual selection, from `[view] visual_color`/`visual_opacity`.
     visual_color: SyoColor,
+    /// Pause before a half-typed sequence resolves, from `[input] timeout_ms`.
+    key_timeout_ms: u32,
 }
 
 /// An RGBA colour resolved from the config, in 0-255 components.
@@ -132,6 +134,10 @@ fn resolve_open_dir(configured: Option<&str>) -> OpenDirResolution {
 pub const SYO_EFFECT_REDRAW: u32 = 1;
 pub const SYO_EFFECT_QUIT: u32 = 2;
 pub const SYO_EFFECT_OPEN_FILE_DIALOG: u32 = 4;
+/// A partial key sequence is buffered. The shell should arm its pause timer
+/// (see `syo_app_key_timeout_ms`) and call `syo_app_key_timeout` when it
+/// fires; when this bit is clear it should cancel any armed timer.
+pub const SYO_EFFECT_PENDING_INPUT: u32 = 8;
 
 fn effects_to_bits(effects: Effects) -> u32 {
     let mut bits = 0;
@@ -143,6 +149,9 @@ fn effects_to_bits(effects: Effects) -> u32 {
     }
     if effects.open_file_dialog {
         bits |= SYO_EFFECT_OPEN_FILE_DIALOG;
+    }
+    if effects.pending_input {
+        bits |= SYO_EFFECT_PENDING_INPUT;
     }
     bits
 }
@@ -269,6 +278,7 @@ pub unsafe extern "C" fn syo_app_new(
             "#d3d3d3",
         );
         warnings.extend(w);
+        let key_timeout_ms = config.input.timeout_ms;
         let mut app = App::new(config, storage);
         for warning in warnings {
             app.report_error(warning);
@@ -280,6 +290,7 @@ pub unsafe extern "C" fn syo_app_new(
             background_color,
             focus_color,
             visual_color,
+            key_timeout_ms,
         }
     });
     match result {
@@ -369,6 +380,37 @@ pub unsafe extern "C" fn syo_app_key_event(app: *mut SyoApp, key: *const c_char)
             Ok([chord]) => effects_to_bits(app.app.handle_key(*chord)),
             _ => 0,
         }
+    }))
+    .unwrap_or(0)
+}
+
+/// How long (milliseconds) the shell should let a half-typed key sequence wait
+/// before calling `syo_app_key_timeout`. From `[input] timeout_ms`; `0` means
+/// the shell must not arm a timer at all.
+///
+/// # Safety
+/// `app` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn syo_app_key_timeout_ms(app: *const SyoApp) -> u32 {
+    match unsafe { app.as_ref() } {
+        Some(app) => app.key_timeout_ms,
+        None => 0,
+    }
+}
+
+/// End a pending key sequence because the shell's pause timer fired. Returns
+/// SYO_EFFECT_* bits; a no-op when nothing is pending, so the shell may call it
+/// unconditionally.
+///
+/// # Safety
+/// `app` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn syo_app_key_timeout(app: *mut SyoApp) -> u32 {
+    let Some(app) = (unsafe { app.as_mut() }) else {
+        return 0;
+    };
+    catch_unwind(AssertUnwindSafe(|| {
+        effects_to_bits(app.app.handle_timeout())
     }))
     .unwrap_or(0)
 }

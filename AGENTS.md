@@ -98,11 +98,14 @@ Do not push to `main` with inconsistent documentation.
   document all of it. Counts come free via the input state machine.
 - Key syntax (`gg`, `<C-d>`) is parsed in `syodep-config::keys` and produced
   by `ui-qt/src/key_encoder.cpp`; keep the two in sync if extending it.
-- A sequence that is a prefix of another binding waits for the next key (no
-  timeout, by design). It still fires: if the longer sequence turns out to be
-  unbound, the longest bound prefix runs and the leftover keys are replayed
-  (`oj` → `o` then `j`). Because the replay can change mode, it is drained by
-  `App::handle_key`, not inside `InputState`.
+- A sequence that is a prefix of another binding waits for the next key press
+  or a pause. It still fires: if the longer sequence turns out to be unbound,
+  the longest bound prefix runs and the leftover keys are replayed (`oj` → `o`
+  then `j`). Because the replay can change mode, it is drained by
+  `App::dispatch`, not inside `InputState`.
+- The pause lives in the **shell**: `InputState::timeout` is called by a QTimer
+  the widget arms when `Effects::pending_input` is set. The core never reads a
+  clock, so it stays deterministic and a test "waits" by calling `timeout`.
 - Coordinates: document space = PDF points, zoom-independent; scroll state
   is stored in document space. Screen = `(doc - scroll) * zoom`, physical
   pixels (the shell multiplies by devicePixelRatio).

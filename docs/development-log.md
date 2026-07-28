@@ -7,6 +7,87 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-07-28 — A pause commits a key sequence; `o` frees up; the scope resets
+
+Three items from the post-0.7.0 review, shipped as three commits.
+
+### `open_file` moves to `<C-o>`
+
+`o` opened a file in normal and focus mode but swapped the selection ends in
+visual mode, so open-file was the one normal-mode command that silently had no
+binding in a mode. `o` is now free everywhere and the command works in all
+three modes. The empty-state status line advertised the old key, so it moved
+too.
+
+### Returning to normal mode resets the scope
+
+Normal mode has no granularity of its own, so it cannot sensibly remember one —
+but it did: `cs`, `<Esc>`, `v` started a *sentence* selection. Every path back
+to normal now goes through `enter_normal_mode`, which resets the scope and
+keeps the position. Leaving visual back into *focus* still carries the scope,
+since focus does have a granularity worth remembering.
+
+### A pause ends a wait
+
+**This reverses a deliberate design decision**, which is the reason it gets its
+own section. `input.rs` said in three places that the state machine was
+timer-free — *"the decision is made by the next key press, never by elapsed
+time"* — and `docs/keybindings.md` advertised "no timeout — behavior is fully
+deterministic". Those claims are now gone rather than left contradicting the
+code.
+
+A sequence that is both a binding and a prefix (`c`, `v`, `o` while selecting)
+could previously only fire by following it with an unrelated key: `vk` entered
+visual mode and then moved up. Now a pause resolves it, so `v` alone works.
+`InputState::timeout` reuses the existing longest-prefix walk with one change —
+the range is inclusive, so the full pending sequence is itself a candidate.
+That one character is the whole feature.
+
+Two rules that are not obvious:
+
+- **A bare count never times out.** `12`, a pause, then `G` still jumps to page
+  12. Only a partial *sequence* resolves, which is why `Effects::pending_input`
+  is driven by a new `has_pending_sequence()` rather than `has_pending()`.
+- **A junk sequence is dropped.** A half-typed `g` clears itself instead of
+  waiting indefinitely for a key that may never come.
+
+Bare `c` needed a command to fire: `focus_enter`, which is
+`enter_focus(self.focus_scope)` — no new state. Combined with the scope reset
+above, that gives exactly the requested behaviour: char from normal, the live
+scope from focus or visual.
+
+**The clock lives in the shell.** `InputState::timeout` is called by a QTimer
+the widget arms when `pending_input` is set; the core never reads a clock. So
+the core stays deterministic, and a test "waits" by calling `timeout` directly.
+New config: `[input] timeout_ms`, default 500 ms, `0` to disable.
+
+### Test strategy
+
+Six unit tests in `input.rs` (fire a bound prefix, keep the count, leave a bare
+count alone, drop an unbound partial, inert when nothing is pending, replay
+leftovers) and two app-level ones covering `c`/`v` entry per source mode and
+the `pending_input` flag.
+
+Because the timer is shell-side, none of that proves the feature works, so it
+was also driven under Xvfb: `c` + wait gives a one-character highlight with no
+second key; `cw` typed fast gives word focus *without* also advancing a word;
+`c`, wait, `w` gives char focus and then a word motion. The middle case is the
+one that matters — it is the regression a too-short pause would cause.
+
+The new `check-docs.sh` guard for `[input]` was verified by breaking it on
+purpose: renaming the documented option made the script exit 1. A guard that
+has never failed is not known to guard anything.
+
+### Notes / remaining
+
+- `o` is now unbound in normal and focus mode. Left that way deliberately: it
+  is the obvious home for a future binding.
+- Drive-by: `docs/roadmap.md` still said `vl`, stale since the `e` rename.
+- Bare scope letters remains blocked on `w`/`e`/`b` being word motions in both
+  focus and visual mode.
+
+---
+
 ## 2026-07-28 — The visual head *is* the focus position
 
 ### Implemented
