@@ -383,7 +383,7 @@ impl App {
             Command::FocusEnterSentence => return self.enter_focus(Scope::Sentence),
             Command::FocusEnterParagraph => return self.enter_focus(Scope::Paragraph),
             Command::FocusExit => {
-                self.mode = Mode::Normal;
+                self.enter_normal_mode();
                 return Effects::redraw();
             }
             Command::FocusLeft => return self.focus_move(Dir::Left, count),
@@ -1816,15 +1816,31 @@ impl App {
     /// visual mode (a `c` chord, say) is correct for free, for the same reason.
     fn exit_visual(&mut self) -> Effects {
         let Some(a) = self.visual else {
-            self.mode = Mode::Normal;
+            self.enter_normal_mode();
             return Effects::redraw();
         };
-        self.mode = a.return_mode;
+        if a.return_mode == Mode::Normal {
+            self.enter_normal_mode();
+        } else {
+            self.mode = a.return_mode;
+            self.refresh_focus_span();
+        }
         self.visual = None;
         self.visual_span = None;
-        self.refresh_focus_span();
         self.save_position();
         Effects::redraw()
+    }
+
+    /// Return to normal mode, resetting the scope.
+    ///
+    /// Normal mode has no granularity of its own, so it cannot sensibly
+    /// *remember* one: a bare `v` from a clean normal mode would otherwise
+    /// select by whatever unit you last happened to use. The position is kept
+    /// -- only the scope resets.
+    fn enter_normal_mode(&mut self) {
+        self.mode = Mode::Normal;
+        self.focus_scope = Scope::Char;
+        self.refresh_focus_span();
     }
 
     /// Exchange the anchored end with the live one, scopes included. Keeps the
@@ -3237,6 +3253,40 @@ mod tests {
         assert_eq!(start, end);
         assert!(app.visual_screen_rects().is_some());
         assert!(app.status_text().contains("-- VISUAL (char) --"));
+    }
+
+    /// Normal mode has no granularity, so it does not remember one: a scope
+    /// used before an `<Esc>` must not leak into the next thing you do.
+    #[test]
+    fn scope_resets_when_returning_to_normal() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta. gamma delta."]);
+
+        // From focus mode.
+        press(&mut app, "cs");
+        assert_eq!(app.focus_scope(), Scope::Sentence);
+        press(&mut app, "<Esc>");
+        assert_eq!((app.mode(), app.focus_scope()), (Mode::Normal, Scope::Char));
+        // So a bare `v` now selects by character, not by sentence.
+        press(&mut app, "vk");
+        assert_eq!(
+            app.visual_selection().expect("selection").head_scope,
+            Scope::Char
+        );
+
+        // And from visual mode entered straight from normal.
+        press(&mut app, "vs");
+        assert_eq!(app.focus_scope(), Scope::Sentence);
+        press(&mut app, "<Esc>");
+        assert_eq!((app.mode(), app.focus_scope()), (Mode::Normal, Scope::Char));
+
+        // Leaving visual back into *focus* still carries the scope: focus does
+        // have a granularity, so there is something to remember.
+        press(&mut app, "cw");
+        press(&mut app, "vk");
+        press(&mut app, "ve");
+        press(&mut app, "<Esc>");
+        assert_eq!((app.mode(), app.focus_scope()), (Mode::Focus, Scope::Line));
     }
 
     #[test]

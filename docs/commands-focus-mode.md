@@ -10,8 +10,9 @@ own, so there is one focus mode with five granularities rather than five modes.
 The status bar shows `-- FOCUS (word) --` with the highlighted line and column,
 matching visual mode's `-- VISUAL (word) --`.
 
-Press `<Esc>` (`focus_exit`) to return to normal mode; the position and scope
-are remembered.
+Press `<Esc>` (`focus_exit`) to return to normal mode. The position is
+remembered, but the scope resets to char: normal mode has no granularity of its
+own, so it does not keep one — a later bare `v` always starts by character.
 
 Counts work here too (`5l`, `3j`).
 
