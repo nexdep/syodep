@@ -98,6 +98,23 @@ VIAddVersionKey "LegalCopyright"  "AGPL-3.0-or-later"
 ; Helpers
 ; ---------------------------------------------------------------------------
 
+; ---------------------------------------------------------------------------
+; TEMPORARY DIAGNOSTIC -- remove before merge. Appends a line to
+; $TEMP\syodep-diag.txt so CI can see which branches actually execute.
+; ---------------------------------------------------------------------------
+Function Diag
+    Exch $9
+    Push $8
+    FileOpen $8 "$TEMP\syodep-diag.txt" a
+    ${If} $8 != ""
+        FileSeek $8 0 END
+        FileWrite $8 "$9$\r$\n"
+        FileClose $8
+    ${EndIf}
+    Pop $8
+    Pop $9
+FunctionEnd
+
 ; `File` fails on a locked exe, and in silent mode it does so invisibly.
 Function CheckNotRunning
     ${If} ${FileExists} "$INSTDIR\syodep.exe"
@@ -119,7 +136,15 @@ FunctionEnd
 ; and the process still exited 0 -- a silent install that reported success
 ; having installed nothing.
 Function CheckWritable
+    Push "CheckWritable entered, INSTDIR=[$INSTDIR]"
+    Call Diag
     CreateDirectory "$INSTDIR"
+    ${If} ${FileExists} "$INSTDIR\*.*"
+        Push "  after CreateDirectory: FileExists dir\*.* = TRUE"
+    ${Else}
+        Push "  after CreateDirectory: FileExists dir\*.* = FALSE"
+    ${EndIf}
+    Call Diag
     ; "dir\*.*" is the NSIS idiom for "this directory exists".
     ${IfNot} ${FileExists} "$INSTDIR\*.*"
         SetErrorLevel 3
@@ -128,6 +153,8 @@ Function CheckWritable
     ; A failed FileOpen leaves the handle empty, which is checkable directly.
     ClearErrors
     FileOpen $0 "$INSTDIR\.syodep-writetest" w
+    Push "  FileOpen handle=[$0]"
+    Call Diag
     ${If} $0 == ""
     ${OrIf} ${Errors}
         SetErrorLevel 4
@@ -260,8 +287,17 @@ Function .onInit
     ; *section* cancels the install but still leaves the process exiting 0,
     ; whereas Abort in .onInit quits outright and preserves SetErrorLevel --
     ; without which a failed silent install is indistinguishable from success.
+    Push "onInit reached, INSTDIR=[$INSTDIR]"
+    Call Diag
     ${If} ${Silent}
+        Push "  Silent=TRUE, calling CheckWritable"
+        Call Diag
         Call CheckWritable
+        Push "  CheckWritable returned without aborting"
+        Call Diag
+    ${Else}
+        Push "  Silent=FALSE"
+        Call Diag
     ${EndIf}
 FunctionEnd
 
