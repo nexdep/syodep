@@ -7,6 +7,23 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-07-28 — 0.6.0
+
+Since 0.5.0:
+
+- **Drag and drop.** A PDF dragged onto the window opens it. Non-PDFs are
+  refused while still being dragged, so nothing happens on release; dropping
+  several opens the first and says how many were ignored.
+- **Overlay colours are consistent and configurable.** All five focus modes
+  share one colour and the selection has its own, set through
+  `[view] focus_color`/`visual_color` and their opacities. No borders, and
+  overlapping boxes are merged before filling so a multi-line highlight is one
+  flat block instead of a banded ladder.
+- **`[view] background` works.** It had been defined, documented and ignored
+  since it was introduced — the shell hardcoded `#1e1e1e`.
+
+---
+
 ## 2026-07-28 — One overlay colour per mode, configurable
 
 ### Implemented
