@@ -93,7 +93,7 @@ Application:
 
 | Keys | Command |
 |---|---|
-| `o` | `open_file` |
+| `<C-o>` | `open_file` |
 | `q` | `quit` |
 | `<Esc>` | `cancel` |
 

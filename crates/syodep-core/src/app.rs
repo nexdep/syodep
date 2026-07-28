@@ -1969,7 +1969,7 @@ impl App {
                     session.view.zoom() * 100.0
                 ));
             }
-            None => out.push_str("no document - press 'o' to open a PDF"),
+            None => out.push_str("no document - press <C-o> to open a PDF"),
         }
         if self.mode == Mode::Focus {
             // `-- FOCUS (word) --`, matching visual's `-- VISUAL (word) --`.
@@ -2292,8 +2292,12 @@ mod tests {
     #[test]
     fn open_file_key_requests_dialog() {
         let mut app = App::new(Config::default(), None);
-        let effects = press(&mut app, "o");
+        let effects = press(&mut app, "<C-o>");
         assert!(effects.open_file_dialog);
+        // A bare `o` is free for modes to claim -- visual mode swaps ends with
+        // it -- so it must not still open the dialog.
+        let effects = press(&mut app, "o");
+        assert!(!effects.open_file_dialog);
     }
 
     #[test]

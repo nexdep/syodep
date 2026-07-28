@@ -173,7 +173,9 @@ pub fn default_keybindings() -> BTreeMap<String, String> {
         ("ve", "visual_enter_line"),
         ("vs", "visual_enter_sentence"),
         ("vp", "visual_enter_paragraph"),
-        ("o", "open_file"),
+        // Ctrl rather than a bare `o`: visual mode binds `o` to swapping the
+        // selection ends, and a command should not vanish in one mode.
+        ("<C-o>", "open_file"),
         ("q", "quit"),
         ("<Esc>", "cancel"),
     ]

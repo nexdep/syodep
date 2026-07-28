@@ -5,7 +5,7 @@ Status legend: ✅ done · 🚧 in progress · ⬜ planned
 ## Phase 1 — MVP foundation (milestone 1) ✅
 
 - ✅ Rust core / Qt shell split over a C ABI
-- ✅ Open a local PDF (CLI, `o`, file dialog)
+- ✅ Open a local PDF (CLI, `<C-o>`, file dialog)
 - ✅ Render the entire PDF in a continuous scrollable view (MuPDF)
 - ✅ Keyboard navigation: scroll, half/full pages, next/prev page,
   first/last page, `{n}G`, count prefixes
@@ -26,7 +26,7 @@ Ordered roughly by dependency:
    boxes from `syodep-pdf::Document::page_content`; foundation for
    everything below)
 2. 🚧 Keyboard text selection + selection overlay rendering (done: visual
-   mode, `v`/`vc`/`vw`/`vl`/`vs`/`vp`, two independently-scoped ends, `o` to
+   mode, `v`/`vc`/`vw`/`ve`/`vs`/`vp`, two independently-scoped ends, `o` to
    switch ends); mouse selection still to come
 3. ⬜ Highlight selected text; SQLite `highlights` table (migration v2);
    highlight overlays rendered on reload
