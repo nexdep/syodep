@@ -13,7 +13,7 @@ The core loop syodep is built around:
 
 Milestone 1 (MVP foundation) is complete:
 
-- open a local PDF (CLI argument, `o` key, or file dialog)
+- open a local PDF (CLI argument, `o` key, file dialog, or drag-and-drop)
 - continuous scrollable rendering of the entire document (MuPDF)
 - Vim-like keyboard navigation with count prefixes: `j`/`k`/`h`/`l`,
   `J`/`K` (pages), `<C-d>`/`<C-u>`/`<C-f>`/`<C-b>`, `gg`/`G`/`{n}G`

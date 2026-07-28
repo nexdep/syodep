@@ -21,6 +21,12 @@ public:
     // Returns false (and shows the error in the status line) on failure.
     bool openDocument(const QString &path);
 
+protected:
+    // Dropping a PDF onto the window opens it. The canvas fills the window but
+    // does not accept drops, so Qt delivers these to the window instead.
+    void dragEnterEvent(QDragEnterEvent *event) override;
+    void dropEvent(QDropEvent *event) override;
+
 private slots:
     void refreshStatus();
     void showOpenDialog();

@@ -7,6 +7,72 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-07-28 — Open a PDF dropped onto the window
+
+### Implemented
+
+- `MainWindow` accepts drops (`ui-qt/src/main_window.{h,cpp}`): a `.pdf`
+  dragged onto the window opens it through the existing
+  `MainWindow::openDocument`, which already backs the CLI argument and the
+  file dialog. No new document logic, and nothing added to the core.
+- Anything that is not a `.pdf` is **refused during the drag**, so the cursor
+  shows "no entry" and releasing does nothing — the user finds out before
+  letting go rather than getting an error afterwards.
+- Dropping several PDFs opens the first and reports the rest as ignored in a
+  transient status message, so the discard is visible instead of silent.
+
+### Why it lives in the Qt shell
+
+`AGENTS.md` says new behaviour goes in the core as a `Command`, never in Qt
+event handlers. That rule is about *document/navigation behaviour*; a drop is
+an OS input gesture, the same category as the mouse wheel and the CLI
+argument, neither of which is a `Command` either (`wheelEvent` calls
+`syo_app_scroll_by` directly; `main.cpp` calls `openDocument` directly). The
+document logic was already in the core and already reachable — the handler
+extracts a path and calls it.
+
+Only `MainWindow` needed `setAcceptDrops(true)`. `CanvasWidget` is a
+`QOpenGLWidget` covering the whole window, but it never enables drops, and Qt
+delivers drag events to the nearest ancestor that accepts them rather than
+stopping at a child that does not. That was the one assumption worth proving
+rather than believing, and the test below proves it.
+
+### Test strategy
+
+No Rust changed, and `docs/testing.md` puts Qt widget behaviour outside the
+unit-test boundary by design — so the workspace suite and `--smoke-test` only
+show nothing regressed. `runSmokeTest` builds a `MainWindow` but never calls
+`openDocument`, and a drop is not a key event, so neither touches this code.
+
+`xdotool` cannot originate a drag (XDND needs a real drag *source*), so a
+throwaway ~30-line Qt drag-source app was built in the scratchpad and driven
+against syodep under `Xvfb`, with `xdotool` moving and releasing the mouse.
+All three cases were confirmed by screenshot:
+
+- a `.pdf` dropped on the window opens (status line `dropme.pdf [1/4] 118%`),
+- a `.txt` is refused — still `no document - press 'o' to open a PDF`, and
+  notably **no error**, because the drag was rejected rather than
+  accepted-then-failed,
+- two and three PDFs produce `Opened dropme.pdf - 1 other file ignored` and
+  `- 2 other files ignored`.
+
+That last check caught a real blemish: the message first used `tr()`'s `%n`
+plural form, which needs a translation catalogue to resolve. With none loaded
+`tr()` returns the source string unchanged, so users would have seen the
+literal `1 other file(s) ignored`. Spelled out explicitly instead.
+
+### Notes / remaining
+
+- No config option to disable it; `[files]` would be the natural home, but a
+  toggle for a standard gesture nobody triggers by accident is not worth the
+  surface.
+- No `QFileOpenEvent` handling (the macOS "open with" event) — there is no
+  macOS build.
+- Dropping onto the taskbar/desktop icon is file association, already covered
+  by `packaging/syodep.desktop` and the Windows installer.
+
+---
+
 ## 2026-07-28 — 0.5.0
 
 First release carrying the Windows installer, and the first where

@@ -99,6 +99,10 @@ Application:
 The mouse wheel (and horizontal trackpad scrolling) also scrolls the view;
 this is a convenience, not the primary workflow.
 
+Dragging a PDF onto the window opens it. Anything that is not a `.pdf` is
+refused while still being dragged, so nothing happens on release; dropping
+several at once opens the first and says so in the status bar.
+
 ## Caret focus mode
 
 In **normal mode** (the default) `hjkl` scroll the page. Press `cc`

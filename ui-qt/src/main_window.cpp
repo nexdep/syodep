@@ -1,7 +1,12 @@
 #include "main_window.h"
 
+#include <QDragEnterEvent>
+#include <QDropEvent>
 #include <QFileDialog>
+#include <QFileInfo>
+#include <QMimeData>
 #include <QStatusBar>
+#include <QUrl>
 
 #include "canvas_widget.h"
 
@@ -18,6 +23,25 @@ QString takeSyoString(char *s)
     return out;
 }
 
+// Local .pdf paths carried by a drag, in the order they were dragged.
+//
+// Shared by dragEnterEvent and dropEvent so the two cannot disagree about
+// what is acceptable -- otherwise a drag could show the "copy" cursor and
+// then do nothing on release. toLocalFile() yields an empty string for
+// remote URLs (http:, ftp:), which filters them out here.
+QStringList droppablePdfs(const QMimeData *mime)
+{
+    QStringList paths;
+    if (!mime || !mime->hasUrls())
+        return paths;
+    for (const QUrl &url : mime->urls()) {
+        const QString path = url.toLocalFile();
+        if (!path.isEmpty() && path.endsWith(QStringLiteral(".pdf"), Qt::CaseInsensitive))
+            paths.append(path);
+    }
+    return paths;
+}
+
 } // namespace
 
 MainWindow::MainWindow(QWidget *parent)
@@ -32,6 +56,10 @@ MainWindow::MainWindow(QWidget *parent)
 
     m_canvas = new CanvasWidget(m_app, this);
     setCentralWidget(m_canvas);
+
+    // The canvas covers the window but leaves acceptDrops() false, so Qt walks
+    // up to the window for drag events. Only the window needs the flag.
+    setAcceptDrops(true);
 
     m_status = new QLabel(this);
     m_status->setTextFormat(Qt::PlainText);
@@ -59,6 +87,37 @@ bool MainWindow::openDocument(const QString &path)
     m_canvas->update();
     refreshStatus();
     return ok;
+}
+
+void MainWindow::dragEnterEvent(QDragEnterEvent *event)
+{
+    // Accepting only here is what makes the cursor show "no entry" for
+    // anything else -- the user finds out before releasing.
+    if (!droppablePdfs(event->mimeData()).isEmpty())
+        event->acceptProposedAction();
+}
+
+void MainWindow::dropEvent(QDropEvent *event)
+{
+    const QStringList paths = droppablePdfs(event->mimeData());
+    if (paths.isEmpty())
+        return;
+    event->acceptProposedAction();
+
+    // One document at a time: open the first and say so, rather than
+    // discarding the drop or silently ignoring the rest.
+    openDocument(paths.first());
+    if (paths.size() > 1) {
+        // Spelled out rather than via tr()'s %n plural form: with no
+        // translation catalogue loaded, tr() returns the source string
+        // unchanged, so "file(s)" would reach the user literally.
+        const int ignored = paths.size() - 1;
+        const QString name = QFileInfo(paths.first()).fileName();
+        const QString message = ignored == 1
+            ? tr("Opened %1 - 1 other file ignored").arg(name)
+            : tr("Opened %1 - %2 other files ignored").arg(name).arg(ignored);
+        statusBar()->showMessage(message, 5000);
+    }
 }
 
 void MainWindow::refreshStatus()

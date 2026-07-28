@@ -147,7 +147,9 @@ Four small files; intentionally boring:
   repaint; the real cache is in the core. Tiled GL texture rendering is
   planned for phase 3 (roadmap).
 - `MainWindow` owns the `SyoApp*` handle, the status label and the native
-  file dialog.
+  file dialog, and accepts PDFs dropped onto the window. The canvas fills the
+  window but leaves `acceptDrops()` false, so Qt delivers drag events to the
+  window; only it needs the flag.
 - `main.cpp` parses the CLI and implements `--smoke-test` for CI.
 
 ## Data flow example: pressing `5j`
