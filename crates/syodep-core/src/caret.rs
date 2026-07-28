@@ -67,12 +67,29 @@ impl Scope {
     }
 }
 
+/// The anchored end of a visual selection — the half that stays put.
+///
+/// The *moving* end is not stored here: it is the app's focus position and
+/// focus scope. There is exactly one "where you are" in the whole app, and
+/// visual mode adds a second endpoint rather than a second position. That is
+/// why leaving visual mode by any route keeps your place — there is nothing to
+/// carry across, and nothing that can go stale.
+///
+/// `o` exchanges this end with the focus position, scopes included, so the
+/// invariant is simply *the focus position is the end that moves*.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VisualAnchor {
+    pub anchor: Caret,
+    pub anchor_scope: Scope,
+    /// The mode to restore when visual mode is left.
+    pub return_mode: Mode,
+}
+
 /// A visual-mode selection: two positions, each with its own granularity.
 ///
-/// `head` is the end motions move; `anchor` stays put. `o` swaps the two
-/// wholesale (positions *and* scopes), which is why there is no separate
-/// "which end is active" flag — the invariant is simply *head moves, anchor
-/// stays*, and it cannot drift out of sync.
+/// This is a **read-only view**, assembled by `App::visual_selection` from the
+/// focus position (the head) and the stored [`VisualAnchor`]. It is not what
+/// the app stores, so mutating a copy changes nothing.
 ///
 /// The rendered selection runs from the outer edge of the earlier snapped end
 /// to the outer edge of the later one, so the ends crossing needs no special
@@ -85,14 +102,6 @@ pub struct VisualSelection {
     pub head_scope: Scope,
     /// The mode to restore when visual mode is left with `<Esc>`.
     pub return_mode: Mode,
-}
-
-impl VisualSelection {
-    /// Exchange the two ends, scopes included (`o`).
-    pub fn swap_ends(&mut self) {
-        std::mem::swap(&mut self.anchor, &mut self.head);
-        std::mem::swap(&mut self.anchor_scope, &mut self.head_scope);
-    }
 }
 
 /// A word-focus position: the run of cells `start_cell..=end_cell` within a line
@@ -374,28 +383,6 @@ mod tests {
         let (a, b) = (at(2, 1, 3), at(0, 5, 0));
         assert_eq!(a.min(b), at(0, 5, 0));
         assert_eq!(a.max(b), at(2, 1, 3));
-    }
-
-    #[test]
-    fn swapping_ends_exchanges_positions_and_scopes() {
-        let at = |page, line, cell| Caret { page, line, cell };
-        let mut sel = VisualSelection {
-            anchor: at(0, 0, 0),
-            anchor_scope: Scope::Line,
-            head: at(0, 3, 7),
-            head_scope: Scope::Word,
-            return_mode: Mode::Normal,
-        };
-        sel.swap_ends();
-        assert_eq!(sel.anchor, at(0, 3, 7));
-        assert_eq!(sel.anchor_scope, Scope::Word);
-        assert_eq!(sel.head, at(0, 0, 0));
-        assert_eq!(sel.head_scope, Scope::Line);
-        // Swapping is an involution, so `oo` is a no-op.
-        let once = sel;
-        sel.swap_ends();
-        sel.swap_ends();
-        assert_eq!(sel, once);
     }
 
     fn char_cell_at(c: char, x0: f32, x1: f32) -> Cell {

@@ -7,6 +7,84 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-07-28 — The visual head *is* the focus position
+
+### Implemented
+
+Visual mode no longer stores its moving end. It stores only the anchored end
+(`VisualAnchor`); the head is the app's `focus`/`focus_scope` — the same pair
+focus mode uses. `VisualSelection` survives as a read-only view assembled by
+`visual_selection()`.
+
+Removed: `visual_goal_x`, `visual_goal_y`, `update_visual_goal_x`,
+`update_visual_goal_y`, and `VisualSelection::swap_ends` (now `App::swap_visual_ends`,
+which exchanges the anchor with the focus position).
+
+Two user-visible changes fall out:
+
+- **Leaving visual mode with a `c` chord keeps your place.** Previously
+  `cw`/`ce`/… restored the position from *before* the selection started and
+  discarded the head. `<Esc>` was correct; nothing else was.
+- **The scope carries out too.** `cw`, `v`, `ve`, `<Esc>` now leaves you in
+  *line* focus rather than reverting to word. Position and scope had been
+  obeying different rules.
+
+### Why
+
+`self.focus` and `self.visual.head` both claimed to hold "where you are", and
+were only reconciled inside `exit_visual`. Any exit that did not go through
+that function read a stale value — and `enter_focus`, reached by the `c`
+chords, is exactly such an exit.
+
+This is the same failure mode the 0.7.0 collapse eliminated — derivable state
+stored twice and kept in sync by discipline — surviving in the one place that
+refactor did not reach. Patching the single bad read was the cheaper option and
+was rejected: it fixes the symptom and leaves the trap armed for the next
+caller. Deleting the duplicate makes the bug unrepresentable, which is why
+`enter_focus` needed **no change at all** in the end.
+
+### Test strategy
+
+Both bug tests were written first and observed to fail:
+
+```
+leaving_visual_by_scope_chord_keeps_the_position
+  left:  Some(Caret { page: 0, line: 0, cell: 0 })    <- pre-selection
+  right: Some(Caret { page: 0, line: 0, cell: 6 })    <- the head
+scope_carries_out_of_visual
+  left:  (Focus, Word)    right: (Focus, Line)
+```
+
+The first version of that test exited at *line* scope, which snaps the column
+to 0 — indistinguishable from the bug on a one-line fixture. It kept failing
+after the fix was correct. Rewritten to exit at word scope (where the landing
+cell is the head's word run) plus a two-line case for line scope, it
+distinguishes the two properly. A test that cannot tell success from the bug it
+targets is worse than no test.
+
+`swapping_ends_exchanges_positions_and_scopes` moved from a `caret.rs` unit
+test of the pure swap to an app-level `oo` test, since the swap now spans two
+pieces of state. 202 tests pass.
+
+The plan predicted the FFI and Qt would need no change, since `VisualSelection`
+never crossed the crate boundary; `git diff --stat crates/syodep-ffi ui-qt`
+came back empty, as a check rather than an assumption.
+
+Verified visually under Xvfb: `cw` highlights the first word, `v`+`l` grows a
+grey selection over two words, and `cw` then leaves the blue focus on the
+*second* word — where the head was.
+
+### Notes / remaining
+
+- No version bump; 0.7.0 shipped hours earlier. This rides the next release.
+- Still open from the same review: `o` (open file) is unreachable in visual
+  mode, since `o` is swap-ends there; and `v` from normal mode inherits the
+  last-used scope rather than defaulting to char.
+- Bare scope letters remains blocked on `w`/`e`/`b` already being word motions
+  in both modes.
+
+---
+
 ## 2026-07-28 — 0.7.0
 
 Since 0.6.0. **This release breaks existing configs.** See the migration below.
