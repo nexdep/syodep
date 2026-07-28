@@ -24,6 +24,16 @@ fit_width_on_open = true
 zoom_step = 1.1
 # Canvas background color (#rrggbb).
 background = "#1e1e1e"
+# Highlight for every focus mode -- caret, line, word, sentence and
+# paragraph all share one colour, so the highlight tells you that focus
+# is active rather than which scope you are in.
+focus_color = "#add8e6"
+# Opacity of the focus highlight, 0.0 to 1.0.
+focus_opacity = 0.4
+# Highlight for the visual-mode selection (#rrggbb).
+visual_color = "#d3d3d3"
+# Opacity of the selection highlight, 0.0 to 1.0.
+visual_opacity = 0.4
 
 [files]
 # Starting directory for the Open dialog (the "o" command). When unset, the

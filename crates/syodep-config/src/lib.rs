@@ -89,6 +89,16 @@ pub struct ViewConfig {
     pub zoom_step: f32,
     /// Canvas background color as `#rrggbb`.
     pub background: String,
+    /// Highlight color for every focus mode (caret, line, word, sentence,
+    /// paragraph) as `#rrggbb`. One colour for all of them on purpose: the
+    /// useful signal is focus vs selection, not which scope is active.
+    pub focus_color: String,
+    /// Opacity of the focus highlight, 0.0 (invisible) to 1.0 (opaque).
+    pub focus_opacity: f32,
+    /// Highlight color for the visual-mode selection as `#rrggbb`.
+    pub visual_color: String,
+    /// Opacity of the selection highlight, 0.0 (invisible) to 1.0 (opaque).
+    pub visual_opacity: f32,
 }
 
 impl Default for ViewConfig {
@@ -101,8 +111,24 @@ impl Default for ViewConfig {
             fit_width_on_open: true,
             zoom_step: 1.1,
             background: "#1e1e1e".to_owned(),
+            focus_color: "#add8e6".to_owned(),
+            focus_opacity: 0.4,
+            visual_color: "#d3d3d3".to_owned(),
+            visual_opacity: 0.4,
         }
     }
+}
+
+/// Parse `#rrggbb` into its components. Returns `None` for anything else --
+/// wrong length, missing `#`, non-hex digits -- so the caller can fall back to
+/// a default and warn rather than rendering an invisible overlay.
+pub fn parse_hex_color(s: &str) -> Option<(u8, u8, u8)> {
+    let hex = s.strip_prefix('#')?;
+    if hex.len() != 6 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let component = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).ok();
+    Some((component(0)?, component(2)?, component(4)?))
 }
 
 impl Default for Config {
@@ -446,6 +472,18 @@ pub fn default_config_doc() -> String {
     let _ = writeln!(out, "zoom_step = {}", float(view.zoom_step));
     out.push_str("# Canvas background color (#rrggbb).\n");
     let _ = writeln!(out, "background = \"{}\"", view.background);
+    out.push_str(
+        "# Highlight for every focus mode -- caret, line, word, sentence and\n\
+         # paragraph all share one colour, so the highlight tells you that focus\n\
+         # is active rather than which scope you are in.\n",
+    );
+    let _ = writeln!(out, "focus_color = \"{}\"", view.focus_color);
+    out.push_str("# Opacity of the focus highlight, 0.0 to 1.0.\n");
+    let _ = writeln!(out, "focus_opacity = {}", float(view.focus_opacity));
+    out.push_str("# Highlight for the visual-mode selection (#rrggbb).\n");
+    let _ = writeln!(out, "visual_color = \"{}\"", view.visual_color);
+    out.push_str("# Opacity of the selection highlight, 0.0 to 1.0.\n");
+    let _ = writeln!(out, "visual_opacity = {}", float(view.visual_opacity));
     out.push('\n');
 
     out.push_str(
@@ -555,6 +593,46 @@ fn float(value: f32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_hex_colors() {
+        assert_eq!(parse_hex_color("#add8e6"), Some((0xad, 0xd8, 0xe6)));
+        assert_eq!(parse_hex_color("#000000"), Some((0, 0, 0)));
+        assert_eq!(parse_hex_color("#FFFFFF"), Some((255, 255, 255)));
+    }
+
+    #[test]
+    fn rejects_malformed_hex_colors() {
+        assert_eq!(parse_hex_color("add8e6"), None, "missing #");
+        assert_eq!(parse_hex_color("#add8e"), None, "too short");
+        assert_eq!(parse_hex_color("#add8e6f"), None, "too long");
+        assert_eq!(parse_hex_color("#gggggg"), None, "not hex");
+        assert_eq!(parse_hex_color(""), None);
+        assert_eq!(parse_hex_color("#"), None);
+        // 8-digit hex is rejected rather than silently dropping the alpha:
+        // opacity is a separate option.
+        assert_eq!(parse_hex_color("#add8e6ff"), None);
+    }
+
+    #[test]
+    fn overlay_colors_default_and_user_override() {
+        // r##"..."## because the TOML contains `"#`, which would close an
+        // r#"..."# literal early.
+        let config = Config::from_toml(
+            r##"
+            [view]
+            focus_color = "#112233"
+            visual_opacity = 0.75
+            "##,
+        )
+        .unwrap();
+        assert_eq!(config.view.focus_color, "#112233");
+        assert_eq!(config.view.visual_opacity, 0.75);
+        // Untouched colour options keep their defaults.
+        assert_eq!(config.view.visual_color, "#d3d3d3");
+        assert_eq!(config.view.focus_opacity, 0.4);
+        assert_eq!(config.view.background, "#1e1e1e");
+    }
 
     #[test]
     fn default_config_has_sane_view_settings() {

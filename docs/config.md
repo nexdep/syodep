@@ -36,9 +36,25 @@ bookmarks, highlights, notes, history. That lives in the SQLite database
 | `fit_width_on_open` | bool | `true` | fit page width to window when opening a document without a saved position |
 | `zoom_step` | float | `1.1` | multiplicative step for `zoom_in`/`zoom_out` |
 | `background` | string | `"#1e1e1e"` | canvas background color, `#rrggbb` |
+| `focus_color` | string | `"#add8e6"` | highlight for every focus mode, `#rrggbb` |
+| `focus_opacity` | float | `0.4` | opacity of the focus highlight, `0.0`-`1.0` |
+| `visual_color` | string | `"#d3d3d3"` | highlight for the visual-mode selection, `#rrggbb` |
+| `visual_opacity` | float | `0.4` | opacity of the selection highlight, `0.0`-`1.0` |
 
 Documents with a saved reading position restore their previous scroll and
 zoom instead of applying `default_zoom`/`fit_width_on_open`.
+
+**Overlay colours.** All five focus modes (caret, line, word, sentence,
+paragraph) share `focus_color`: the highlight tells you that focus is active,
+not which scope you are in. The selection uses `visual_color`. Overlays are
+drawn as plain filled boxes with no border, and overlapping boxes are merged
+before filling, so a multi-line highlight is one flat block rather than a
+ladder of edges with darker seams.
+
+An unparseable colour falls back to its default and reports the problem in the
+status line rather than leaving the overlay invisible. Only `#rrggbb` is
+accepted — opacity is a separate option, so an eight-digit value is rejected
+rather than silently interpreted.
 
 ## `[files]`
 
@@ -166,6 +182,6 @@ names.
 
 ## Planned config sections
 
-Later phases add: theme/colors beyond the background, annotation
+Later phases add: annotation
 preferences (default highlight color etc.), and external commands. They
 will be documented here as they land (see `docs/roadmap.md`).

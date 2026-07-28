@@ -7,6 +7,82 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-07-28 — One overlay colour per mode, configurable
+
+### Implemented
+
+- **All five focus modes share one colour** (`[view] focus_color`, default the
+  light blue `#add8e6`); the selection uses `visual_color` (light grey
+  `#d3d3d3`). Previously each mode had its own hardcoded accent — caret blue,
+  line orange, word green, paragraph purple, sentence red, visual teal — so the
+  highlight encoded *which scope* rather than the useful signal, focus versus
+  selection.
+- **No borders anywhere.** Five overlays used to draw an opaque 1px outline
+  plus a fill at alpha 70 while the selection was fill-only at alpha 110, so
+  two overlays with identical geometry semantics looked unrelated.
+- **Overlapping boxes no longer double-blend.** Rectangles go into a
+  `QPainterPath` that is `simplified()` before a single fill, which merges
+  intersecting subpaths into an outline with no intersecting edges. This was a
+  real defect, not a hypothetical: both multi-rect overlays take y from
+  `line.bbox`, which is MuPDF's `line.bounds()` — the union of glyph quads
+  including ascenders and descenders — so consecutive lines genuinely overlap,
+  and the `width < 2.0` guard widens rects rightwards as well.
+- **`[view] background` works again.** It was defined, documented and *dead*:
+  `canvas_widget.cpp` hardcoded `#1e1e1e`, and the `setBackgroundColor()` hook
+  had never been called from anywhere. Fixed with the same plumbing rather than
+  left as a documented option that does nothing.
+- Colour and opacity are separate options, so opacity can be tuned without
+  rewriting a hex value.
+
+### Design
+
+Colours are resolved **once in `syo_app_new`** and cached on `SyoApp`, exactly
+like `open_dir`: an unparseable value falls back to the built-in default and
+reports the problem, so a typo degrades instead of producing an invisible
+overlay. Opacity is clamped to `0.0..=1.0`. A new `#[repr(C)] SyoColor` and
+three getters carry them to Qt — these are the **first `[view]` values ever
+exposed over the FFI**; every other one is consumed inside the core.
+
+Parsing lives in Rust rather than letting `QColor` do it, so bad values surface
+through the same channel as every other config problem. `#rrggbb` only:
+opacity is separate, so an eight-digit value is rejected rather than silently
+reinterpreted.
+
+The five focus getters were left as they are. Collapsing them into one
+`syo_app_focus_rects()` would make the single colour structural rather than
+conventional, but that is an FFI change beyond this task; the Qt-side union
+gives the same visible result.
+
+### Test strategy
+
+Rust: `parse_hex_color` accept/reject cases, opacity clamping, config
+defaults + override, and FFI tests that a configured colour reaches the getter
+and that an invalid one falls back and warns.
+
+Colour cannot be checked by exit code, so it was verified on screen under Xvfb:
+
+- caret, word and line focus all render the *same* light blue,
+- a paragraph selection is one flat grey block — sampling it gives a single
+  value, `#EDEDED`, which is exactly the predicted blend of `#d3d3d3` at 0.4
+  over white (211 × 0.4 + 255 × 0.6 = 237) and is identical on different
+  lines. A double-blended overlap would show a second, darker value,
+- a config setting `background`, `focus_color` and `visual_color` to red/blue/
+  dark green takes effect for all three — the background pixel reads `#204020`,
+  which was impossible before,
+- `focus_color = "lightblue"` falls back to the default and shows
+  `ERROR: invalid focus_color "lightblue" in [view]; using the default #add8e6`.
+
+### Notes / remaining
+
+- That warning lives in `last_error`, which `open_document` clears on success,
+  so it is visible until a document is opened. Pre-existing behaviour shared
+  with the `open_dir` warning, not introduced here.
+- The default opacity of 0.4 was chosen by looking at the result, not derived.
+  Pale fills with no border need more presence than the old saturated bordered
+  boxes (alpha 70 ≈ 0.27).
+
+---
+
 ## 2026-07-28 — Open a PDF dropped onto the window
 
 ### Implemented

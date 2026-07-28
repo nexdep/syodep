@@ -55,6 +55,12 @@ MainWindow::MainWindow(QWidget *parent)
     m_app = syo_app_new(configPath.toUtf8().constData(), dbPath.toUtf8().constData());
 
     m_canvas = new CanvasWidget(m_app, this);
+    // Overlay colours come from [view] in the config, resolved by the core.
+    // Until now `background` was defined and documented but never read here.
+    const auto toQColor = [](SyoColor c) { return QColor(c.r, c.g, c.b, c.a); };
+    m_canvas->setBackgroundColor(toQColor(syo_app_background_color(m_app)));
+    m_canvas->setFocusColor(toQColor(syo_app_focus_color(m_app)));
+    m_canvas->setVisualColor(toQColor(syo_app_visual_color(m_app)));
     setCentralWidget(m_canvas);
 
     // The canvas covers the window but leaves acceptDrops() false, so Qt walks

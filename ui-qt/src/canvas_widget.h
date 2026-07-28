@@ -24,7 +24,11 @@ class CanvasWidget : public QOpenGLWidget
 public:
     explicit CanvasWidget(SyoApp *app, QWidget *parent = nullptr);
 
+    // Colours come from the config via the core; MainWindow pushes them in
+    // after construction. Defaults here only cover the moment before that.
     void setBackgroundColor(const QColor &color) { m_background = color; }
+    void setFocusColor(const QColor &color) { m_focusColor = color; }
+    void setVisualColor(const QColor &color) { m_visualColor = color; }
 
 signals:
     // Emitted after any event was forwarded to the core, so the main window
@@ -45,6 +49,10 @@ private:
 
     SyoApp *m_app; // owned by MainWindow
     QColor m_background;
+    // One colour for every focus mode, one for the selection: the highlight
+    // says whether focus or selection is active, not which scope.
+    QColor m_focusColor;
+    QColor m_visualColor;
 
     struct CachedPage
     {

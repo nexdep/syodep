@@ -34,6 +34,48 @@ pub struct SyoApp {
     open_dir: String,
     /// Human-readable provenance of `open_dir`, reported by `--check`.
     open_dir_source: String,
+    /// Canvas background, resolved from `[view] background`.
+    background_color: SyoColor,
+    /// Highlight for every focus mode, from `[view] focus_color`/`focus_opacity`.
+    focus_color: SyoColor,
+    /// Highlight for the visual selection, from `[view] visual_color`/`visual_opacity`.
+    visual_color: SyoColor,
+}
+
+/// An RGBA colour resolved from the config, in 0-255 components.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SyoColor {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+    pub a: u8,
+}
+
+/// Resolve a configured `#rrggbb` plus an opacity into RGBA.
+///
+/// Never fails: an unparseable colour falls back to `fallback` and returns a
+/// warning for the status bar, matching the rule that a bad config degrades
+/// rather than aborting. Opacity is clamped to 0.0..=1.0 so a typo cannot make
+/// the overlay invisible-by-arithmetic in a way that looks like a bug.
+fn resolve_color(
+    option: &str,
+    value: &str,
+    opacity: f32,
+    fallback: &str,
+) -> (SyoColor, Option<String>) {
+    let (rgb, warning) = match syodep_config::parse_hex_color(value) {
+        Some(rgb) => (rgb, None),
+        None => (
+            syodep_config::parse_hex_color(fallback).expect("built-in default colours are valid"),
+            Some(format!(
+                "invalid {option} {value:?} in [view]; using the default {fallback}"
+            )),
+        ),
+    };
+    let (r, g, b) = rgb;
+    let a = (opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
+    (SyoColor { r, g, b, a }, warning)
 }
 
 /// Outcome of resolving the Open-dialog starting directory.
@@ -233,6 +275,24 @@ pub unsafe extern "C" fn syo_app_new(
         if let Some(warning) = open.warning {
             warnings.push(warning);
         }
+        // The background is always opaque; only the overlays take an opacity.
+        let (background_color, w) =
+            resolve_color("background", &config.view.background, 1.0, "#1e1e1e");
+        warnings.extend(w);
+        let (focus_color, w) = resolve_color(
+            "focus_color",
+            &config.view.focus_color,
+            config.view.focus_opacity,
+            "#add8e6",
+        );
+        warnings.extend(w);
+        let (visual_color, w) = resolve_color(
+            "visual_color",
+            &config.view.visual_color,
+            config.view.visual_opacity,
+            "#d3d3d3",
+        );
+        warnings.extend(w);
         let mut app = App::new(config, storage);
         for warning in warnings {
             app.report_error(warning);
@@ -241,6 +301,9 @@ pub unsafe extern "C" fn syo_app_new(
             app,
             open_dir: open.path,
             open_dir_source: open.source,
+            background_color,
+            focus_color,
+            visual_color,
         }
     });
     match result {
@@ -722,6 +785,61 @@ pub unsafe extern "C" fn syo_app_startup_warnings(app: *const SyoApp) -> *mut c_
     to_c_string(text)
 }
 
+/// Canvas background colour from `[view] background` (always opaque).
+///
+/// # Safety
+/// `app` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn syo_app_background_color(app: *const SyoApp) -> SyoColor {
+    let Some(app) = (unsafe { app.as_ref() }) else {
+        return SyoColor {
+            r: 0x1e,
+            g: 0x1e,
+            b: 0x1e,
+            a: 255,
+        };
+    };
+    app.background_color
+}
+
+/// Highlight colour for every focus mode, from `[view] focus_color` and
+/// `focus_opacity`. One colour covers caret, line, word, sentence and
+/// paragraph focus: the highlight signals that focus is active, not which
+/// scope is in use.
+///
+/// # Safety
+/// `app` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn syo_app_focus_color(app: *const SyoApp) -> SyoColor {
+    let Some(app) = (unsafe { app.as_ref() }) else {
+        return SyoColor {
+            r: 0xad,
+            g: 0xd8,
+            b: 0xe6,
+            a: 102,
+        };
+    };
+    app.focus_color
+}
+
+/// Highlight colour for the visual-mode selection, from `[view] visual_color`
+/// and `visual_opacity`.
+///
+/// # Safety
+/// `app` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn syo_app_visual_color(app: *const SyoApp) -> SyoColor {
+    let Some(app) = (unsafe { app.as_ref() }) else {
+        return SyoColor {
+            r: 0xd3,
+            g: 0xd3,
+            b: 0xd3,
+            a: 102,
+        };
+    };
+    app.visual_color
+}
+
 /// Resolved starting directory for the Open dialog (absolute when known; empty
 /// when even the launch directory is unavailable, in which case the shell lets
 /// Qt choose). Free with `syo_string_free`.
@@ -1043,6 +1161,83 @@ mod tests {
         assert_eq!(r.path, cwd);
         assert!(r.source.contains("not found"));
         assert!(r.warning.is_some());
+    }
+
+    #[test]
+    fn color_getters_wire_through_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            "[view]\n\
+             background = '#102030'\n\
+             focus_color = '#405060'\n\
+             focus_opacity = 1.0\n\
+             visual_color = '#708090'\n\
+             visual_opacity = 0.0\n",
+        )
+        .unwrap();
+        let c_config = CString::new(config_path.display().to_string()).unwrap();
+        unsafe {
+            let app = syo_app_new(c_config.as_ptr(), std::ptr::null());
+            assert!(!app.is_null());
+
+            let bg = syo_app_background_color(app);
+            assert_eq!((bg.r, bg.g, bg.b), (0x10, 0x20, 0x30));
+            assert_eq!(bg.a, 255, "the background is always opaque");
+
+            let focus = syo_app_focus_color(app);
+            assert_eq!((focus.r, focus.g, focus.b), (0x40, 0x50, 0x60));
+            assert_eq!(focus.a, 255, "opacity 1.0 maps to a fully opaque alpha");
+
+            let visual = syo_app_visual_color(app);
+            assert_eq!((visual.r, visual.g, visual.b), (0x70, 0x80, 0x90));
+            assert_eq!(visual.a, 0, "opacity 0.0 maps to a fully transparent alpha");
+
+            syo_app_free(app);
+        }
+    }
+
+    #[test]
+    fn invalid_color_falls_back_and_warns() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(&config_path, "[view]\nfocus_color = 'not a colour'\n").unwrap();
+        let c_config = CString::new(config_path.display().to_string()).unwrap();
+        unsafe {
+            let app = syo_app_new(c_config.as_ptr(), std::ptr::null());
+            assert!(!app.is_null());
+            // Falls back to the built-in light blue rather than rendering
+            // nothing, and says so.
+            let focus = syo_app_focus_color(app);
+            assert_eq!((focus.r, focus.g, focus.b), (0xad, 0xd8, 0xe6));
+            // The fallback surfaces in the status line, like the open_dir
+            // warning -- report_error feeds status_text, not startup_warnings
+            // (which carries keymap errors).
+            let status = syo_app_status_text(app);
+            let text = CStr::from_ptr(status).to_str().unwrap().to_owned();
+            syo_string_free(status);
+            assert!(text.contains("focus_color"), "{text}");
+            syo_app_free(app);
+        }
+    }
+
+    #[test]
+    fn opacity_out_of_range_is_clamped() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            "[view]\nfocus_opacity = 9.0\nvisual_opacity = -3.0\n",
+        )
+        .unwrap();
+        let c_config = CString::new(config_path.display().to_string()).unwrap();
+        unsafe {
+            let app = syo_app_new(c_config.as_ptr(), std::ptr::null());
+            assert_eq!(syo_app_focus_color(app).a, 255);
+            assert_eq!(syo_app_visual_color(app).a, 0);
+            syo_app_free(app);
+        }
     }
 
     #[test]
