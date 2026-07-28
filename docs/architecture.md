@@ -71,25 +71,37 @@ input take plain data). Key pieces:
 - **`App`** (`app.rs`): glues everything; input events come in, `Effects`
   (redraw / quit / open-file-dialog) come out. Persists the reading
   position after every navigation command and on drop.
-- **Caret** (`caret.rs` + `app.rs`): a modal cursor over page-content
-  geometry. A `Mode` selects which keymap drives input — normal `hjkl`
-  scrolling, or caret motion where `h`/`l` step characters, `w`/`e`/`b` step
-  word runs, and `j`/`k` step lines (keeping a goal column) through text and
-  image cells, auto-scrolling the caret into view. The caret keymap is the
-  normal keymap plus the `[caret_focus_keys]` overrides, so every other
-  command still works in caret focus mode.
-  Extracted page content is cached per page in the session; the pure
-  goal-column and word-boundary helpers live in `caret.rs`.
+- **Focus mode** (`caret.rs` + `app.rs`): one highlighted position over
+  page-content geometry. `Mode` has exactly three variants — `Normal`, `Focus`,
+  `Visual` — and *granularity is not a mode*: `Focus` carries a `Scope` (char,
+  word, line, sentence or paragraph). The app stores one `Caret` plus that
+  scope; what is drawn is derived by `scope_span(caret, scope)` and cached in
+  `focus_span`, so changing the scope reinterprets the position you are on
+  rather than restoring a separate per-granularity mark. (It used to be five
+  `Mode` variants with five marks, which meant `cw` then `ce` teleported you to
+  wherever you last were in line focus. The bug is unrepresentable now.)
+  The focus keymap is the normal keymap plus the `[focus_keys]` overrides, so
+  every other command still works while focused. Extracted page content is
+  cached per page in the session; the pure goal-column and word-boundary
+  helpers live in `caret.rs`.
 - **Visual mode** (`caret.rs` + `app.rs`): a two-ended selection over the same
   content layer. `VisualSelection` holds an `anchor` and a `head` — the head is
-  what motions move — each with its own `VisualScope`. `o` swaps the two
-  wholesale, so there is no separate "which end is active" flag to drift.
-  Rendering expands each end by its own scope and takes the outermost edges,
-  which makes the ends crossing a non-case and `o` provably invisible. Motion
-  reuses the focus modes' steppers rather than adding traversal logic, so a
-  scope is little more than a pair of function choices. A selection is the one
-  overlay that may span pages; it is drawn per *visible* page so the cost does
-  not grow with its length.
+  what motions move — each with its own `Scope`. `o` swaps the two wholesale,
+  so there is no separate "which end is active" flag to drift. Rendering
+  expands each end by its own scope and takes the outermost edges, which makes
+  the ends crossing a non-case and `o` provably invisible.
+- **Why focus and visual share almost everything**: a focus highlight is a
+  selection whose two ends coincide. Both resolve to an inclusive `(Caret,
+  Caret)` span, so one `scope_span` derives the extent, one `step_scope` table
+  maps (scope, direction) onto a motion, and one `span_screen_rects` turns a
+  span into overlay rectangles. A scope therefore cannot mean one thing in one
+  mode and something else in the other — enforced by construction rather than
+  by discipline. The FFI reflects this: a single `SyoOverlay` shape serves both,
+  fetched with `syo_app_focus` / `syo_app_selection`. Overlays are drawn per
+  *visible* page, so cost does not grow with span length.
+  The two stay separate modes because their exit semantics differ, focus moves
+  a single position rather than one end of a range, and they want distinct
+  colours.
 
 ### syodep-pdf
 

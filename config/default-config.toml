@@ -69,11 +69,11 @@ visual_opacity = 0.4
 "G" = "goto_last_page"
 "J" = "next_page"
 "K" = "prev_page"
-"cc" = "caret_focus_enter"
-"ce" = "line_focus_enter"
-"cp" = "paragraph_focus_enter"
-"cs" = "sentence_focus_enter"
-"cw" = "word_focus_enter"
+"cc" = "focus_enter_char"
+"ce" = "focus_enter_line"
+"cp" = "focus_enter_paragraph"
+"cs" = "focus_enter_sentence"
+"cw" = "focus_enter_word"
 "gg" = "goto_first_page"
 "h" = "scroll_left"
 "j" = "scroll_down"
@@ -90,76 +90,26 @@ visual_opacity = 0.4
 "z0" = "zoom_reset"
 "zw" = "fit_width"
 
-# Caret-focus-mode keybindings (active after pressing "cc"). These overlay the
-# normal [keys] while caret focus mode is active: h/j/k/l move the caret
-# (h/l by character, j/k by line) and <Esc> exits.
-[caret_focus_keys]
-"<Down>" = "caret_focus_down"
-"<Esc>" = "caret_focus_exit"
-"<Left>" = "caret_focus_left"
-"<Right>" = "caret_focus_right"
-"<Up>" = "caret_focus_up"
-"b" = "caret_focus_prev_word"
-"e" = "caret_focus_end_word"
-"h" = "caret_focus_left"
-"j" = "caret_focus_down"
-"k" = "caret_focus_up"
-"l" = "caret_focus_right"
-"w" = "caret_focus_next_word"
-
-# Line-focus-mode keybindings (active after pressing "ce"). j/k move the
-# highlighted line, h/l move between columns and <Esc> exits.
-[line_focus_keys]
-"<Down>" = "line_focus_down"
-"<Esc>" = "line_focus_exit"
-"<Left>" = "line_focus_left"
-"<Right>" = "line_focus_right"
-"<Up>" = "line_focus_up"
-"h" = "line_focus_left"
-"j" = "line_focus_down"
-"k" = "line_focus_up"
-"l" = "line_focus_right"
-
-# Word-focus-mode keybindings (active after pressing "cw"). h/b move to the
-# previous word run, l/w move to the next, j/k move by line and <Esc> exits.
-[word_focus_keys]
-"<Down>" = "word_focus_down"
-"<Esc>" = "word_focus_exit"
-"<Left>" = "word_focus_left"
-"<Right>" = "word_focus_right"
-"<Up>" = "word_focus_up"
-"b" = "word_focus_left"
-"h" = "word_focus_left"
-"j" = "word_focus_down"
-"k" = "word_focus_up"
-"l" = "word_focus_right"
-"w" = "word_focus_right"
-
-# Sentence-focus-mode keybindings (active after pressing "cs"). Sentences are
-# linear, so hjkl/arrows collapse to previous/next and <Esc> exits.
-[sentence_focus_keys]
-"<Down>" = "sentence_focus_next"
-"<Esc>" = "sentence_focus_exit"
-"<Left>" = "sentence_focus_prev"
-"<Right>" = "sentence_focus_next"
-"<Up>" = "sentence_focus_prev"
-"h" = "sentence_focus_prev"
-"j" = "sentence_focus_next"
-"k" = "sentence_focus_prev"
-"l" = "sentence_focus_next"
-
-# Paragraph-focus-mode keybindings (active after pressing "cp"). Like sentence
-# focus, hjkl/arrows collapse to previous/next and <Esc> exits.
-[paragraph_focus_keys]
-"<Down>" = "paragraph_focus_next"
-"<Esc>" = "paragraph_focus_exit"
-"<Left>" = "paragraph_focus_prev"
-"<Right>" = "paragraph_focus_next"
-"<Up>" = "paragraph_focus_prev"
-"h" = "paragraph_focus_prev"
-"j" = "paragraph_focus_next"
-"k" = "paragraph_focus_prev"
-"l" = "paragraph_focus_next"
+# Focus-mode keybindings (active after pressing "cc", "cw", "ce", "cs" or
+# "cp"). These overlay the normal [keys] while focus mode is active: hjkl and
+# the arrows move the highlight by one unit of the active scope, w/e/b move a
+# word at a time whatever the scope, and <Esc> exits.
+# One table covers every scope, because the commands dispatch on the scope:
+# "focus_left" is a character in char scope, a word in word scope, a column
+# jump in line scope and the previous unit in sentence/paragraph scope.
+[focus_keys]
+"<Down>" = "focus_down"
+"<Esc>" = "focus_exit"
+"<Left>" = "focus_left"
+"<Right>" = "focus_right"
+"<Up>" = "focus_up"
+"b" = "focus_prev_word"
+"e" = "focus_end_word"
+"h" = "focus_left"
+"j" = "focus_down"
+"k" = "focus_up"
+"l" = "focus_right"
+"w" = "focus_next_word"
 
 # Visual-mode keybindings (active after pressing "v"). hjkl/arrows grow the
 # selection by one unit of the active end's scope. "v" plus a scope letter

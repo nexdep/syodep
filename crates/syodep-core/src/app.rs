@@ -95,21 +95,11 @@ struct Session {
 pub struct App {
     config: Config,
     keymap: Keymap,
-    /// Keymap used while in caret focus mode: the normal keymap plus the
-    /// `[caret_focus_keys]` overrides (so `hjkl`/`<Esc>` change meaning there).
-    caret_focus_keymap: Keymap,
-    /// Keymap used while in line focus mode: the normal keymap plus the
-    /// `[line_focus_keys]` overrides.
-    line_focus_keymap: Keymap,
-    /// Keymap used while in word focus mode: the normal keymap plus the
-    /// `[word_focus_keys]` overrides.
-    word_focus_keymap: Keymap,
-    /// Keymap used while in sentence focus mode: the normal keymap plus the
-    /// `[sentence_focus_keys]` overrides.
-    sentence_focus_keymap: Keymap,
-    /// Keymap used while in paragraph focus mode: the normal keymap plus the
-    /// `[paragraph_focus_keys]` overrides.
-    paragraph_focus_keymap: Keymap,
+    /// Keymap used while in focus mode: the normal keymap plus the
+    /// `[focus_keys]` overrides (so `hjkl`/`<Esc>` change meaning there). One
+    /// keymap covers every scope, because the motion commands dispatch on the
+    /// scope rather than being named after it.
+    focus_keymap: Keymap,
     /// Keymap used while in visual mode: the normal keymap plus the
     /// `[visual_keys]` overrides.
     visual_keymap: Keymap,
@@ -117,24 +107,23 @@ pub struct App {
     storage: Option<Storage>,
     session: Option<Session>,
     viewport: (f32, f32),
-    /// Whether `hjkl` scroll or move the caret.
+    /// Whether `hjkl` scroll, move the focus, or grow a selection.
     mode: Mode,
-    /// Current caret position, remembered across mode toggles.
-    caret: Option<Caret>,
-    /// Remembered goal column (page-space x) for vertical caret motion.
-    caret_goal_x: f32,
-    /// Current line-focus position, remembered across mode toggles.
-    line_mark: Option<LineMark>,
-    /// Remembered goal row (page-space y center) for horizontal column motion.
-    line_goal_y: f32,
-    /// Current word-focus position, remembered across mode toggles.
-    word_mark: Option<WordMark>,
-    /// Remembered goal column (page-space x) for vertical word motion.
-    word_goal_x: f32,
-    /// Current sentence-focus position, remembered across mode toggles.
-    sentence_mark: Option<SentenceMark>,
-    /// Current paragraph-focus position, remembered across mode toggles.
-    paragraph_mark: Option<ParagraphMark>,
+    /// The focused position, remembered across mode toggles. A single point:
+    /// what is *highlighted* is derived from it by [`Self::scope_span`], so
+    /// changing the scope cannot leave the highlight somewhere else.
+    focus: Option<Caret>,
+    /// Granularity the focus highlight snaps to, remembered across mode toggles.
+    focus_scope: Scope,
+    /// The focus highlight resolved to a document-order cell range, recomputed
+    /// after every change to `focus` or `focus_scope`. Cached for the same
+    /// reason as `visual_span`: resolving it needs page content (`&mut self`)
+    /// while the overlay getter the shell calls is `&self`.
+    focus_span: Option<(Caret, Caret)>,
+    /// Remembered goal column (page-space x) for vertical motion.
+    focus_goal_x: f32,
+    /// Remembered goal row (page-space y center) for line-scope column motion.
+    focus_goal_y: f32,
     /// The live selection while in visual mode.
     visual: Option<VisualSelection>,
     /// The selection resolved to a document-order cell range, recomputed after
@@ -158,43 +147,16 @@ impl App {
     pub fn new(config: Config, storage: Option<Storage>) -> Self {
         let entries = config.keys.iter().map(|(k, v)| (k.as_str(), v.as_str()));
         let (keymap, mut keymap_errors) = Keymap::from_entries(entries);
-        // The caret keymap is the normal keymap with the caret-focus overrides
-        // applied, so every normal binding still works in caret focus mode and
-        // only the overridden keys (hjkl/<Esc>) change meaning. Cloning then
+        // The focus keymap is the normal keymap with the focus overrides
+        // applied, so every normal binding still works in focus mode and only
+        // the overridden keys (hjkl/<Esc>) change meaning. Cloning then
         // overlaying avoids re-validating (and double-reporting) normal keys.
-        let mut caret_focus_keymap = keymap.clone();
-        let caret_entries = config
-            .caret_focus_keys
+        let mut focus_keymap = keymap.clone();
+        let focus_entries = config
+            .focus_keys
             .iter()
             .map(|(k, v)| (k.as_str(), v.as_str()));
-        keymap_errors.extend(caret_focus_keymap.overlay(caret_entries));
-        // The line-focus keymap is built the same way, from `[line_focus_keys]`.
-        let mut line_focus_keymap = keymap.clone();
-        let line_entries = config
-            .line_focus_keys
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.as_str()));
-        keymap_errors.extend(line_focus_keymap.overlay(line_entries));
-        // The word-focus keymap is built the same way, from `[word_focus_keys]`.
-        let mut word_focus_keymap = keymap.clone();
-        let word_entries = config
-            .word_focus_keys
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.as_str()));
-        keymap_errors.extend(word_focus_keymap.overlay(word_entries));
-        // The sentence- and paragraph-focus keymaps follow the same recipe.
-        let mut sentence_focus_keymap = keymap.clone();
-        let sentence_entries = config
-            .sentence_focus_keys
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.as_str()));
-        keymap_errors.extend(sentence_focus_keymap.overlay(sentence_entries));
-        let mut paragraph_focus_keymap = keymap.clone();
-        let paragraph_entries = config
-            .paragraph_focus_keys
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.as_str()));
-        keymap_errors.extend(paragraph_focus_keymap.overlay(paragraph_entries));
+        keymap_errors.extend(focus_keymap.overlay(focus_entries));
         // Visual mode's keymap, from `[visual_keys]`.
         let mut visual_keymap = keymap.clone();
         let visual_entries = config
@@ -206,25 +168,18 @@ impl App {
         Self {
             config,
             keymap,
-            caret_focus_keymap,
-            line_focus_keymap,
-            word_focus_keymap,
-            sentence_focus_keymap,
-            paragraph_focus_keymap,
+            focus_keymap,
             visual_keymap,
             input: InputState::new(),
             storage,
             session: None,
             viewport: (800.0, 600.0),
             mode: Mode::Normal,
-            caret: None,
-            caret_goal_x: 0.0,
-            line_mark: None,
-            line_goal_y: 0.0,
-            word_mark: None,
-            word_goal_x: 0.0,
-            sentence_mark: None,
-            paragraph_mark: None,
+            focus: None,
+            focus_scope: Scope::Char,
+            focus_span: None,
+            focus_goal_x: 0.0,
+            focus_goal_y: 0.0,
             visual: None,
             visual_span: None,
             visual_goal_x: 0.0,
@@ -299,14 +254,11 @@ impl App {
         });
         // Caret positions are document-specific; reset to normal mode.
         self.mode = Mode::Normal;
-        self.caret = None;
-        self.caret_goal_x = 0.0;
-        self.line_mark = None;
-        self.line_goal_y = 0.0;
-        self.word_mark = None;
-        self.word_goal_x = 0.0;
-        self.sentence_mark = None;
-        self.paragraph_mark = None;
+        self.focus = None;
+        self.focus_scope = Scope::Char;
+        self.focus_span = None;
+        self.focus_goal_x = 0.0;
+        self.focus_goal_y = 0.0;
         self.visual = None;
         self.visual_span = None;
         self.visual_goal_x = 0.0;
@@ -384,11 +336,7 @@ impl App {
             let outcome = {
                 let keymap = match self.mode {
                     Mode::Normal => &self.keymap,
-                    Mode::CaretFocus => &self.caret_focus_keymap,
-                    Mode::LineFocus => &self.line_focus_keymap,
-                    Mode::WordFocus => &self.word_focus_keymap,
-                    Mode::SentenceFocus => &self.sentence_focus_keymap,
-                    Mode::ParagraphFocus => &self.paragraph_focus_keymap,
+                    Mode::Focus => &self.focus_keymap,
                     Mode::Visual => &self.visual_keymap,
                 };
                 self.input.handle(keymap, chord)
@@ -431,54 +379,22 @@ impl App {
                 };
             }
             Command::Cancel => return Effects::redraw(),
-            Command::CaretFocusEnter => return self.enter_caret_focus(),
-            Command::CaretFocusExit => {
+            Command::FocusEnterChar => return self.enter_focus(Scope::Char),
+            Command::FocusEnterWord => return self.enter_focus(Scope::Word),
+            Command::FocusEnterLine => return self.enter_focus(Scope::Line),
+            Command::FocusEnterSentence => return self.enter_focus(Scope::Sentence),
+            Command::FocusEnterParagraph => return self.enter_focus(Scope::Paragraph),
+            Command::FocusExit => {
                 self.mode = Mode::Normal;
                 return Effects::redraw();
             }
-            Command::CaretFocusLeft => return self.caret_move(Dir::Left, count),
-            Command::CaretFocusRight => return self.caret_move(Dir::Right, count),
-            Command::CaretFocusUp => return self.caret_move(Dir::Up, count),
-            Command::CaretFocusDown => return self.caret_move(Dir::Down, count),
-            Command::CaretFocusNextWord => {
-                return self.caret_word_move(WordMotion::NextStart, count)
-            }
-            Command::CaretFocusEndWord => return self.caret_word_move(WordMotion::End, count),
-            Command::CaretFocusPrevWord => {
-                return self.caret_word_move(WordMotion::PrevStart, count)
-            }
-            Command::LineFocusEnter => return self.enter_line_focus(),
-            Command::LineFocusExit => {
-                self.mode = Mode::Normal;
-                return Effects::redraw();
-            }
-            Command::LineFocusLeft => return self.line_move(Dir::Left, count),
-            Command::LineFocusRight => return self.line_move(Dir::Right, count),
-            Command::LineFocusUp => return self.line_move(Dir::Up, count),
-            Command::LineFocusDown => return self.line_move(Dir::Down, count),
-            Command::WordFocusEnter => return self.enter_word_focus(),
-            Command::WordFocusExit => {
-                self.mode = Mode::Normal;
-                return Effects::redraw();
-            }
-            Command::WordFocusLeft => return self.word_move(Dir::Left, count),
-            Command::WordFocusRight => return self.word_move(Dir::Right, count),
-            Command::WordFocusUp => return self.word_move(Dir::Up, count),
-            Command::WordFocusDown => return self.word_move(Dir::Down, count),
-            Command::SentenceFocusEnter => return self.enter_sentence_focus(),
-            Command::SentenceFocusExit => {
-                self.mode = Mode::Normal;
-                return Effects::redraw();
-            }
-            Command::SentenceFocusNext => return self.sentence_move(true, count),
-            Command::SentenceFocusPrev => return self.sentence_move(false, count),
-            Command::ParagraphFocusEnter => return self.enter_paragraph_focus(),
-            Command::ParagraphFocusExit => {
-                self.mode = Mode::Normal;
-                return Effects::redraw();
-            }
-            Command::ParagraphFocusNext => return self.paragraph_move(true, count),
-            Command::ParagraphFocusPrev => return self.paragraph_move(false, count),
+            Command::FocusLeft => return self.focus_move(Dir::Left, count),
+            Command::FocusRight => return self.focus_move(Dir::Right, count),
+            Command::FocusUp => return self.focus_move(Dir::Up, count),
+            Command::FocusDown => return self.focus_move(Dir::Down, count),
+            Command::FocusNextWord => return self.focus_word_move(WordMotion::NextStart, count),
+            Command::FocusEndWord => return self.focus_word_move(WordMotion::End, count),
+            Command::FocusPrevWord => return self.focus_word_move(WordMotion::PrevStart, count),
             Command::VisualEnter => return self.enter_visual(None),
             Command::VisualEnterChar => return self.enter_visual(Some(Scope::Char)),
             Command::VisualEnterWord => return self.enter_visual(Some(Scope::Word)),
@@ -539,35 +455,19 @@ impl App {
             Command::Quit
             | Command::OpenFile
             | Command::Cancel
-            | Command::CaretFocusEnter
-            | Command::CaretFocusExit
-            | Command::CaretFocusLeft
-            | Command::CaretFocusRight
-            | Command::CaretFocusUp
-            | Command::CaretFocusDown
-            | Command::CaretFocusNextWord
-            | Command::CaretFocusEndWord
-            | Command::CaretFocusPrevWord
-            | Command::LineFocusEnter
-            | Command::LineFocusExit
-            | Command::LineFocusLeft
-            | Command::LineFocusRight
-            | Command::LineFocusUp
-            | Command::LineFocusDown
-            | Command::WordFocusEnter
-            | Command::WordFocusExit
-            | Command::WordFocusLeft
-            | Command::WordFocusRight
-            | Command::WordFocusUp
-            | Command::WordFocusDown
-            | Command::SentenceFocusEnter
-            | Command::SentenceFocusExit
-            | Command::SentenceFocusNext
-            | Command::SentenceFocusPrev
-            | Command::ParagraphFocusEnter
-            | Command::ParagraphFocusExit
-            | Command::ParagraphFocusNext
-            | Command::ParagraphFocusPrev
+            | Command::FocusEnterChar
+            | Command::FocusEnterWord
+            | Command::FocusEnterLine
+            | Command::FocusEnterSentence
+            | Command::FocusEnterParagraph
+            | Command::FocusExit
+            | Command::FocusLeft
+            | Command::FocusRight
+            | Command::FocusUp
+            | Command::FocusDown
+            | Command::FocusNextWord
+            | Command::FocusPrevWord
+            | Command::FocusEndWord
             | Command::VisualEnter
             | Command::VisualEnterChar
             | Command::VisualEnterWord
@@ -594,9 +494,9 @@ impl App {
             | Command::VisualOtherSentence
             | Command::VisualOtherParagraph => unreachable!("handled above"),
         }
-        // In caret focus mode, scroll and page jumps carry the caret to the
-        // newly visible content; zoom commands leave it where it is.
-        let moves_caret = matches!(
+        // In focus mode, scroll and page jumps carry the highlight to the newly
+        // visible content; zoom commands leave it where it is.
+        let moves_focus = matches!(
             command,
             Command::ScrollHalfPageDown
                 | Command::ScrollHalfPageUp
@@ -607,20 +507,8 @@ impl App {
                 | Command::GotoFirstPage
                 | Command::GotoLastPage
         );
-        if self.mode == Mode::CaretFocus && moves_caret {
-            self.reposition_caret_to_viewport();
-        }
-        if self.mode == Mode::LineFocus && moves_caret {
-            self.reposition_line_to_viewport();
-        }
-        if self.mode == Mode::WordFocus && moves_caret {
-            self.reposition_word_to_viewport();
-        }
-        if self.mode == Mode::SentenceFocus && moves_caret {
-            self.reposition_sentence_to_viewport();
-        }
-        if self.mode == Mode::ParagraphFocus && moves_caret {
-            self.reposition_paragraph_to_viewport();
+        if self.mode == Mode::Focus && moves_focus {
+            self.reposition_focus_to_viewport();
         }
         self.save_position();
         Effects::redraw()
@@ -663,14 +551,10 @@ impl App {
         Ok(session.doc.page_text(page)?)
     }
 
-    // ---- Caret navigation ----------------------------------------------
+    // ---- Content navigation primitives ---------------------------------
 
     pub fn mode(&self) -> Mode {
         self.mode
-    }
-
-    pub fn caret(&self) -> Option<Caret> {
-        self.caret
     }
 
     /// Ensure page `page`'s navigable content is extracted and cached.
@@ -736,98 +620,6 @@ impl App {
     /// Last page strictly before `before` with content.
     fn prev_content_page(&mut self, before: usize) -> Option<usize> {
         (0..before).rev().find(|&p| self.page_line_count(p) > 0)
-    }
-
-    fn enter_caret_focus(&mut self) -> Effects {
-        if self.session.is_none() {
-            return Effects::default();
-        }
-        self.mode = Mode::CaretFocus;
-        // A focus mode and a selection are mutually exclusive.
-        self.visual = None;
-        self.visual_span = None;
-        if self.caret.is_none() {
-            let start = self.current_page();
-            if let Some(page) = self.content_page_from(start) {
-                let caret = Caret {
-                    page,
-                    line: 0,
-                    cell: 0,
-                };
-                self.caret = Some(caret);
-                self.update_goal_x(caret);
-            }
-        }
-        self.ensure_caret_visible();
-        self.save_position();
-        Effects::redraw()
-    }
-
-    fn caret_move(&mut self, dir: Dir, count: Option<u32>) -> Effects {
-        if self.session.is_none() {
-            return Effects::default();
-        }
-        // No caret yet (e.g. entered on an empty document): try to place one.
-        let Some(mut caret) = self.caret else {
-            return self.enter_caret_focus();
-        };
-        let steps = count.unwrap_or(1).max(1);
-        let goal_x = self.caret_goal_x;
-        let goal_y = self.line_goal_y;
-        for _ in 0..steps {
-            if !self.step_scope(&mut caret, Scope::Char, dir, goal_x, goal_y) {
-                break; // reached a document edge
-            }
-        }
-        self.caret = Some(caret);
-        // Horizontal motion sets a new goal column; vertical motion keeps it.
-        if matches!(dir, Dir::Left | Dir::Right) {
-            self.update_goal_x(caret);
-        }
-        self.ensure_caret_visible();
-        self.save_position();
-        Effects::redraw()
-    }
-
-    fn caret_word_move(&mut self, motion: WordMotion, count: Option<u32>) -> Effects {
-        if self.session.is_none() {
-            return Effects::default();
-        }
-        let Some(mut caret) = self.caret else {
-            return self.enter_caret_focus();
-        };
-        let steps = count.unwrap_or(1).max(1);
-        for _ in 0..steps {
-            let moved = match motion {
-                WordMotion::NextStart => self.step_next_word_start(&mut caret),
-                WordMotion::End => self.step_word_end(&mut caret),
-                WordMotion::PrevStart => self.step_prev_word_start(&mut caret),
-            };
-            if !moved {
-                break;
-            }
-        }
-        self.caret = Some(caret);
-        self.update_goal_x(caret);
-        self.ensure_caret_visible();
-        self.save_position();
-        Effects::redraw()
-    }
-
-    /// After a scroll or page jump in caret focus mode, move the caret to the
-    /// top-most content line now visible, keeping its goal column. Unlike caret
-    /// motion this does *not* scroll the view back, so the caret follows the
-    /// scroll rather than fighting it.
-    fn reposition_caret_to_viewport(&mut self) {
-        let Some(session) = self.session.as_ref() else {
-            return;
-        };
-        let view_top = session.view.scroll().1;
-        let goal_x = self.caret_goal_x;
-        if let Some((page, line)) = self.topmost_visible_line(view_top) {
-            let cell = self.nearest_cell(page, line, goal_x);
-            self.caret = Some(Caret { page, line, cell });
-        }
     }
 
     /// The first content line whose bottom edge is at or below `view_top`
@@ -1081,128 +873,12 @@ impl App {
         true
     }
 
-    fn update_goal_x(&mut self, caret: Caret) {
-        if let Some(r) = self.cell_rect(caret.page, caret.line, caret.cell) {
-            self.caret_goal_x = (r.x0 + r.x1) / 2.0;
-        }
-    }
-
-    /// Scroll the minimum amount needed to keep the caret on screen.
-    fn ensure_caret_visible(&mut self) {
-        let Some(caret) = self.caret else {
-            return;
-        };
-        let Some(rect) = self.cell_rect(caret.page, caret.line, caret.cell) else {
-            return;
-        };
-        let Some(session) = self.session.as_mut() else {
-            return;
-        };
-        let Some(page) = session.view.layout().page(caret.page) else {
-            return;
-        };
-        let (px, py) = (page.x, page.y);
-        session.view.scroll_doc_rect_into_view(
-            px + rect.x0,
-            py + rect.y0,
-            px + rect.x1,
-            py + rect.y1,
-        );
-    }
-
-    /// The caret's rectangle in canvas pixels, with its page. `None` outside
-    /// caret focus mode or when no caret is placed. The shell paints this overlay.
-    pub fn caret_screen_rect(&self) -> Option<(usize, ScreenRect)> {
-        if self.mode != Mode::CaretFocus {
-            return None;
-        }
-        let caret = self.caret?;
-        let session = self.session.as_ref()?;
-        let cell = session
-            .content
-            .get(&caret.page)?
-            .get(caret.line)?
-            .cells
-            .get(caret.cell)?;
-        let b = cell.bbox;
-        session
-            .view
-            .page_rect_to_screen(caret.page, b.x0, b.y0, b.x1, b.y1)
-            .map(|rect| (caret.page, rect))
-    }
-
-    // ---- Line focus navigation -----------------------------------------
-
-    pub fn line_mark(&self) -> Option<LineMark> {
-        self.line_mark
-    }
+    // ---- Line motion ---------------------------------------------------
 
     /// Bounding box of a content line in page points (`None` if absent).
     fn line_bbox(&mut self, page: usize, line: usize) -> Option<Rect> {
         self.ensure_content(page);
         self.content(page).get(line).map(|l| l.bbox)
-    }
-
-    /// Update the remembered goal row from the marked line's vertical center.
-    fn update_goal_y(&mut self, mark: LineMark) {
-        if let Some(b) = self.line_bbox(mark.page, mark.line) {
-            self.line_goal_y = (b.y0 + b.y1) / 2.0;
-        }
-    }
-
-    fn enter_line_focus(&mut self) -> Effects {
-        if self.session.is_none() {
-            return Effects::default();
-        }
-        self.mode = Mode::LineFocus;
-        // A focus mode and a selection are mutually exclusive.
-        self.visual = None;
-        self.visual_span = None;
-        if self.line_mark.is_none() {
-            let start = self.current_page();
-            if let Some(page) = self.content_page_from(start) {
-                let mark = LineMark { page, line: 0 };
-                self.line_mark = Some(mark);
-                self.update_goal_y(mark);
-            }
-        }
-        self.ensure_line_visible();
-        self.save_position();
-        Effects::redraw()
-    }
-
-    fn line_move(&mut self, dir: Dir, count: Option<u32>) -> Effects {
-        if self.session.is_none() {
-            return Effects::default();
-        }
-        let Some(mut mark) = self.line_mark else {
-            return self.enter_line_focus();
-        };
-        let steps = count.unwrap_or(1).max(1);
-        let goal_x = self.caret_goal_x;
-        let goal_y = self.line_goal_y;
-        let mut caret = Caret {
-            page: mark.page,
-            line: mark.line,
-            cell: 0,
-        };
-        for _ in 0..steps {
-            if !self.step_scope(&mut caret, Scope::Line, dir, goal_x, goal_y) {
-                break; // document edge, or single-column page for H/L
-            }
-        }
-        mark = LineMark {
-            page: caret.page,
-            line: caret.line,
-        };
-        self.line_mark = Some(mark);
-        // Vertical motion sets a new goal row; horizontal (column) motion keeps it.
-        if matches!(dir, Dir::Up | Dir::Down) {
-            self.update_goal_y(mark);
-        }
-        self.ensure_line_visible();
-        self.save_position();
-        Effects::redraw()
     }
 
     fn line_step_down(&mut self, mark: &mut LineMark) -> bool {
@@ -1270,62 +946,7 @@ impl App {
         true
     }
 
-    /// After a scroll or page jump in line focus mode, move the mark to the
-    /// top-most content line now visible, keeping its goal row.
-    fn reposition_line_to_viewport(&mut self) {
-        let Some(session) = self.session.as_ref() else {
-            return;
-        };
-        let view_top = session.view.scroll().1;
-        if let Some((page, line)) = self.topmost_visible_line(view_top) {
-            self.line_mark = Some(LineMark { page, line });
-        }
-    }
-
-    /// Scroll the minimum amount needed to keep the marked line on screen.
-    fn ensure_line_visible(&mut self) {
-        let Some(mark) = self.line_mark else {
-            return;
-        };
-        let Some(rect) = self.line_bbox(mark.page, mark.line) else {
-            return;
-        };
-        let Some(session) = self.session.as_mut() else {
-            return;
-        };
-        let Some(page) = session.view.layout().page(mark.page) else {
-            return;
-        };
-        let (px, py) = (page.x, page.y);
-        session.view.scroll_doc_rect_into_view(
-            px + rect.x0,
-            py + rect.y0,
-            px + rect.x1,
-            py + rect.y1,
-        );
-    }
-
-    /// The marked line's rectangle in canvas pixels, with its page. `None`
-    /// outside line focus mode or when no line is marked. The shell paints this.
-    pub fn line_screen_rect(&self) -> Option<(usize, ScreenRect)> {
-        if self.mode != Mode::LineFocus {
-            return None;
-        }
-        let mark = self.line_mark?;
-        let session = self.session.as_ref()?;
-        let line = session.content.get(&mark.page)?.get(mark.line)?;
-        let b = line.bbox;
-        session
-            .view
-            .page_rect_to_screen(mark.page, b.x0, b.y0, b.x1, b.y1)
-            .map(|rect| (mark.page, rect))
-    }
-
-    // ---- Word focus navigation -----------------------------------------
-
-    pub fn word_mark(&self) -> Option<WordMark> {
-        self.word_mark
-    }
+    // ---- Word motion ---------------------------------------------------
 
     /// Build a word-focus mark from a landed caret cell by expanding it to the
     /// full word run on that line (reusing the caret word-run helpers).
@@ -1350,79 +971,6 @@ impl App {
         }
     }
 
-    /// Update the remembered goal column from the marked word's first cell.
-    fn update_word_goal_x(&mut self, mark: WordMark) {
-        if let Some(r) = self.cell_rect(mark.page, mark.line, mark.start_cell) {
-            self.word_goal_x = (r.x0 + r.x1) / 2.0;
-        }
-    }
-
-    fn enter_word_focus(&mut self) -> Effects {
-        if self.session.is_none() {
-            return Effects::default();
-        }
-        self.mode = Mode::WordFocus;
-        // A focus mode and a selection are mutually exclusive.
-        self.visual = None;
-        self.visual_span = None;
-        if self.word_mark.is_none() {
-            let from_visible =
-                if let Some(view_top) = self.session.as_ref().map(|s| s.view.scroll().1) {
-                    self.topmost_visible_line(view_top)
-                        .map(|(page, line)| Caret {
-                            page,
-                            line,
-                            cell: 0,
-                        })
-                } else {
-                    None
-                };
-            let from = from_visible.or_else(|| {
-                let start = self.current_page();
-                self.content_page_from(start).map(|page| Caret {
-                    page,
-                    line: 0,
-                    cell: 0,
-                })
-            });
-            if let Some(target) = from.and_then(|from| self.next_word_target_from(from)) {
-                let mark = self.word_mark_from_caret(target);
-                self.word_mark = Some(mark);
-                self.update_word_goal_x(mark);
-            }
-        }
-        self.ensure_word_visible();
-        self.save_position();
-        Effects::redraw()
-    }
-
-    fn word_move(&mut self, dir: Dir, count: Option<u32>) -> Effects {
-        if self.session.is_none() {
-            return Effects::default();
-        }
-        let Some(mut mark) = self.word_mark else {
-            return self.enter_word_focus();
-        };
-        let steps = count.unwrap_or(1).max(1);
-        let goal_x = self.word_goal_x;
-        let goal_y = self.line_goal_y;
-        let mut caret = Self::word_mark_caret(mark);
-        for _ in 0..steps {
-            if !self.step_scope(&mut caret, Scope::Word, dir, goal_x, goal_y) {
-                break; // reached a document edge
-            }
-        }
-        mark = self.word_mark_from_caret(caret);
-        self.word_mark = Some(mark);
-        // Horizontal (word) motion sets a new goal column; vertical keeps it.
-        if matches!(dir, Dir::Left | Dir::Right) {
-            self.update_word_goal_x(mark);
-        }
-        self.ensure_word_visible();
-        self.save_position();
-        Effects::redraw()
-    }
-
     /// Move the mark one line up or down, landing on the word nearest `goal_x`.
     fn word_step_vertical(&mut self, mark: &mut WordMark, goal_x: f32, down: bool) -> bool {
         let mut caret = Self::word_mark_caret(*mark);
@@ -1438,114 +986,7 @@ impl App {
         true
     }
 
-    /// After a scroll or page jump in word focus mode, move the mark to the
-    /// first word of the top-most content line now visible.
-    fn reposition_word_to_viewport(&mut self) {
-        let Some(session) = self.session.as_ref() else {
-            return;
-        };
-        let view_top = session.view.scroll().1;
-        let goal_x = self.word_goal_x;
-        if let Some((page, line)) = self.topmost_visible_line(view_top) {
-            let cell = self.nearest_cell(page, line, goal_x);
-            let mark = self.word_mark_from_caret(Caret { page, line, cell });
-            self.word_mark = Some(mark);
-        }
-    }
-
-    /// Bounding box (page points) of the marked word's run, unioning its cells.
-    fn word_bbox(&mut self, mark: WordMark) -> Option<Rect> {
-        let start = self.cell_rect(mark.page, mark.line, mark.start_cell)?;
-        let end = self
-            .cell_rect(mark.page, mark.line, mark.end_cell)
-            .unwrap_or(start);
-        Some(Rect {
-            x0: start.x0.min(end.x0),
-            y0: start.y0.min(end.y0),
-            x1: start.x1.max(end.x1),
-            y1: start.y1.max(end.y1),
-        })
-    }
-
-    /// Scroll the minimum amount needed to keep the marked word on screen.
-    fn ensure_word_visible(&mut self) {
-        let Some(mark) = self.word_mark else {
-            return;
-        };
-        let Some(rect) = self.word_bbox(mark) else {
-            return;
-        };
-        let Some(session) = self.session.as_mut() else {
-            return;
-        };
-        let Some(page) = session.view.layout().page(mark.page) else {
-            return;
-        };
-        let (px, py) = (page.x, page.y);
-        session.view.scroll_doc_rect_into_view(
-            px + rect.x0,
-            py + rect.y0,
-            px + rect.x1,
-            py + rect.y1,
-        );
-    }
-
-    /// The marked word's rectangle in canvas pixels, with its page. `None`
-    /// outside word focus mode or when no word is marked. The shell paints this.
-    pub fn word_screen_rect(&self) -> Option<(usize, ScreenRect)> {
-        if self.mode != Mode::WordFocus {
-            return None;
-        }
-        let mark = self.word_mark?;
-        let session = self.session.as_ref()?;
-        let cells = &session.content.get(&mark.page)?.get(mark.line)?.cells;
-        let start = cells.get(mark.start_cell)?.bbox;
-        let end = cells.get(mark.end_cell).map_or(start, |c| c.bbox);
-        session
-            .view
-            .page_rect_to_screen(
-                mark.page,
-                start.x0.min(end.x0),
-                start.y0.min(end.y0),
-                start.x1.max(end.x1),
-                start.y1.max(end.y1),
-            )
-            .map(|rect| (mark.page, rect))
-    }
-
-    // ---- Shared focus-entry helper -------------------------------------
-
-    /// The caret a focus mode should start from: the top-most content line in
-    /// the viewport, falling back to the first content line of the document.
-    /// Shared by sentence and paragraph entry (mirrors the logic in
-    /// [`Self::enter_word_focus`]).
-    fn focus_entry_caret(&mut self) -> Option<Caret> {
-        let from_visible = if let Some(view_top) = self.session.as_ref().map(|s| s.view.scroll().1)
-        {
-            self.topmost_visible_line(view_top)
-                .map(|(page, line)| Caret {
-                    page,
-                    line,
-                    cell: 0,
-                })
-        } else {
-            None
-        };
-        from_visible.or_else(|| {
-            let start = self.current_page();
-            self.content_page_from(start).map(|page| Caret {
-                page,
-                line: 0,
-                cell: 0,
-            })
-        })
-    }
-
-    // ---- Sentence focus navigation -------------------------------------
-
-    pub fn sentence_mark(&self) -> Option<SentenceMark> {
-        self.sentence_mark
-    }
+    // ---- Sentence motion -----------------------------------------------
 
     /// One cell forward/backward but only within the same page (sentences never
     /// straddle a page). Thin filters over [`Self::next_cell`]/[`Self::prev_cell`].
@@ -1704,53 +1145,6 @@ impl App {
         Some(self.sentence_run_start(cur))
     }
 
-    fn enter_sentence_focus(&mut self) -> Effects {
-        if self.session.is_none() {
-            return Effects::default();
-        }
-        self.mode = Mode::SentenceFocus;
-        // A focus mode and a selection are mutually exclusive.
-        self.visual = None;
-        self.visual_span = None;
-        if self.sentence_mark.is_none() {
-            if let Some(from) = self.focus_entry_caret() {
-                let mark = self.sentence_mark_from_caret(from);
-                self.sentence_mark = Some(mark);
-            }
-        }
-        self.ensure_sentence_visible();
-        self.save_position();
-        Effects::redraw()
-    }
-
-    fn sentence_move(&mut self, forward: bool, count: Option<u32>) -> Effects {
-        if self.session.is_none() {
-            return Effects::default();
-        }
-        let Some(mut mark) = self.sentence_mark else {
-            return self.enter_sentence_focus();
-        };
-        let steps = count.unwrap_or(1).max(1);
-        // Sentences have no second axis, so the shared engine collapses all
-        // four directions to previous/next; Right stands for forward.
-        let dir = if forward { Dir::Right } else { Dir::Left };
-        let mut caret = Caret {
-            page: mark.page,
-            line: mark.start_line,
-            cell: mark.start_cell,
-        };
-        for _ in 0..steps {
-            if !self.step_scope(&mut caret, Scope::Sentence, dir, 0.0, 0.0) {
-                break; // reached a document edge
-            }
-        }
-        mark = self.sentence_mark_from_caret(caret);
-        self.sentence_mark = Some(mark);
-        self.ensure_sentence_visible();
-        self.save_position();
-        Effects::redraw()
-    }
-
     fn sentence_step_next(&mut self, mark: &mut SentenceMark) -> bool {
         let caret = Caret {
             page: mark.page,
@@ -1795,111 +1189,7 @@ impl App {
         false
     }
 
-    /// After a scroll or page jump in sentence focus mode, move the mark to the
-    /// sentence containing the top-most content line now visible.
-    fn reposition_sentence_to_viewport(&mut self) {
-        let Some(session) = self.session.as_ref() else {
-            return;
-        };
-        let view_top = session.view.scroll().1;
-        if let Some((page, line)) = self.topmost_visible_line(view_top) {
-            let mark = self.sentence_mark_from_caret(Caret {
-                page,
-                line,
-                cell: 0,
-            });
-            self.sentence_mark = Some(mark);
-        }
-    }
-
-    /// Bounding box (page points) spanning the marked sentence, for scrolling.
-    fn sentence_bbox(&mut self, mark: SentenceMark) -> Option<Rect> {
-        let start = self.cell_rect(mark.page, mark.start_line, mark.start_cell)?;
-        let end = self
-            .cell_rect(mark.page, mark.end_line, mark.end_cell)
-            .unwrap_or(start);
-        Some(Rect {
-            x0: start.x0.min(end.x0),
-            y0: start.y0.min(end.y0),
-            x1: start.x1.max(end.x1),
-            y1: start.y1.max(end.y1),
-        })
-    }
-
-    fn ensure_sentence_visible(&mut self) {
-        let Some(mark) = self.sentence_mark else {
-            return;
-        };
-        let Some(rect) = self.sentence_bbox(mark) else {
-            return;
-        };
-        let Some(session) = self.session.as_mut() else {
-            return;
-        };
-        let Some(page) = session.view.layout().page(mark.page) else {
-            return;
-        };
-        let (px, py) = (page.x, page.y);
-        session.view.scroll_doc_rect_into_view(
-            px + rect.x0,
-            py + rect.y0,
-            px + rect.x1,
-            py + rect.y1,
-        );
-    }
-
-    /// The marked sentence as one screen rectangle per spanned line (a
-    /// text-selection shape): the first line runs from the sentence start to the
-    /// line end, middle lines are full, the last line runs from the line start to
-    /// the sentence end. `None` outside sentence focus mode. The shell paints these.
-    pub fn sentence_screen_rects(&self) -> Option<(usize, Vec<ScreenRect>)> {
-        if self.mode != Mode::SentenceFocus {
-            return None;
-        }
-        let mark = self.sentence_mark?;
-        let session = self.session.as_ref()?;
-        let lines = session.content.get(&mark.page)?;
-        let mut rects = Vec::new();
-        for line_idx in mark.start_line..=mark.end_line {
-            let Some(line) = lines.get(line_idx) else {
-                continue;
-            };
-            if line.cells.is_empty() {
-                continue;
-            }
-            let (x0, x1) = if mark.start_line == mark.end_line {
-                let s = line.cells.get(mark.start_cell)?.bbox;
-                let e = line.cells.get(mark.end_cell).map_or(s, |c| c.bbox);
-                (s.x0.min(e.x0), s.x1.max(e.x1))
-            } else if line_idx == mark.start_line {
-                let s = line.cells.get(mark.start_cell)?.bbox;
-                (s.x0, line.bbox.x1)
-            } else if line_idx == mark.end_line {
-                let e = line.cells.get(mark.end_cell)?.bbox;
-                (line.bbox.x0, e.x1)
-            } else {
-                (line.bbox.x0, line.bbox.x1)
-            };
-            if let Some(rect) =
-                session
-                    .view
-                    .page_rect_to_screen(mark.page, x0, line.bbox.y0, x1, line.bbox.y1)
-            {
-                rects.push(rect);
-            }
-        }
-        if rects.is_empty() {
-            None
-        } else {
-            Some((mark.page, rects))
-        }
-    }
-
-    // ---- Paragraph focus navigation ------------------------------------
-
-    pub fn paragraph_mark(&self) -> Option<ParagraphMark> {
-        self.paragraph_mark
-    }
+    // ---- Paragraph motion ----------------------------------------------
 
     /// The paragraph (segment of lines) that contains `line` on `page`.
     fn paragraph_mark_containing(&mut self, page: usize, line: usize) -> Option<ParagraphMark> {
@@ -1913,52 +1203,6 @@ impl App {
                 start_line: s,
                 end_line: e,
             })
-    }
-
-    fn enter_paragraph_focus(&mut self) -> Effects {
-        if self.session.is_none() {
-            return Effects::default();
-        }
-        self.mode = Mode::ParagraphFocus;
-        // A focus mode and a selection are mutually exclusive.
-        self.visual = None;
-        self.visual_span = None;
-        if self.paragraph_mark.is_none() {
-            if let Some(from) = self.focus_entry_caret() {
-                self.paragraph_mark = self.paragraph_mark_containing(from.page, from.line);
-            }
-        }
-        self.ensure_paragraph_visible();
-        self.save_position();
-        Effects::redraw()
-    }
-
-    fn paragraph_move(&mut self, forward: bool, count: Option<u32>) -> Effects {
-        if self.session.is_none() {
-            return Effects::default();
-        }
-        let Some(mut mark) = self.paragraph_mark else {
-            return self.enter_paragraph_focus();
-        };
-        let steps = count.unwrap_or(1).max(1);
-        let dir = if forward { Dir::Right } else { Dir::Left };
-        let mut caret = Caret {
-            page: mark.page,
-            line: mark.start_line,
-            cell: 0,
-        };
-        for _ in 0..steps {
-            if !self.step_scope(&mut caret, Scope::Paragraph, dir, 0.0, 0.0) {
-                break; // reached a document edge
-            }
-        }
-        mark = self
-            .paragraph_mark_containing(caret.page, caret.line)
-            .unwrap_or(mark);
-        self.paragraph_mark = Some(mark);
-        self.ensure_paragraph_visible();
-        self.save_position();
-        Effects::redraw()
     }
 
     fn paragraph_step_next(&mut self, mark: &mut ParagraphMark) -> bool {
@@ -2023,90 +1267,43 @@ impl App {
         false
     }
 
-    /// After a scroll or page jump in paragraph focus mode, move the mark to the
-    /// paragraph containing the top-most content line now visible.
-    fn reposition_paragraph_to_viewport(&mut self) {
-        let Some(session) = self.session.as_ref() else {
-            return;
-        };
-        let view_top = session.view.scroll().1;
-        if let Some((page, line)) = self.topmost_visible_line(view_top) {
-            self.paragraph_mark = self.paragraph_mark_containing(page, line);
-        }
-    }
+    // ---- Shared scope machinery ----------------------------------------
+    //
+    // Focus and visual are the same idea at different arities: focus holds one
+    // position, visual holds two. Everything that depends on the *scope* rather
+    // than on how many positions there are lives here, so a scope cannot mean
+    // one thing in one mode and something else in the other.
 
-    /// Bounding box (page points) of the marked paragraph's lines.
-    fn paragraph_bbox(&mut self, mark: ParagraphMark) -> Option<Rect> {
-        let start = self.line_bbox(mark.page, mark.start_line)?;
-        let end = self.line_bbox(mark.page, mark.end_line).unwrap_or(start);
-        Some(Rect {
-            x0: start.x0.min(end.x0),
-            y0: start.y0.min(end.y0),
-            x1: start.x1.max(end.x1),
-            y1: start.y1.max(end.y1),
+    /// The caret a highlight should start from when there is no remembered
+    /// position: the top-most content line in the viewport, falling back to the
+    /// first content line of the document.
+    fn entry_caret(&mut self) -> Option<Caret> {
+        let from_visible = if let Some(view_top) = self.session.as_ref().map(|s| s.view.scroll().1)
+        {
+            self.topmost_visible_line(view_top)
+                .map(|(page, line)| Caret {
+                    page,
+                    line,
+                    cell: 0,
+                })
+        } else {
+            None
+        };
+        from_visible.or_else(|| {
+            let start = self.current_page();
+            self.content_page_from(start).map(|page| Caret {
+                page,
+                line: 0,
+                cell: 0,
+            })
         })
-    }
-
-    fn ensure_paragraph_visible(&mut self) {
-        let Some(mark) = self.paragraph_mark else {
-            return;
-        };
-        let Some(rect) = self.paragraph_bbox(mark) else {
-            return;
-        };
-        let Some(session) = self.session.as_mut() else {
-            return;
-        };
-        let Some(page) = session.view.layout().page(mark.page) else {
-            return;
-        };
-        let (px, py) = (page.x, page.y);
-        session.view.scroll_doc_rect_into_view(
-            px + rect.x0,
-            py + rect.y0,
-            px + rect.x1,
-            py + rect.y1,
-        );
-    }
-
-    /// The marked paragraph's bounding rectangle in canvas pixels, with its page.
-    /// `None` outside paragraph focus mode. The shell paints this overlay.
-    pub fn paragraph_screen_rect(&self) -> Option<(usize, ScreenRect)> {
-        if self.mode != Mode::ParagraphFocus {
-            return None;
-        }
-        let mark = self.paragraph_mark?;
-        let session = self.session.as_ref()?;
-        let lines = session.content.get(&mark.page)?;
-        let start = lines.get(mark.start_line)?.bbox;
-        let end = lines.get(mark.end_line).map_or(start, |l| l.bbox);
-        session
-            .view
-            .page_rect_to_screen(
-                mark.page,
-                start.x0.min(end.x0),
-                start.y0.min(end.y0),
-                start.x1.max(end.x1),
-                start.y1.max(end.y1),
-            )
-            .map(|rect| (mark.page, rect))
-    }
-
-    // ---- Visual mode ----------------------------------------------------
-
-    pub fn visual_selection(&self) -> Option<VisualSelection> {
-        self.visual
-    }
-
-    /// The selection resolved to an inclusive, document-order cell range.
-    pub fn visual_span(&self) -> Option<(Caret, Caret)> {
-        self.visual_span
     }
 
     /// The inclusive cell range `at` occupies under `scope`.
     ///
-    /// This is the whole of the per-scope behavior: everything else in visual
-    /// mode is scope-independent.
+    /// This is the whole of the per-scope highlight behavior. A focus highlight
+    /// is the degenerate case of a selection — both ends at `at` — which is why
+    /// one function serves both modes.
     fn scope_span(&mut self, at: Caret, scope: Scope) -> (Caret, Caret) {
         match scope {
             Scope::Char => (at, at),
@@ -2137,174 +1334,38 @@ impl App {
         }
     }
 
-    /// Recompute the cached span from the two ends. Each end is expanded by its
-    /// own scope, then the outermost edges win — so the ends crossing needs no
-    /// special case, and swapping them cannot change what is drawn.
-    fn refresh_visual_span(&mut self) {
-        let Some(sel) = self.visual else {
-            self.visual_span = None;
-            return;
-        };
-        let (a0, a1) = self.scope_span(sel.anchor, sel.anchor_scope);
-        let (h0, h1) = self.scope_span(sel.head, sel.head_scope);
-        self.visual_span = Some((a0.min(h0), a1.max(h1)));
-    }
-
-    /// Update the remembered goal row from the head's line, for line-scope
-    /// column motion.
-    fn update_visual_goal_y(&mut self, head: Caret) {
-        if let Some(b) = self.line_bbox(head.page, head.line) {
-            self.visual_goal_y = (b.y0 + b.y1) / 2.0;
-        }
-    }
-
-    /// Update the remembered goal column from the head's cell.
-    fn update_visual_goal_x(&mut self, head: Caret) {
-        if let Some(r) = self.cell_rect(head.page, head.line, head.cell) {
-            self.visual_goal_x = (r.x0 + r.x1) / 2.0;
-        }
-    }
-
-    /// Where a fresh selection starts: the current mode's mark, else the
-    /// topmost visible line.
-    fn visual_entry_caret(&mut self) -> Option<Caret> {
-        let from_mark = match self.mode {
-            Mode::CaretFocus => self.caret,
-            Mode::LineFocus => self.line_mark.map(|m| Caret {
-                page: m.page,
-                line: m.line,
-                cell: 0,
-            }),
-            Mode::WordFocus => self.word_mark.map(Self::word_mark_caret),
-            Mode::SentenceFocus => self.sentence_mark.map(|m| Caret {
-                page: m.page,
-                line: m.start_line,
-                cell: m.start_cell,
-            }),
-            Mode::ParagraphFocus => self.paragraph_mark.map(|m| Caret {
-                page: m.page,
-                line: m.start_line,
-                cell: 0,
-            }),
-            Mode::Normal | Mode::Visual => None,
-        };
-        from_mark.or_else(|| self.focus_entry_caret())
-    }
-
-    /// Enter visual mode. `scope = None` inherits the current mode's
-    /// granularity (`v` from word focus selects word-wise).
-    fn enter_visual(&mut self, scope: Option<Scope>) -> Effects {
-        if self.session.is_none() {
-            return Effects::default();
-        }
-        // Re-entering visual mode collapses the selection onto the head.
-        if let Some(mut sel) = self.visual.filter(|_| self.mode == Mode::Visual) {
-            sel.anchor = sel.head;
-            if let Some(scope) = scope {
-                sel.anchor_scope = scope;
-                sel.head_scope = scope;
-            } else {
-                sel.anchor_scope = sel.head_scope;
-            }
-            self.visual = Some(sel);
-            self.refresh_visual_span();
-            return Effects::redraw();
-        }
-        let scope = scope.unwrap_or_else(|| Scope::from_mode(self.mode));
-        let Some(at) = self.visual_entry_caret() else {
-            return Effects::default();
-        };
-        self.visual = Some(VisualSelection {
-            anchor: at,
-            anchor_scope: scope,
-            head: at,
-            head_scope: scope,
-            return_mode: self.mode,
-        });
-        self.mode = Mode::Visual;
-        self.update_visual_goal_x(at);
-        self.refresh_visual_span();
-        self.ensure_visual_head_visible();
-        self.save_position();
-        Effects::redraw()
-    }
-
-    /// Leave visual mode, restoring the mode it was entered from and carrying
-    /// the head into that mode's mark, so the caret does not appear to jump
-    /// back to where the selection started.
-    fn exit_visual(&mut self) -> Effects {
-        let Some(sel) = self.visual else {
-            self.mode = Mode::Normal;
-            return Effects::redraw();
-        };
-        let head = sel.head;
-        self.mode = sel.return_mode;
-        match self.mode {
-            Mode::CaretFocus => self.caret = Some(head),
-            Mode::LineFocus => {
-                self.line_mark = Some(LineMark {
-                    page: head.page,
-                    line: head.line,
-                })
-            }
-            Mode::WordFocus => self.word_mark = Some(self.word_mark_from_caret(head)),
-            Mode::SentenceFocus => self.sentence_mark = Some(self.sentence_mark_from_caret(head)),
-            Mode::ParagraphFocus => {
-                self.paragraph_mark = self.paragraph_mark_containing(head.page, head.line)
-            }
-            Mode::Normal | Mode::Visual => {}
-        }
-        self.visual = None;
-        self.visual_span = None;
-        self.save_position();
-        Effects::redraw()
-    }
-
-    /// `o`: make the other end the one motions move. Purely a state change —
-    /// the rendered selection is unaffected.
-    fn visual_swap_ends(&mut self) -> Effects {
-        let Some(mut sel) = self.visual else {
-            return Effects::default();
-        };
-        sel.swap_ends();
-        self.visual = Some(sel);
-        // The goal column belongs to whichever end is moving, so it has to
-        // follow the swap or the next `j`/`k` jumps to the old head's column.
-        self.update_visual_goal_x(sel.head);
-        self.ensure_visual_head_visible();
-        Effects::redraw()
-    }
-
-    /// Set the active end's granularity, optionally switching ends first
-    /// (`vw` vs `ow`).
-    fn set_head_scope(&mut self, scope: Scope, swap_first: bool) -> Effects {
-        let Some(mut sel) = self.visual else {
-            return Effects::default();
-        };
-        if swap_first {
-            sel.swap_ends();
-        }
-        sel.head_scope = scope;
-        self.visual = Some(sel);
-        if swap_first {
-            self.update_visual_goal_x(sel.head);
-        }
-        self.refresh_visual_span();
-        self.ensure_visual_head_visible();
-        Effects::redraw()
-    }
-
-    /// Move the head by `count` units of its own scope.
+    /// Move `caret` to the canonical start of the unit it lies in under
+    /// `scope`.
     ///
-    /// Char and word scope move line-wise on `j`/`k`; the larger scopes are a
-    /// linear sequence, so all four directions collapse to previous/next —
-    /// matching how the corresponding focus modes behave.
+    /// Applied when a position crosses into a different scope, so a caret
+    /// carried over from another granularity lands on a real unit rather than
+    /// mid-word or on whitespace. Motion itself does not need this: the
+    /// steppers already land on unit starts.
+    fn snap_to_scope(&mut self, at: Caret, scope: Scope) -> Caret {
+        match scope {
+            Scope::Char => at,
+            Scope::Word => {
+                let target = self.next_word_target_from(at).unwrap_or(at);
+                self.word_run_start(target)
+            }
+            Scope::Line => Caret { cell: 0, ..at },
+            Scope::Sentence => self.sentence_run_start(at),
+            Scope::Paragraph => match self.paragraph_mark_containing(at.page, at.line) {
+                Some(p) => Caret {
+                    page: at.page,
+                    line: p.start_line,
+                    cell: 0,
+                },
+                None => at,
+            },
+        }
+    }
+
     /// Move `caret` one unit of `scope` in `dir`. Returns false at a document
     /// edge, so callers can stop early on a repeated motion.
     ///
-    /// This is the single per-scope motion table: focus and visual share it so
-    /// a scope cannot mean one thing in one mode and something else in the
-    /// other. Note two deliberate asymmetries, both pre-existing:
+    /// This is the single per-scope motion table. Note two deliberate
+    /// asymmetries, both pre-existing:
     ///   * line scope uses `h`/`l` for *column* jumps on multi-column pages
     ///     (keyed on the goal row) and `j`/`k` for lines,
     ///   * sentence and paragraph have no second axis, so all four directions
@@ -2386,6 +1447,427 @@ impl App {
         }
     }
 
+    /// A span's bounding box in page points, for scrolling it into view.
+    /// `None` when the span's page has no content extracted.
+    ///
+    /// Multi-line spans give one box covering every line, which is what
+    /// `scroll_doc_rect_into_view` wants: it scrolls the minimum amount, so a
+    /// span taller than the viewport simply pins its top edge.
+    fn span_bbox(&mut self, start: Caret, end: Caret) -> Option<Rect> {
+        let first = self.cell_rect(start.page, start.line, start.cell)?;
+        let last = self
+            .cell_rect(end.page, end.line, end.cell)
+            .unwrap_or(first);
+        Some(Rect {
+            x0: first.x0.min(last.x0),
+            y0: first.y0.min(last.y0),
+            x1: first.x1.max(last.x1),
+            y1: first.y1.max(last.y1),
+        })
+    }
+
+    /// Scroll the minimum amount needed to bring a page-space rectangle on
+    /// `page` into view.
+    fn scroll_page_rect_into_view(&mut self, page: usize, rect: Rect) {
+        let Some(session) = &mut self.session else {
+            return;
+        };
+        let Some(page) = session.view.layout().page(page) else {
+            return;
+        };
+        let (px, py) = (page.x, page.y);
+        session.view.scroll_doc_rect_into_view(
+            px + rect.x0,
+            py + rect.y0,
+            px + rect.x1,
+            py + rect.y1,
+        );
+    }
+
+    /// An inclusive cell range as one screen rectangle per spanned line,
+    /// restricted to the pages currently on screen.
+    ///
+    /// Walking the viewport rather than the span keeps this O(visible lines)
+    /// however long the span is, and avoids forcing content extraction for
+    /// pages the reader cannot see.
+    fn span_screen_rects(&self, start: Caret, end: Caret) -> Option<Vec<ScreenRect>> {
+        let session = self.session.as_ref()?;
+        let mut rects = Vec::new();
+        for (page, _) in session.view.visible_pages() {
+            if page < start.page || page > end.page {
+                continue;
+            }
+            // Content is loaded lazily; a page we have not visited yet simply
+            // has nothing to draw.
+            let Some(lines) = session.content.get(&page) else {
+                continue;
+            };
+            let first_line = if page == start.page { start.line } else { 0 };
+            let last_line = if page == end.page {
+                end.line
+            } else {
+                lines.len().saturating_sub(1)
+            };
+            for line_idx in first_line..=last_line {
+                let Some(line) = lines.get(line_idx) else {
+                    continue;
+                };
+                if line.cells.is_empty() {
+                    continue;
+                }
+                let at_start = page == start.page && line_idx == start.line;
+                let at_end = page == end.page && line_idx == end.line;
+                let (x0, x1) = match (at_start, at_end) {
+                    (true, true) => {
+                        let s = line.cells.get(start.cell)?.bbox;
+                        let e = line.cells.get(end.cell).map_or(s, |c| c.bbox);
+                        (s.x0.min(e.x0), s.x1.max(e.x1))
+                    }
+                    (true, false) => {
+                        let s = line.cells.get(start.cell)?.bbox;
+                        (s.x0, line.bbox.x1)
+                    }
+                    (false, true) => {
+                        let e = line.cells.get(end.cell)?.bbox;
+                        (line.bbox.x0, e.x1)
+                    }
+                    (false, false) => (line.bbox.x0, line.bbox.x1),
+                };
+                if let Some(rect) =
+                    session
+                        .view
+                        .page_rect_to_screen(page, x0, line.bbox.y0, x1, line.bbox.y1)
+                {
+                    rects.push(rect);
+                }
+            }
+        }
+        if rects.is_empty() {
+            None
+        } else {
+            Some(rects)
+        }
+    }
+
+    // ---- Focus mode -----------------------------------------------------
+
+    /// The focused position: one point, whatever the scope. What is highlighted
+    /// is [`Self::focus_span`].
+    pub fn focus_caret(&self) -> Option<Caret> {
+        self.focus
+    }
+
+    /// The granularity the focus highlight snaps to.
+    pub fn focus_scope(&self) -> Scope {
+        self.focus_scope
+    }
+
+    /// The focus highlight as an inclusive, document-order cell range.
+    pub fn focus_span(&self) -> Option<(Caret, Caret)> {
+        self.focus_span
+    }
+
+    /// Recompute the cached span from the focused position and scope.
+    fn refresh_focus_span(&mut self) {
+        let Some(at) = self.focus else {
+            self.focus_span = None;
+            return;
+        };
+        self.focus_span = Some(self.scope_span(at, self.focus_scope));
+    }
+
+    /// Update the remembered goal column from the focused cell.
+    fn update_focus_goal_x(&mut self, at: Caret) {
+        if let Some(r) = self.cell_rect(at.page, at.line, at.cell) {
+            self.focus_goal_x = (r.x0 + r.x1) / 2.0;
+        }
+    }
+
+    /// Update the remembered goal row from the focused line, for line-scope
+    /// column motion.
+    fn update_focus_goal_y(&mut self, at: Caret) {
+        if let Some(b) = self.line_bbox(at.page, at.line) {
+            self.focus_goal_y = (b.y0 + b.y1) / 2.0;
+        }
+    }
+
+    /// Enter focus mode at `scope`, or — when already focused — reinterpret the
+    /// current position at the new scope without moving it.
+    ///
+    /// That second case is the point of holding the scope in a field: `cw` then
+    /// `ce` keeps you exactly where you are, where five separate modes each
+    /// carried their own stale mark.
+    fn enter_focus(&mut self, scope: Scope) -> Effects {
+        if self.session.is_none() {
+            return Effects::default();
+        }
+        self.mode = Mode::Focus;
+        self.focus_scope = scope;
+        // A focus highlight and a selection are mutually exclusive.
+        self.visual = None;
+        self.visual_span = None;
+        let at = match self.focus {
+            Some(at) => Some(at),
+            None => self.entry_caret(),
+        };
+        if let Some(at) = at {
+            let at = self.snap_to_scope(at, scope);
+            self.focus = Some(at);
+            self.update_focus_goal_x(at);
+            self.update_focus_goal_y(at);
+        }
+        self.refresh_focus_span();
+        self.ensure_focus_visible();
+        self.save_position();
+        Effects::redraw()
+    }
+
+    /// Move the focus by `count` units of the active scope.
+    fn focus_move(&mut self, dir: Dir, count: Option<u32>) -> Effects {
+        if self.session.is_none() {
+            return Effects::default();
+        }
+        // Nothing focused yet (e.g. entered on an empty document): try again.
+        let Some(mut at) = self.focus else {
+            return self.enter_focus(self.focus_scope);
+        };
+        let steps = count.unwrap_or(1).max(1);
+        let goal_x = self.focus_goal_x;
+        let goal_y = self.focus_goal_y;
+        let scope = self.focus_scope;
+        for _ in 0..steps {
+            if !self.step_scope(&mut at, scope, dir, goal_x, goal_y) {
+                break; // reached a document edge
+            }
+        }
+        self.focus = Some(at);
+        // Horizontal motion redefines the column vertical motion aims for --
+        // except in line scope, where the axes are swapped: there `h`/`l` jump
+        // columns and `j`/`k` set the row those jumps aim at.
+        if scope == Scope::Line {
+            if matches!(dir, Dir::Up | Dir::Down) {
+                self.update_focus_goal_y(at);
+            }
+        } else if matches!(dir, Dir::Left | Dir::Right) {
+            self.update_focus_goal_x(at);
+        }
+        self.refresh_focus_span();
+        self.ensure_focus_visible();
+        self.save_position();
+        Effects::redraw()
+    }
+
+    /// `w`/`b`/`e` move a word at a time in *every* scope: they are word-named
+    /// motions, and the highlight still snaps to the active scope.
+    fn focus_word_move(&mut self, motion: WordMotion, count: Option<u32>) -> Effects {
+        if self.session.is_none() {
+            return Effects::default();
+        }
+        let Some(mut at) = self.focus else {
+            return self.enter_focus(self.focus_scope);
+        };
+        let steps = count.unwrap_or(1).max(1);
+        for _ in 0..steps {
+            let moved = match motion {
+                WordMotion::NextStart => self.step_next_word_start(&mut at),
+                WordMotion::End => self.step_word_end(&mut at),
+                WordMotion::PrevStart => self.step_prev_word_start(&mut at),
+            };
+            if !moved {
+                break;
+            }
+        }
+        self.focus = Some(at);
+        self.update_focus_goal_x(at);
+        self.refresh_focus_span();
+        self.ensure_focus_visible();
+        self.save_position();
+        Effects::redraw()
+    }
+
+    /// After a scroll or page jump in focus mode, move the highlight to the
+    /// top-most content line now visible, keeping its goal column. Unlike focus
+    /// motion this does *not* scroll the view back, so the highlight follows the
+    /// scroll rather than fighting it.
+    fn reposition_focus_to_viewport(&mut self) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        let view_top = session.view.scroll().1;
+        let goal_x = self.focus_goal_x;
+        let scope = self.focus_scope;
+        let Some((page, line)) = self.topmost_visible_line(view_top) else {
+            return;
+        };
+        // Char and word scope keep the reader's column; the line-and-larger
+        // scopes start at the beginning of the line, since their spans do.
+        let cell = match scope {
+            Scope::Char | Scope::Word => self.nearest_cell(page, line, goal_x),
+            Scope::Line | Scope::Sentence | Scope::Paragraph => 0,
+        };
+        let at = self.snap_to_scope(Caret { page, line, cell }, scope);
+        self.focus = Some(at);
+        self.refresh_focus_span();
+    }
+
+    /// Scroll the minimum amount needed to keep the focus highlight on screen.
+    fn ensure_focus_visible(&mut self) {
+        let Some((start, end)) = self.focus_span else {
+            return;
+        };
+        let Some(rect) = self.span_bbox(start, end) else {
+            return;
+        };
+        self.scroll_page_rect_into_view(start.page, rect);
+    }
+
+    /// The focus highlight as one screen rectangle per spanned line. `None`
+    /// outside focus mode. The shell paints this overlay.
+    pub fn focus_screen_rects(&self) -> Option<Vec<ScreenRect>> {
+        if self.mode != Mode::Focus {
+            return None;
+        }
+        let (start, end) = self.focus_span?;
+        self.span_screen_rects(start, end)
+    }
+
+    // ---- Visual mode ----------------------------------------------------
+
+    pub fn visual_selection(&self) -> Option<VisualSelection> {
+        self.visual
+    }
+
+    /// The selection resolved to an inclusive, document-order cell range.
+    pub fn visual_span(&self) -> Option<(Caret, Caret)> {
+        self.visual_span
+    }
+
+    /// Recompute the cached span from the two ends. Each end is expanded by its
+    /// own scope, then the outermost edges win — so the ends crossing needs no
+    /// special case, and swapping them cannot change what is drawn.
+    fn refresh_visual_span(&mut self) {
+        let Some(sel) = self.visual else {
+            self.visual_span = None;
+            return;
+        };
+        let (a0, a1) = self.scope_span(sel.anchor, sel.anchor_scope);
+        let (h0, h1) = self.scope_span(sel.head, sel.head_scope);
+        self.visual_span = Some((a0.min(h0), a1.max(h1)));
+    }
+
+    /// Update the remembered goal row from the head's line, for line-scope
+    /// column motion.
+    fn update_visual_goal_y(&mut self, head: Caret) {
+        if let Some(b) = self.line_bbox(head.page, head.line) {
+            self.visual_goal_y = (b.y0 + b.y1) / 2.0;
+        }
+    }
+
+    /// Update the remembered goal column from the head's cell.
+    fn update_visual_goal_x(&mut self, head: Caret) {
+        if let Some(r) = self.cell_rect(head.page, head.line, head.cell) {
+            self.visual_goal_x = (r.x0 + r.x1) / 2.0;
+        }
+    }
+
+    /// Where a fresh selection starts: the focused position, else the topmost
+    /// visible line.
+    fn visual_entry_caret(&mut self) -> Option<Caret> {
+        match self.focus {
+            Some(at) => Some(at),
+            None => self.entry_caret(),
+        }
+    }
+
+    /// Enter visual mode. `scope = None` inherits the focus scope (`v` from
+    /// word focus selects word-wise).
+    fn enter_visual(&mut self, scope: Option<Scope>) -> Effects {
+        if self.session.is_none() {
+            return Effects::default();
+        }
+        // Re-entering visual mode collapses the selection onto the head.
+        if let Some(mut sel) = self.visual.filter(|_| self.mode == Mode::Visual) {
+            sel.anchor = sel.head;
+            if let Some(scope) = scope {
+                sel.anchor_scope = scope;
+                sel.head_scope = scope;
+            } else {
+                sel.anchor_scope = sel.head_scope;
+            }
+            self.visual = Some(sel);
+            self.refresh_visual_span();
+            return Effects::redraw();
+        }
+        let scope = scope.unwrap_or(self.focus_scope);
+        let Some(at) = self.visual_entry_caret() else {
+            return Effects::default();
+        };
+        self.visual = Some(VisualSelection {
+            anchor: at,
+            anchor_scope: scope,
+            head: at,
+            head_scope: scope,
+            return_mode: self.mode,
+        });
+        self.mode = Mode::Visual;
+        self.update_visual_goal_x(at);
+        self.refresh_visual_span();
+        self.ensure_visual_head_visible();
+        self.save_position();
+        Effects::redraw()
+    }
+
+    /// Leave visual mode, restoring the mode it was entered from and carrying
+    /// the head into the focused position, so the highlight does not appear to
+    /// jump back to where the selection started.
+    fn exit_visual(&mut self) -> Effects {
+        let Some(sel) = self.visual else {
+            self.mode = Mode::Normal;
+            return Effects::redraw();
+        };
+        self.mode = sel.return_mode;
+        self.focus = Some(sel.head);
+        self.refresh_focus_span();
+        self.visual = None;
+        self.visual_span = None;
+        self.save_position();
+        Effects::redraw()
+    }
+
+    /// `o`: make the other end the one motions move. Purely a state change —
+    /// the rendered selection is unaffected.
+    fn visual_swap_ends(&mut self) -> Effects {
+        let Some(mut sel) = self.visual else {
+            return Effects::default();
+        };
+        sel.swap_ends();
+        self.visual = Some(sel);
+        // The goal column belongs to whichever end is moving, so it has to
+        // follow the swap or the next `j`/`k` jumps to the old head's column.
+        self.update_visual_goal_x(sel.head);
+        self.ensure_visual_head_visible();
+        Effects::redraw()
+    }
+
+    /// Set the active end's granularity, optionally switching ends first
+    /// (`vw` vs `ow`).
+    fn set_head_scope(&mut self, scope: Scope, swap_first: bool) -> Effects {
+        let Some(mut sel) = self.visual else {
+            return Effects::default();
+        };
+        if swap_first {
+            sel.swap_ends();
+        }
+        sel.head_scope = scope;
+        self.visual = Some(sel);
+        if swap_first {
+            self.update_visual_goal_x(sel.head);
+        }
+        self.refresh_visual_span();
+        self.ensure_visual_head_visible();
+        Effects::redraw()
+    }
+
     fn visual_move(&mut self, dir: Dir, count: Option<u32>) -> Effects {
         let Some(mut sel) = self.visual else {
             return Effects::default();
@@ -2450,88 +1932,17 @@ impl App {
         let Some(rect) = self.cell_rect(sel.head.page, sel.head.line, sel.head.cell) else {
             return;
         };
-        let Some(session) = &mut self.session else {
-            return;
-        };
-        let Some(page) = session.view.layout().page(sel.head.page) else {
-            return;
-        };
-        let (px, py) = (page.x, page.y);
-        session.view.scroll_doc_rect_into_view(
-            px + rect.x0,
-            py + rect.y0,
-            px + rect.x1,
-            py + rect.y1,
-        );
+        self.scroll_page_rect_into_view(sel.head.page, rect);
     }
 
-    /// The selection as one screen rectangle per spanned line, restricted to
-    /// the pages currently on screen.
-    ///
-    /// Walking the viewport rather than the selection keeps this O(visible
-    /// lines) however long the selection is, and avoids forcing content
-    /// extraction for pages the reader cannot see. `None` outside visual mode.
+    /// The selection as one screen rectangle per spanned line. `None` outside
+    /// visual mode. The shell paints this overlay.
     pub fn visual_screen_rects(&self) -> Option<Vec<ScreenRect>> {
         if self.mode != Mode::Visual {
             return None;
         }
         let (start, end) = self.visual_span?;
-        let session = self.session.as_ref()?;
-        let mut rects = Vec::new();
-        for (page, _) in session.view.visible_pages() {
-            if page < start.page || page > end.page {
-                continue;
-            }
-            // Content is loaded lazily; a page we have not visited yet simply
-            // has nothing to draw.
-            let Some(lines) = session.content.get(&page) else {
-                continue;
-            };
-            let first_line = if page == start.page { start.line } else { 0 };
-            let last_line = if page == end.page {
-                end.line
-            } else {
-                lines.len().saturating_sub(1)
-            };
-            for line_idx in first_line..=last_line {
-                let Some(line) = lines.get(line_idx) else {
-                    continue;
-                };
-                if line.cells.is_empty() {
-                    continue;
-                }
-                let at_start = page == start.page && line_idx == start.line;
-                let at_end = page == end.page && line_idx == end.line;
-                let (x0, x1) = match (at_start, at_end) {
-                    (true, true) => {
-                        let s = line.cells.get(start.cell)?.bbox;
-                        let e = line.cells.get(end.cell).map_or(s, |c| c.bbox);
-                        (s.x0.min(e.x0), s.x1.max(e.x1))
-                    }
-                    (true, false) => {
-                        let s = line.cells.get(start.cell)?.bbox;
-                        (s.x0, line.bbox.x1)
-                    }
-                    (false, true) => {
-                        let e = line.cells.get(end.cell)?.bbox;
-                        (line.bbox.x0, e.x1)
-                    }
-                    (false, false) => (line.bbox.x0, line.bbox.x1),
-                };
-                if let Some(rect) =
-                    session
-                        .view
-                        .page_rect_to_screen(page, x0, line.bbox.y0, x1, line.bbox.y1)
-                {
-                    rects.push(rect);
-                }
-            }
-        }
-        if rects.is_empty() {
-            None
-        } else {
-            Some(rects)
-        }
+        self.span_screen_rects(start, end)
     }
 
     /// One-line status text: file, current page, zoom, pending keys.
@@ -2553,42 +1964,15 @@ impl App {
             }
             None => out.push_str("no document - press 'o' to open a PDF"),
         }
-        if self.mode == Mode::CaretFocus {
-            out.push_str("  -- CARET FOCUS --");
-            if let Some(caret) = self.caret {
-                out.push_str(&format!("  Ln {}, Col {}", caret.line + 1, caret.cell + 1));
-            }
-        }
-        if self.mode == Mode::LineFocus {
-            out.push_str("  -- LINE FOCUS --");
-            if let Some(mark) = self.line_mark {
-                out.push_str(&format!("  Ln {}", mark.line + 1));
-            }
-        }
-        if self.mode == Mode::WordFocus {
-            out.push_str("  -- WORD FOCUS --");
-            if let Some(mark) = self.word_mark {
-                out.push_str(&format!(
-                    "  Ln {}, Col {}",
-                    mark.line + 1,
-                    mark.start_cell + 1
-                ));
-            }
-        }
-        if self.mode == Mode::SentenceFocus {
-            out.push_str("  -- SENTENCE FOCUS --");
-            if let Some(mark) = self.sentence_mark {
-                out.push_str(&format!("  Ln {}", mark.start_line + 1));
-            }
-        }
-        if self.mode == Mode::ParagraphFocus {
-            out.push_str("  -- PARAGRAPH FOCUS --");
-            if let Some(mark) = self.paragraph_mark {
-                out.push_str(&format!(
-                    "  ¶ {}-{}",
-                    mark.start_line + 1,
-                    mark.end_line + 1
-                ));
+        if self.mode == Mode::Focus {
+            // `-- FOCUS (word) --`, matching visual's `-- VISUAL (word) --`.
+            out.push_str(&format!("  -- FOCUS ({}) --", self.focus_scope.name()));
+            if let Some((start, end)) = self.focus_span {
+                if start.line == end.line {
+                    out.push_str(&format!("  Ln {}, Col {}", start.line + 1, start.cell + 1));
+                } else {
+                    out.push_str(&format!("  Ln {}-{}", start.line + 1, end.line + 1));
+                }
             }
         }
         if self.mode == Mode::Visual {
@@ -2651,6 +2035,66 @@ mod tests {
         test_support::{pdf_with_image, pdf_with_pages},
         CellKind,
     };
+
+    /// The focus highlight read back in the shape of the per-scope marks the
+    /// app used to store.
+    ///
+    /// These are *derivations*, not state: `focus_span` is the only source, so
+    /// a test asserting `word_mark()` is asserting what is actually drawn. Each
+    /// one is only meaningful at its own scope — `word_mark()` in line scope
+    /// would report the whole line as one word — which is exactly how the tests
+    /// use them.
+    impl App {
+        fn caret(&self) -> Option<Caret> {
+            self.focus
+        }
+
+        fn line_mark(&self) -> Option<LineMark> {
+            let (start, _) = self.focus_span?;
+            Some(LineMark {
+                page: start.page,
+                line: start.line,
+            })
+        }
+
+        fn word_mark(&self) -> Option<WordMark> {
+            let (start, end) = self.focus_span?;
+            Some(WordMark {
+                page: start.page,
+                line: start.line,
+                start_cell: start.cell,
+                end_cell: end.cell,
+            })
+        }
+
+        fn sentence_mark(&self) -> Option<SentenceMark> {
+            let (start, end) = self.focus_span?;
+            Some(SentenceMark {
+                page: start.page,
+                start_line: start.line,
+                start_cell: start.cell,
+                end_line: end.line,
+                end_cell: end.cell,
+            })
+        }
+
+        fn paragraph_mark(&self) -> Option<ParagraphMark> {
+            let (start, end) = self.focus_span?;
+            Some(ParagraphMark {
+                page: start.page,
+                start_line: start.line,
+                end_line: end.line,
+            })
+        }
+
+        /// The overlay's first rectangle, with the page the span starts on —
+        /// the shape the old single-rect getters returned.
+        fn focus_screen_rect(&self) -> Option<(usize, ScreenRect)> {
+            let (start, _) = self.focus_span?;
+            let rects = self.focus_screen_rects()?;
+            rects.first().map(|r| (start.page, *r))
+        }
+    }
 
     fn write_pdf_bytes(dir: &Path, name: &str, bytes: Vec<u8>) -> PathBuf {
         let path = dir.join(name);
@@ -2959,11 +2403,11 @@ mod tests {
         assert_eq!(app.mode(), Mode::Normal);
         // The second `c` completes `cc` and enters caret focus mode.
         press(&mut app, "c");
-        assert_eq!(app.mode(), Mode::CaretFocus);
+        assert_eq!((app.mode(), app.focus_scope()), (Mode::Focus, Scope::Char));
         let caret = app.caret().expect("caret placed");
         assert_eq!((caret.page, caret.line, caret.cell), (0, 0, 0));
-        assert!(app.caret_screen_rect().is_some());
-        assert!(app.status_text().contains("-- CARET FOCUS --"));
+        assert!(app.focus_screen_rect().is_some());
+        assert!(app.status_text().contains("-- FOCUS (char) --"));
         assert!(app.status_text().contains("Ln 1, Col 1"));
     }
 
@@ -3023,10 +2467,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_doc(dir.path(), 3);
         press(&mut app, "cc");
-        assert_eq!(app.mode(), Mode::CaretFocus);
+        assert_eq!((app.mode(), app.focus_scope()), (Mode::Focus, Scope::Char));
         press(&mut app, "<Esc>");
         assert_eq!(app.mode(), Mode::Normal);
-        assert!(app.caret_screen_rect().is_none());
+        assert!(app.focus_screen_rect().is_none());
         // In normal mode `j` scrolls again rather than moving the caret.
         let before = app.session.as_ref().unwrap().view.scroll().1;
         press(&mut app, "j");
@@ -3176,7 +2620,7 @@ mod tests {
     fn caret_without_document_does_not_crash() {
         let mut app = App::new(Config::default(), None);
         press(&mut app, "cc");
-        assert!(app.caret_screen_rect().is_none());
+        assert!(app.focus_screen_rect().is_none());
         press(&mut app, "l");
         assert!(app.caret().is_none());
     }
@@ -3199,11 +2643,11 @@ mod tests {
         press(&mut app, "c");
         assert_eq!(app.mode(), Mode::Normal);
         press(&mut app, "e");
-        assert_eq!(app.mode(), Mode::LineFocus);
+        assert_eq!((app.mode(), app.focus_scope()), (Mode::Focus, Scope::Line));
         let mark = app.line_mark().expect("line marked");
         assert_eq!((mark.page, mark.line), (0, 0));
-        assert!(app.line_screen_rect().is_some());
-        assert!(app.status_text().contains("-- LINE FOCUS --"));
+        assert!(app.focus_screen_rect().is_some());
+        assert!(app.status_text().contains("-- FOCUS (line) --"));
         assert!(app.status_text().contains("Ln 1"));
     }
 
@@ -3227,10 +2671,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_doc(dir.path(), 3);
         press(&mut app, "ce");
-        assert_eq!(app.mode(), Mode::LineFocus);
+        assert_eq!((app.mode(), app.focus_scope()), (Mode::Focus, Scope::Line));
         press(&mut app, "<Esc>");
         assert_eq!(app.mode(), Mode::Normal);
-        assert!(app.line_screen_rect().is_none());
+        assert!(app.focus_screen_rect().is_none());
         let before = app.session.as_ref().unwrap().view.scroll().1;
         press(&mut app, "j");
         let after = app.session.as_ref().unwrap().view.scroll().1;
@@ -3287,7 +2731,7 @@ mod tests {
     fn line_without_document_does_not_crash() {
         let mut app = App::new(Config::default(), None);
         press(&mut app, "ce");
-        assert!(app.line_screen_rect().is_none());
+        assert!(app.focus_screen_rect().is_none());
         press(&mut app, "j");
         assert!(app.line_mark().is_none());
     }
@@ -3301,15 +2745,15 @@ mod tests {
         press(&mut app, "c");
         assert_eq!(app.mode(), Mode::Normal);
         press(&mut app, "w");
-        assert_eq!(app.mode(), Mode::WordFocus);
+        assert_eq!((app.mode(), app.focus_scope()), (Mode::Focus, Scope::Word));
         let mark = app.word_mark().expect("word marked");
         // The first word "alpha" is the run cells 0..=4.
         assert_eq!(
             (mark.page, mark.line, mark.start_cell, mark.end_cell),
             (0, 0, 0, 4)
         );
-        assert!(app.word_screen_rect().is_some());
-        assert!(app.status_text().contains("-- WORD FOCUS --"));
+        assert!(app.focus_screen_rect().is_some());
+        assert!(app.status_text().contains("-- FOCUS (word) --"));
         assert!(app.status_text().contains("Ln 1, Col 1"));
     }
 
@@ -3383,10 +2827,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_doc(dir.path(), 3);
         press(&mut app, "cw");
-        assert_eq!(app.mode(), Mode::WordFocus);
+        assert_eq!((app.mode(), app.focus_scope()), (Mode::Focus, Scope::Word));
         press(&mut app, "<Esc>");
         assert_eq!(app.mode(), Mode::Normal);
-        assert!(app.word_screen_rect().is_none());
+        assert!(app.focus_screen_rect().is_none());
         let before = app.session.as_ref().unwrap().view.scroll().1;
         press(&mut app, "j");
         let after = app.session.as_ref().unwrap().view.scroll().1;
@@ -3405,11 +2849,90 @@ mod tests {
         assert_eq!(app.word_mark().unwrap().page, 0);
     }
 
+    /// The bug five separate focus modes made possible: each kept its own mark,
+    /// so changing granularity teleported you to wherever you last were at
+    /// *that* granularity. One position plus a scope field makes it
+    /// unrepresentable — this test would have failed before the collapse.
+    #[test]
+    fn changing_scope_keeps_the_position() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_doc(dir.path(), 5);
+        // Establish a position at char scope on page 0, then leave it behind.
+        press(&mut app, "cc");
+        assert_eq!(app.focus_caret().unwrap().page, 0);
+        // Work at word scope, several pages away.
+        press(&mut app, "cw");
+        press(&mut app, "G");
+        assert_eq!(app.focus_caret().unwrap().page, 4);
+        // Every other scope re-reads the position we are actually at.
+        for (keys, scope) in [
+            ("ce", Scope::Line),
+            ("cs", Scope::Sentence),
+            ("cp", Scope::Paragraph),
+            ("cc", Scope::Char),
+        ] {
+            press(&mut app, keys);
+            assert_eq!(app.focus_scope(), scope);
+            assert_eq!(
+                app.focus_caret().unwrap().page,
+                4,
+                "switching to {scope:?} left the stale position behind"
+            );
+        }
+    }
+
+    /// Entering visual mode inherits the focus scope, and leaving it hands the
+    /// head back — for every scope, not just the ones with their own mode.
+    #[test]
+    fn visual_inherits_and_returns_every_focus_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        for (keys, scope) in [
+            ("cc", Scope::Char),
+            ("cw", Scope::Word),
+            ("ce", Scope::Line),
+            ("cs", Scope::Sentence),
+            ("cp", Scope::Paragraph),
+        ] {
+            let mut app = app_with_text_pages(dir.path(), &["alpha beta. gamma delta."]);
+            press(&mut app, keys);
+            // `v` is a binding *and* a prefix, so it fires via longest-prefix
+            // fallback on the next key. `k` is that key and cannot move on a
+            // one-line document, leaving the head exactly where it entered.
+            press(&mut app, "vk");
+            assert_eq!(app.mode(), Mode::Visual);
+            let sel = app.visual_selection().expect("selection");
+            assert_eq!(sel.head_scope, scope, "bare `v` from {keys}");
+            assert_eq!(sel.return_mode, Mode::Focus);
+            // `<Esc>` returns to focus at the same scope, carrying the head.
+            press(&mut app, "<Esc>");
+            assert_eq!((app.mode(), app.focus_scope()), (Mode::Focus, scope));
+            assert_eq!(app.focus_caret(), Some(sel.head));
+        }
+    }
+
+    /// `w`/`e`/`b` are word-named motions in every scope, mirroring visual
+    /// mode: the highlight still snaps to the active scope afterwards.
+    #[test]
+    fn word_motions_work_at_every_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma"]);
+        press(&mut app, "cs");
+        // The whole sentence is highlighted, starting at cell 0.
+        let (start, end) = app.focus_span().unwrap();
+        assert_eq!(start.cell, 0);
+        assert!(end.cell > start.cell);
+        // `w` moves a word; the sentence span is unchanged, since the caret is
+        // still inside the same sentence.
+        press(&mut app, "w");
+        assert_eq!(app.focus_caret().unwrap().cell, 6);
+        assert_eq!(app.focus_span().unwrap(), (start, end));
+    }
+
     #[test]
     fn word_without_document_does_not_crash() {
         let mut app = App::new(Config::default(), None);
         press(&mut app, "cw");
-        assert!(app.word_screen_rect().is_none());
+        assert!(app.focus_screen_rect().is_none());
         press(&mut app, "l");
         assert!(app.word_mark().is_none());
     }
@@ -3425,15 +2948,18 @@ mod tests {
         press(&mut app, "c");
         assert_eq!(app.mode(), Mode::Normal);
         press(&mut app, "s");
-        assert_eq!(app.mode(), Mode::SentenceFocus);
+        assert_eq!(
+            (app.mode(), app.focus_scope()),
+            (Mode::Focus, Scope::Sentence)
+        );
         let mark = app.sentence_mark().expect("sentence marked");
         // The first sentence "Alpha beta." is cells 0..=10 on line 0.
         assert_eq!(
             (mark.page, mark.start_line, mark.start_cell, mark.end_line),
             (0, 0, 0, 0)
         );
-        assert!(app.sentence_screen_rects().is_some());
-        assert!(app.status_text().contains("-- SENTENCE FOCUS --"));
+        assert!(app.focus_screen_rects().is_some());
+        assert!(app.status_text().contains("-- FOCUS (sentence) --"));
     }
 
     #[test]
@@ -3460,7 +2986,7 @@ mod tests {
         assert_eq!(mark.start_line, 0);
         assert_eq!(mark.end_line, 1);
         // A multi-line sentence yields one rect per spanned line.
-        let (_, rects) = app.sentence_screen_rects().unwrap();
+        let rects = app.focus_screen_rects().unwrap();
         assert!(rects.len() >= 2);
     }
 
@@ -3485,10 +3011,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_doc(dir.path(), 3);
         press(&mut app, "cs");
-        assert_eq!(app.mode(), Mode::SentenceFocus);
+        assert_eq!(
+            (app.mode(), app.focus_scope()),
+            (Mode::Focus, Scope::Sentence)
+        );
         press(&mut app, "<Esc>");
         assert_eq!(app.mode(), Mode::Normal);
-        assert!(app.sentence_screen_rects().is_none());
+        assert!(app.focus_screen_rects().is_none());
         let before = app.session.as_ref().unwrap().view.scroll().1;
         press(&mut app, "j");
         let after = app.session.as_ref().unwrap().view.scroll().1;
@@ -3499,7 +3028,7 @@ mod tests {
     fn sentence_without_document_does_not_crash() {
         let mut app = App::new(Config::default(), None);
         press(&mut app, "cs");
-        assert!(app.sentence_screen_rects().is_none());
+        assert!(app.focus_screen_rects().is_none());
         press(&mut app, "l");
         assert!(app.sentence_mark().is_none());
     }
@@ -3513,11 +3042,14 @@ mod tests {
         press(&mut app, "c");
         assert_eq!(app.mode(), Mode::Normal);
         press(&mut app, "p");
-        assert_eq!(app.mode(), Mode::ParagraphFocus);
+        assert_eq!(
+            (app.mode(), app.focus_scope()),
+            (Mode::Focus, Scope::Paragraph)
+        );
         let mark = app.paragraph_mark().expect("paragraph marked");
         assert_eq!((mark.page, mark.start_line), (0, 0));
-        assert!(app.paragraph_screen_rect().is_some());
-        assert!(app.status_text().contains("-- PARAGRAPH FOCUS --"));
+        assert!(app.focus_screen_rect().is_some());
+        assert!(app.status_text().contains("-- FOCUS (paragraph) --"));
     }
 
     #[test]
@@ -3558,10 +3090,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_doc(dir.path(), 3);
         press(&mut app, "cp");
-        assert_eq!(app.mode(), Mode::ParagraphFocus);
+        assert_eq!(
+            (app.mode(), app.focus_scope()),
+            (Mode::Focus, Scope::Paragraph)
+        );
         press(&mut app, "<Esc>");
         assert_eq!(app.mode(), Mode::Normal);
-        assert!(app.paragraph_screen_rect().is_none());
+        assert!(app.focus_screen_rect().is_none());
         let before = app.session.as_ref().unwrap().view.scroll().1;
         press(&mut app, "j");
         let after = app.session.as_ref().unwrap().view.scroll().1;
@@ -3572,7 +3107,7 @@ mod tests {
     fn paragraph_without_document_does_not_crash() {
         let mut app = App::new(Config::default(), None);
         press(&mut app, "cp");
-        assert!(app.paragraph_screen_rect().is_none());
+        assert!(app.focus_screen_rect().is_none());
         press(&mut app, "j");
         assert!(app.paragraph_mark().is_none());
     }
@@ -3606,14 +3141,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_text_pages(dir.path(), &["alpha beta"]);
         press(&mut app, "cw");
-        assert_eq!(app.mode(), Mode::WordFocus);
+        assert_eq!((app.mode(), app.focus_scope()), (Mode::Focus, Scope::Word));
         // A bare `v` inherits word granularity. `vk` is unbound, so `v` fires
         // via the longest-prefix fallback and `k` replays as a motion.
         press(&mut app, "vk");
         assert_eq!(app.mode(), Mode::Visual);
         let sel = app.visual_selection().unwrap();
         assert_eq!(sel.head_scope, Scope::Word);
-        assert_eq!(sel.return_mode, Mode::WordFocus);
+        assert_eq!(sel.return_mode, Mode::Focus);
         // `k` had nowhere to go on a one-line document, so the span is still
         // exactly the entered word.
         let (start, end) = app.visual_span().unwrap();
@@ -3797,7 +3332,7 @@ mod tests {
         press(&mut app, "l");
         let head = app.visual_selection().unwrap().head;
         press(&mut app, "<Esc>");
-        assert_eq!(app.mode(), Mode::WordFocus);
+        assert_eq!((app.mode(), app.focus_scope()), (Mode::Focus, Scope::Word));
         assert!(app.visual_screen_rects().is_none());
         // The word mark follows the head rather than snapping back.
         let mark = app.word_mark().expect("word mark carried over");
@@ -3826,7 +3361,7 @@ mod tests {
         assert!(app.visual_selection().is_some());
         // The focus-mode entry chords stay bound inside visual mode.
         press(&mut app, "ce");
-        assert_eq!(app.mode(), Mode::LineFocus);
+        assert_eq!((app.mode(), app.focus_scope()), (Mode::Focus, Scope::Line));
         assert!(app.visual_selection().is_none());
         assert!(app.visual_screen_rects().is_none());
     }

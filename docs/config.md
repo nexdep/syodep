@@ -89,77 +89,28 @@ the default bindings: `docs/keybindings.md`. Command names:
 "<C-o>" = "open_file"
 ```
 
-## `[caret_focus_keys]`
+## `[focus_keys]`
 
-Keybindings that apply only in **caret focus mode** (entered with `cc`). They
-overlay the normal `[keys]` while caret focus mode is active, so `hjkl`/`<Esc>`
-can mean caret motions there while every other binding keeps its normal
-behavior. Like `[keys]`, entries overlay the defaults — list only changes.
-Defaults: `h`/`j`/`k`/`l` (and the arrow keys) move the caret,
-`w`/`e`/`b` move by word runs, and `<Esc>` exits. See
-`docs/keybindings.md` for the full description and `docs/commands.md` for
-the `caret_focus_*` command names.
+Keybindings that apply only in **focus mode** (entered with `cc`, `cw`, `ce`,
+`cs` or `cp`). They overlay the normal `[keys]` while focus mode is active, so
+`hjkl`/`<Esc>` can mean focus motions there while every other binding keeps its
+normal behavior. Like `[keys]`, entries overlay the defaults — list only
+changes.
 
-```toml
-[caret_focus_keys]
-"x" = "caret_focus_right"   # extra binding, only in caret focus mode
-```
+Defaults: `h`/`j`/`k`/`l` (and the arrow keys) move the highlight by one unit
+of the active scope, `w`/`e`/`b` move by word runs whatever the scope, and
+`<Esc>` exits.
 
-## `[line_focus_keys]`
-
-Keybindings that apply only in **line focus mode** (entered with `ce`). They
-overlay the normal `[keys]` while line focus mode is active, mirroring
-`[caret_focus_keys]`. Defaults: `j`/`k` (and `<Up>`/`<Down>`) move the
-highlight line-wise, `h`/`l` (and `<Left>`/`<Right>`) move between columns,
-`<Esc>` exits. See `docs/keybindings.md` for the full description and
-`docs/commands.md` for the `line_focus_*` command names.
+**One table covers all five scopes.** The motion commands dispatch on the
+active scope — `focus_left` is a character in char scope, a word in word scope,
+a column jump in line scope and the previous unit in sentence or paragraph
+scope — so there is nothing scope-specific left to bind. See
+`docs/keybindings.md` for the full description and `docs/commands-focus-mode.md`
+for the `focus_*` command names.
 
 ```toml
-[line_focus_keys]
-"w" = "line_focus_right"   # extra binding, only in line focus mode
-```
-
-## `[word_focus_keys]`
-
-Keybindings that apply only in **word focus mode** (entered with `cw`). They
-overlay the normal `[keys]` while word focus mode is active, mirroring the
-other focus-mode key tables. Defaults: `h`/`b` (and `<Left>`) move to the
-previous word run, `l`/`w` (and `<Right>`) move to the next word run, `j`/`k`
-(and `<Down>`/`<Up>`) move line-wise, and `<Esc>` exits. See
-`docs/keybindings.md` for the full description and `docs/commands.md` for
-the `word_focus_*` command names.
-
-```toml
-[word_focus_keys]
-"e" = "word_focus_right"   # extra binding, only in word focus mode
-```
-
-## `[sentence_focus_keys]`
-
-Keybindings that apply only in **sentence focus mode** (entered with `cs`). They
-overlay the normal `[keys]` while sentence focus mode is active. Defaults:
-`h`/`k` (and `<Left>`/`<Up>`) move to the previous sentence, `l`/`j` (and
-`<Right>`/`<Down>`) move to the next, and `<Esc>` exits. See
-`docs/keybindings.md` for the full description and `docs/commands.md` for the
-`sentence_focus_*` command names.
-
-```toml
-[sentence_focus_keys]
-"n" = "sentence_focus_next"   # extra binding, only in sentence focus mode
-```
-
-## `[paragraph_focus_keys]`
-
-Keybindings that apply only in **paragraph focus mode** (entered with `cp`). They
-overlay the normal `[keys]` while paragraph focus mode is active. Defaults:
-`h`/`k` (and `<Left>`/`<Up>`) move to the previous paragraph, `l`/`j` (and
-`<Right>`/`<Down>`) move to the next, and `<Esc>` exits. See
-`docs/keybindings.md` for the full description and `docs/commands.md` for the
-`paragraph_focus_*` command names.
-
-```toml
-[paragraph_focus_keys]
-"n" = "paragraph_focus_next"   # extra binding, only in paragraph focus mode
+[focus_keys]
+"x" = "focus_right"   # extra binding, only in focus mode
 ```
 
 ## `[visual_keys]`

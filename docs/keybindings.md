@@ -67,21 +67,22 @@ Zoom:
 | `zw` | `fit_width` |
 | `z0` | `zoom_reset` |
 
-Caret (see "Caret focus mode" below):
+Focus (see "Focus mode" below). The same chords change the scope from inside
+focus mode:
 
 | Keys | Command |
 |---|---|
-| `cc` | `caret_focus_enter` |
-| `ce` | `line_focus_enter` |
-| `cw` | `word_focus_enter` |
-| `cs` | `sentence_focus_enter` |
-| `cp` | `paragraph_focus_enter` |
+| `cc` | `focus_enter_char` |
+| `ce` | `focus_enter_line` |
+| `cw` | `focus_enter_word` |
+| `cs` | `focus_enter_sentence` |
+| `cp` | `focus_enter_paragraph` |
 
 Selection (see "Visual mode" below):
 
 | Keys | Command |
 |---|---|
-| `v` | `visual_enter` — inherit the current mode's scope |
+| `v` | `visual_enter` — inherit the focus scope |
 | `vc` | `visual_enter_char` |
 | `ve` | `visual_enter_line` |
 | `vw` | `visual_enter_word` |
@@ -103,144 +104,59 @@ Dragging a PDF onto the window opens it. Anything that is not a `.pdf` is
 refused while still being dragged, so nothing happens on release; dropping
 several at once opens the first and says so in the status bar.
 
-## Caret focus mode
+## Focus mode
 
-In **normal mode** (the default) `hjkl` scroll the page. Press `cc`
-(`caret_focus_enter`) to switch to **caret focus mode**, where a cursor moves
-through the document's content — text characters and images:
-
-| Keys | Command |
-|---|---|
-| `h`, `<Left>` | `caret_focus_left` — one character left |
-| `l`, `<Right>` | `caret_focus_right` — one character right |
-| `k`, `<Up>` | `caret_focus_up` — one line up (keeps the column) |
-| `j`, `<Down>` | `caret_focus_down` — one line down (keeps the column) |
-| `w` | `caret_focus_next_word` — next word start |
-| `e` | `caret_focus_end_word` — current/next word end |
-| `b` | `caret_focus_prev_word` — current/previous word start |
-| `<Esc>` | `caret_focus_exit` — back to normal mode |
-
-`h`/`l` step character by character and wrap across lines and pages; `j`/`k`
-move line by line, keeping a goal column like a text editor. `w`/`e`/`b`
-move by Vim-like word runs: letters/digits/underscore together,
-punctuation/symbols separately, whitespace skipped. Each image is a single
-caret stop. The view scrolls to keep the caret visible, and counts work
-(`5l`, `3j`, `2w`). Every other binding (page scroll, page navigation,
-zoom, `q`, `o`, …) still works in caret focus mode — only
-`hjkl`/`w`/`e`/`b`/`<Esc>` change meaning. Scroll and page-jump commands
-additionally carry the caret to the top of the newly visible content; zoom
-leaves it in place. The status bar shows `-- CARET FOCUS --` with the
-current line and column. See `docs/commands-caret-focus-mode.md` for the
-full list.
-
-Customize caret-focus-mode keys with a `[caret_focus_keys]` table (see
-`docs/config.md`); it overlays the normal bindings while caret focus mode is
-active. The caret is the foundation for selection, highlighting and search
-in later phases (`docs/roadmap.md`).
-
-## Line focus mode
-
-Press `ce` (`line_focus_enter`) to switch to **line focus mode**, where a
-whole content line is highlighted:
+In **normal mode** (the default) `hjkl` scroll the page. Press `cc`, `cw`,
+`ce`, `cs` or `cp` to switch to **focus mode**, where one position in the
+document's content — text characters and images — is highlighted and `hjkl`
+move it:
 
 | Keys | Command |
 |---|---|
-| `h`, `<Left>` | `line_focus_left` — previous column (multi-column pages) |
-| `l`, `<Right>` | `line_focus_right` — next column (multi-column pages) |
-| `k`, `<Up>` | `line_focus_up` — one line up |
-| `j`, `<Down>` | `line_focus_down` — one line down |
-| `<Esc>` | `line_focus_exit` — back to normal mode |
+| `h`, `<Left>` | `focus_left` — back one unit of the active scope |
+| `l`, `<Right>` | `focus_right` — forward one unit of the active scope |
+| `k`, `<Up>` | `focus_up` — up a line, or the previous unit |
+| `j`, `<Down>` | `focus_down` — down a line, or the next unit |
+| `w` | `focus_next_word` — next word start |
+| `e` | `focus_end_word` — current/next word end |
+| `b` | `focus_prev_word` — current/previous word start |
+| `<Esc>` | `focus_exit` — back to normal mode |
 
-`j`/`k` move the highlight line by line, wrapping across pages; `h`/`l` move
-between columns when the page has two or more, keeping the current row (a
-no-op on single-column pages). The view scrolls to keep the highlighted line
-visible, and counts work (`3j`). As in caret focus mode, every other binding
-still works — only `hjkl`/`<Esc>` change meaning — and scroll / page-jump
-commands carry the highlight to the top of the newly visible content while
-zoom leaves it in place. The status bar shows `-- LINE FOCUS --` with the
-current line. See `docs/commands-line-focus-mode.md` for the full list.
+**One keymap covers every scope.** `focus_left` is a character in char scope, a
+word in word scope, a column jump in line scope and the previous unit in
+sentence or paragraph scope — the command dispatches on the scope, so the same
+keys keep doing the same thing as you change granularity:
 
-Customize line-focus-mode keys with a `[line_focus_keys]` table (see
-`docs/config.md`); it overlays the normal bindings while line focus mode is
-active.
+| Keys | Scope | `h` / `l` | `j` / `k` |
+|---|---|---|---|
+| `cc` | char | one character (wraps across lines and pages) | one line, keeping the goal column |
+| `cw` | word | one word run | one line, nearest the goal column |
+| `ce` | line | previous/next **column** (multi-column pages) | one line |
+| `cs` | sentence | previous/next sentence | previous/next sentence |
+| `cp` | paragraph | previous/next paragraph | previous/next paragraph |
 
-## Word focus mode
+Line scope is `ce`, not `cl`: `l` is the forward motion in every mode.
 
-Press `cw` (`word_focus_enter`) to switch to **word focus mode**, where a
-whole Vim-like word run is highlighted:
+`w`/`e`/`b` move by Vim-like word runs in *every* scope: letters/digits/
+underscore together, punctuation/symbols separately, whitespace skipped. Each
+image is a single stop.
 
-| Keys | Command |
-|---|---|
-| `h`, `b`, `<Left>` | `word_focus_left` — previous word run |
-| `l`, `w`, `<Right>` | `word_focus_right` — next word run |
-| `k`, `<Up>` | `word_focus_up` — one line up |
-| `j`, `<Down>` | `word_focus_down` — one line down |
-| `<Esc>` | `word_focus_exit` — back to normal mode |
+**The entry chords also change the scope, in place.** Pressing `ce` while
+already focused on a word highlights the line you are on — it does not move
+you. There is one position and the scope reinterprets it.
 
-Word runs use the same boundaries as caret word motions:
-letters/digits/underscore together, punctuation/symbols separately,
-whitespace skipped, and each image as a single stop. `j`/`k` move line by
-line while keeping a goal column. The view scrolls to keep the highlighted
-word visible, and counts work (`3w`, `2j`). As in the other focus modes,
-every other binding still works; scroll / page-jump commands carry the
-highlight to visible content while zoom leaves it in place. The status bar
-shows `-- WORD FOCUS --` with the current line and column. See
-`docs/commands-word-focus-mode.md` for the full list.
+The view scrolls to keep the highlight visible, and counts work (`5l`, `3j`,
+`2w`). Every other binding (page scroll, page navigation, zoom, `q`, `o`, …)
+still works in focus mode — only `hjkl`/`w`/`e`/`b`/`<Esc>` change meaning.
+Scroll and page-jump commands additionally carry the highlight to the top of
+the newly visible content; zoom leaves it in place. The status bar shows
+`-- FOCUS (word) --` with the highlighted line and column. See
+`docs/commands-focus-mode.md` for the full list.
 
-Customize word-focus-mode keys with a `[word_focus_keys]` table (see
-`docs/config.md`); it overlays the normal bindings while word focus mode is
-active.
-
-## Sentence focus mode
-
-Press `cs` (`sentence_focus_enter`) to switch to **sentence focus mode**, where
-a whole sentence is highlighted — possibly spanning several lines:
-
-| Keys | Command |
-|---|---|
-| `h`, `k`, `<Left>`, `<Up>` | `sentence_focus_prev` — previous sentence |
-| `l`, `j`, `<Right>`, `<Down>` | `sentence_focus_next` — next sentence |
-| `<Esc>` | `sentence_focus_exit` — back to normal mode |
-
-A sentence is a run of cells ending at sentence-terminating punctuation
-(`.`, `!`, `?`) plus any trailing closing quotes/brackets. Because sentences are
-a linear sequence, all of `hjkl` and the arrow keys collapse to previous/next
-(there are no Vim `(`/`)` aliases). The highlight spans lines as a
-text-selection shape, wraps across pages, and counts work (`3l`). As in the
-other focus modes, every other binding still works; scroll / page-jump commands
-carry the highlight to visible content while zoom leaves it in place. The status
-bar shows `-- SENTENCE FOCUS --` with the current line. See
-`docs/commands-sentence-focus-mode.md` for the full list.
-
-Note: decimal points and abbreviations (`3.14`, `Mr.`) are treated as sentence
-terminators — a deliberate simplification.
-
-Customize sentence-focus-mode keys with a `[sentence_focus_keys]` table (see
-`docs/config.md`); it overlays the normal bindings while sentence focus mode is
-active.
-
-## Paragraph focus mode
-
-Press `cp` (`paragraph_focus_enter`) to switch to **paragraph focus mode**, where
-a whole paragraph (a block of content lines) is highlighted:
-
-| Keys | Command |
-|---|---|
-| `h`, `k`, `<Left>`, `<Up>` | `paragraph_focus_prev` — previous paragraph |
-| `l`, `j`, `<Right>`, `<Down>` | `paragraph_focus_next` — next paragraph |
-| `<Esc>` | `paragraph_focus_exit` — back to normal mode |
-
-Paragraphs are detected from the line layout: consecutive lines form a paragraph
-until a larger-than-normal vertical gap or a column change. As with sentence
-focus, all of `hjkl`/arrows collapse to previous/next (no Vim `{`/`}` aliases),
-motion wraps across pages, and counts work (`3j`). Every other binding still
-works; scroll / page-jump commands carry the highlight to visible content while
-zoom leaves it in place. The status bar shows `-- PARAGRAPH FOCUS --` with the
-current line range. See `docs/commands-paragraph-focus-mode.md` for the full list.
-
-Customize paragraph-focus-mode keys with a `[paragraph_focus_keys]` table (see
-`docs/config.md`); it overlays the normal bindings while paragraph focus mode is
-active.
+Customize focus-mode keys with a `[focus_keys]` table (see `docs/config.md`);
+it overlays the normal bindings while focus mode is active. Focus is the
+foundation for highlighting and search in later phases
+(`docs/roadmap.md`).
 
 ## Visual mode
 

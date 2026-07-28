@@ -33,60 +33,37 @@ pub enum Command {
     ZoomOut,
     FitWidth,
     ZoomReset,
-    // Caret (modal cursor over text + images).
-    /// Enter caret focus mode, placing the caret on the nearest content.
-    CaretFocusEnter,
-    /// Leave caret focus mode, returning to scrolling (the caret is remembered).
-    CaretFocusExit,
-    CaretFocusLeft,
-    CaretFocusRight,
-    CaretFocusUp,
-    CaretFocusDown,
-    CaretFocusNextWord,
-    CaretFocusEndWord,
-    CaretFocusPrevWord,
-    // Line focus (modal whole-line highlight over content).
-    /// Enter line focus mode, highlighting the nearest content line.
-    LineFocusEnter,
-    /// Leave line focus mode, returning to scrolling (the line is remembered).
-    LineFocusExit,
-    /// Move to the line in the previous column (multi-column pages only).
-    LineFocusLeft,
-    /// Move to the line in the next column (multi-column pages only).
-    LineFocusRight,
-    LineFocusUp,
-    LineFocusDown,
-    // Word focus (modal whole-word highlight over content).
-    /// Enter word focus mode, highlighting the nearest word.
-    WordFocusEnter,
-    /// Leave word focus mode, returning to scrolling (the word is remembered).
-    WordFocusExit,
-    /// Move the highlight to the previous word.
-    WordFocusLeft,
-    /// Move the highlight to the next word.
-    WordFocusRight,
-    /// Move up a line, landing on the word nearest the goal column.
-    WordFocusUp,
-    /// Move down a line, landing on the word nearest the goal column.
-    WordFocusDown,
-    // Sentence focus (modal whole-sentence highlight over content).
-    /// Enter sentence focus mode, highlighting the nearest sentence.
-    SentenceFocusEnter,
-    /// Leave sentence focus mode, returning to scrolling (the sentence is remembered).
-    SentenceFocusExit,
-    /// Move the highlight to the next sentence.
-    SentenceFocusNext,
-    /// Move the highlight to the previous sentence.
-    SentenceFocusPrev,
-    // Paragraph focus (modal whole-paragraph highlight over content).
-    /// Enter paragraph focus mode, highlighting the nearest paragraph.
-    ParagraphFocusEnter,
-    /// Leave paragraph focus mode, returning to scrolling (the paragraph is remembered).
-    ParagraphFocusExit,
-    /// Move the highlight to the next paragraph.
-    ParagraphFocusNext,
-    /// Move the highlight to the previous paragraph.
-    ParagraphFocusPrev,
+    // Focus mode (one highlighted position at the active scope).
+    //
+    // Entering is also how the scope is changed: `cw` from normal mode enters
+    // focus word-granular, and `cw` while already focused re-reads the current
+    // position as a word without moving it.
+    /// Focus the nearest content character by character.
+    FocusEnterChar,
+    /// Focus the nearest content word by word.
+    FocusEnterWord,
+    /// Focus the nearest content line by line.
+    FocusEnterLine,
+    /// Focus the nearest content sentence by sentence.
+    FocusEnterSentence,
+    /// Focus the nearest content paragraph by paragraph.
+    FocusEnterParagraph,
+    /// Leave focus mode, returning to scrolling (the position is remembered).
+    FocusExit,
+    /// Move one unit of the active scope leftwards.
+    FocusLeft,
+    /// Move one unit of the active scope rightwards.
+    FocusRight,
+    /// Move up (line-wise for char/word scope, else the previous unit).
+    FocusUp,
+    /// Move down (line-wise for char/word scope, else the next unit).
+    FocusDown,
+    /// Move to the start of the next word, whatever the scope.
+    FocusNextWord,
+    /// Move to the start of the previous word, whatever the scope.
+    FocusPrevWord,
+    /// Move to the end of the current word, whatever the scope.
+    FocusEndWord,
     // Visual mode (a two-ended selection over content).
     /// Enter visual mode, inheriting the current focus mode's granularity.
     VisualEnter,
@@ -164,35 +141,19 @@ pub const ALL_COMMANDS: &[(&str, Command)] = &[
     ("zoom_out", Command::ZoomOut),
     ("fit_width", Command::FitWidth),
     ("zoom_reset", Command::ZoomReset),
-    ("caret_focus_enter", Command::CaretFocusEnter),
-    ("caret_focus_exit", Command::CaretFocusExit),
-    ("caret_focus_left", Command::CaretFocusLeft),
-    ("caret_focus_right", Command::CaretFocusRight),
-    ("caret_focus_up", Command::CaretFocusUp),
-    ("caret_focus_down", Command::CaretFocusDown),
-    ("caret_focus_next_word", Command::CaretFocusNextWord),
-    ("caret_focus_end_word", Command::CaretFocusEndWord),
-    ("caret_focus_prev_word", Command::CaretFocusPrevWord),
-    ("line_focus_enter", Command::LineFocusEnter),
-    ("line_focus_exit", Command::LineFocusExit),
-    ("line_focus_left", Command::LineFocusLeft),
-    ("line_focus_right", Command::LineFocusRight),
-    ("line_focus_up", Command::LineFocusUp),
-    ("line_focus_down", Command::LineFocusDown),
-    ("word_focus_enter", Command::WordFocusEnter),
-    ("word_focus_exit", Command::WordFocusExit),
-    ("word_focus_left", Command::WordFocusLeft),
-    ("word_focus_right", Command::WordFocusRight),
-    ("word_focus_up", Command::WordFocusUp),
-    ("word_focus_down", Command::WordFocusDown),
-    ("sentence_focus_enter", Command::SentenceFocusEnter),
-    ("sentence_focus_exit", Command::SentenceFocusExit),
-    ("sentence_focus_next", Command::SentenceFocusNext),
-    ("sentence_focus_prev", Command::SentenceFocusPrev),
-    ("paragraph_focus_enter", Command::ParagraphFocusEnter),
-    ("paragraph_focus_exit", Command::ParagraphFocusExit),
-    ("paragraph_focus_next", Command::ParagraphFocusNext),
-    ("paragraph_focus_prev", Command::ParagraphFocusPrev),
+    ("focus_enter_char", Command::FocusEnterChar),
+    ("focus_enter_word", Command::FocusEnterWord),
+    ("focus_enter_line", Command::FocusEnterLine),
+    ("focus_enter_sentence", Command::FocusEnterSentence),
+    ("focus_enter_paragraph", Command::FocusEnterParagraph),
+    ("focus_exit", Command::FocusExit),
+    ("focus_left", Command::FocusLeft),
+    ("focus_right", Command::FocusRight),
+    ("focus_up", Command::FocusUp),
+    ("focus_down", Command::FocusDown),
+    ("focus_next_word", Command::FocusNextWord),
+    ("focus_prev_word", Command::FocusPrevWord),
+    ("focus_end_word", Command::FocusEndWord),
     ("visual_enter", Command::VisualEnter),
     ("visual_enter_char", Command::VisualEnterChar),
     ("visual_enter_word", Command::VisualEnterWord),
