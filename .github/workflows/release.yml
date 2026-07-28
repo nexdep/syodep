@@ -199,7 +199,11 @@ jobs:
           $fixture = "$PWD\fixture.pdf"
 
           # --- silent install; /D= must be last, unquoted, no trailing slash
-          $p = Start-Process .\syodep-setup.exe -ArgumentList "/S","/D=$dst" -Wait -PassThru
+          # -ArgumentList must be ONE string. Given an array, PowerShell may
+          # quote elements, and a quoted /D= is silently discarded by NSIS --
+          # the installer then uses its default directory, which is writable,
+          # so a "must fail" test passes against the wrong target entirely.
+          $p = Start-Process .\syodep-setup.exe -ArgumentList "/S /D=$dst" -Wait -PassThru
           if ($p.ExitCode -ne 0) { throw "silent install exited $($p.ExitCode)" }
           foreach ($f in "syodep.exe","Uninstall.exe","syodep.ico","LICENSE") {
             if (-not (Test-Path "$dst\$f")) { throw "installed tree is missing $f" }
@@ -245,7 +249,7 @@ jobs:
           # --- _?= keeps the uninstaller in place instead of relaunching from
           #     %TEMP% and returning immediately, which would race every
           #     assertion below. It must be the last argument.
-          $p = Start-Process "$dst\Uninstall.exe" -ArgumentList "/S","_?=$dst" -Wait -PassThru
+          $p = Start-Process "$dst\Uninstall.exe" -ArgumentList "/S _?=$dst" -Wait -PassThru
           if ($p.ExitCode -ne 0) { throw "silent uninstall exited $($p.ExitCode)" }
           if (Test-Path "$dst\syodep.exe") { throw "payload survived uninstall" }
           if (Test-Path "$dst\platforms") { throw "Qt plugins survived uninstall" }
@@ -259,13 +263,13 @@ jobs:
           Remove-Item -Recurse -Force $dst -ErrorAction SilentlyContinue
 
           # --- opt-in association really opts in
-          $p = Start-Process .\syodep-setup.exe -ArgumentList "/S","/ASSOCIATE","/D=$dst" -Wait -PassThru
+          $p = Start-Process .\syodep-setup.exe -ArgumentList "/S /ASSOCIATE /D=$dst" -Wait -PassThru
           if ($p.ExitCode -ne 0) { throw "install with /ASSOCIATE exited $($p.ExitCode)" }
           $owp = Get-ItemProperty "HKCU:\Software\Classes\.pdf\OpenWithProgids"
           if ($owp.PSObject.Properties.Name -notcontains 'syodep.pdf') {
             throw "/ASSOCIATE did not register the ProgID"
           }
-          Start-Process "$dst\Uninstall.exe" -ArgumentList "/S","_?=$dst" -Wait
+          Start-Process "$dst\Uninstall.exe" -ArgumentList "/S _?=$dst" -Wait
           Remove-Item -Recurse -Force $dst -ErrorAction SilentlyContinue
           Remove-Item -Recurse -Force "$env:APPDATA\syodep" -ErrorAction SilentlyContinue
 
@@ -278,15 +282,8 @@ jobs:
           #     *file* where a parent directory is required fails for everyone.
           $blocker = "$PWD\blocker"
           Set-Content $blocker "not a directory"
-          # TEMPORARY: clear the installer's diagnostic log so the lines below
-          # come only from this run. Remove with the instrumentation.
-          Remove-Item "$env:TEMP\syodep-diag.txt" -ErrorAction SilentlyContinue
           $p = Start-Process .\syodep-setup.exe `
-            -ArgumentList "/S","/D=$blocker\syodep" -Wait -PassThru
-          Write-Host "--- installer diagnostic ---"
-          Get-Content "$env:TEMP\syodep-diag.txt" -ErrorAction SilentlyContinue |
-            ForEach-Object { Write-Host "  $_" }
-          Write-Host "--- end diagnostic (exit $($p.ExitCode)) ---"
+            -ArgumentList "/S /D=$blocker\syodep" -Wait -PassThru
           # Assert the outcome as well as the code: "installed nothing" is the
           # property that actually matters, and it holds regardless of how NSIS
           # chooses to report failure.

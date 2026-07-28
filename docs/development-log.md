@@ -124,6 +124,21 @@ Three traps it is written around:
   no directory page, so `$INSTDIR` is already final at `.onInit` and can be
   rejected there.
 
+  The real cause turned out to be in the *test*, not the installer. CI passed
+  `-ArgumentList "/S","/D=..."` as an array; PowerShell may quote array
+  elements, and **NSIS silently discards a quoted `/D=`**. The installer fell
+  back to its default directory — which is writable — so `CheckWritable`
+  correctly passed and the "must fail" case was never aimed at the bad path at
+  all. Instrumenting `.onInit` to log `$INSTDIR` showed it plainly:
+  `C:\Users\runneradmin\AppData\Local\Programs\syodep`, the default, not the
+  blocker path. Passing `-ArgumentList` as a single string fixes it.
+
+  Six dispatches were spent before that instrumentation went in, each testing a
+  hypothesis about NSIS when the fault was in how the installer was being
+  invoked. The lesson is cheap to state and was expensive to learn: when a
+  check "does not fire", confirm it is being given the input you think it is
+  before theorising about the check.
+
   Chasing this is what motivated running the installer under **Wine** locally,
   which turned a 12-minute dispatch into a few seconds and settled three
   questions by experiment rather than by guessing: `SetErrorLevel` + `Abort` in
