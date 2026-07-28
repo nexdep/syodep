@@ -113,15 +113,33 @@ FunctionEnd
 
 ; A per-user installer pointed at, say, C:\Program Files via /D= would other-
 ; wise half-install and still report success.
+; Checks the outcome rather than the error flag. CreateDirectory and FileOpen
+; do not reliably raise it, so an earlier version of this function passed on a
+; path it could not write to, the install failed later during File extraction,
+; and the process still exited 0 -- a silent install that reported success
+; having installed nothing.
 Function CheckWritable
-    ClearErrors
     CreateDirectory "$INSTDIR"
+    ; "dir\*.*" is the NSIS idiom for "this directory exists".
+    ${IfNot} ${FileExists} "$INSTDIR\*.*"
+        SetErrorLevel 2
+        Abort "Cannot create $INSTDIR."
+    ${EndIf}
+    ; A failed FileOpen leaves the handle empty, which is checkable directly.
+    ClearErrors
     FileOpen $0 "$INSTDIR\.syodep-writetest" w
-    ${If} ${Errors}
+    ${If} $0 == ""
+    ${OrIf} ${Errors}
         SetErrorLevel 2
         Abort "Cannot write to $INSTDIR."
     ${EndIf}
+    FileWrite $0 "w"
     FileClose $0
+    ; And confirm it truly landed, rather than trusting the write.
+    ${IfNot} ${FileExists} "$INSTDIR\.syodep-writetest"
+        SetErrorLevel 2
+        Abort "Cannot write to $INSTDIR."
+    ${EndIf}
     Delete "$INSTDIR\.syodep-writetest"
 FunctionEnd
 

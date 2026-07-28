@@ -120,11 +120,23 @@ Three traps it is written around:
   The target has to be unwritable *regardless of privilege* — the first attempt
   used `C:\Windows\System32`, which CI can write to because it runs elevated.
   And the check has to run in `.onInit`, not in a section: `Abort` in an install
-  section cancels the section but the process still exits 0, so the failure was
-  invisible exactly where it mattered. Under `/S` there is no directory page, so
-  `$INSTDIR` is already final at `.onInit` and can be rejected there. The CI
-  assertion now also checks that nothing was written, which holds whatever exit
-  code NSIS picks.
+  section cancels the section but the process still exits 0. Under `/S` there is
+  no directory page, so `$INSTDIR` is already final at `.onInit` and can be
+  rejected there.
+
+  Chasing this is what motivated running the installer under **Wine** locally,
+  which turned a 12-minute dispatch into a few seconds and settled three
+  questions by experiment rather than by guessing: `SetErrorLevel` + `Abort` in
+  `.onInit` under `/S` *does* yield exit 2; `/D=` *is* already visible in
+  `.onInit`; and `CreateDirectory`/`FileOpen` do **not** reliably raise the
+  error flag. So `CheckWritable` now tests outcomes — does the directory exist,
+  is the handle non-empty, did the probe file actually land — rather than
+  trusting the flag.
+
+  Wine's limits are worth recording too: it happily "succeeds" at creating a
+  directory beneath a regular file, so it cannot reproduce Windows filesystem
+  failures. It is good for exit-code and control-flow semantics, useless for
+  permission semantics.
 
 ### Notes / remaining
 
