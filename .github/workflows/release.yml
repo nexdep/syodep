@@ -282,8 +282,13 @@ jobs:
           #     *file* where a parent directory is required fails for everyone.
           $blocker = "$PWD\blocker"
           Set-Content $blocker "not a directory"
+          Remove-Item "$env:TEMP\syodep-diag.txt" -ErrorAction SilentlyContinue
           $p = Start-Process .\syodep-setup.exe `
             -ArgumentList "/S /D=$blocker\syodep" -Wait -PassThru
+          Write-Host "--- installer diagnostic ---"
+          Get-Content "$env:TEMP\syodep-diag.txt" -ErrorAction SilentlyContinue |
+            ForEach-Object { Write-Host "  $_" }
+          Write-Host "--- end diagnostic (exit $($p.ExitCode)) ---"
           # Assert the outcome as well as the code: "installed nothing" is the
           # property that actually matters, and it holds regardless of how NSIS
           # chooses to report failure.
