@@ -63,7 +63,8 @@ them, and is the seam highlighting builds on. See the development log.
   - ✅ Windows CI build + smoke test on every push/PR
   - ✅ Windows portable zip release artifact (windeployqt, staged smoke test)
   - ✅ Linux AppImage (ubuntu:22.04 container build, linuxdeploy + Qt plugin)
-  - ⬜ Windows NSIS installer
+  - ✅ Windows NSIS installer (per-user, silent-capable, opt-in PDF handler)
+  - ⬜ Windows code signing (unsigned builds trip SmartScreen)
   - ✅ attach artifacts to GitHub releases on tag push
   - ✅ Scoop bucket (`bucket/syodep.json`, auto-bumped on release)
 - ⬜ Command palette (`:` / `<C-p>`) listing the command registry

@@ -33,6 +33,21 @@ scoop bucket add syodep https://github.com/nexdep/syodep
 scoop install syodep
 ```
 
+### Windows (installer)
+
+Download `syodep-vX.Y.Z-win64-setup.exe` from the
+[releases page](https://github.com/nexdep/syodep/releases) and run it. It
+installs for the current user only, so it needs no administrator rights.
+
+The installer is unsigned, so SmartScreen shows "Windows protected your PC" --
+choose **More info** then **Run anyway**, or use Scoop above, which is not
+subject to that prompt. Uninstall from Settings > Apps; your config and reading
+positions in `%APPDATA%\syodep` are left in place.
+
+For unattended installs: `syodep-setup.exe /S`, optionally with `/ASSOCIATE` to
+list syodep in the PDF app picker, and `/D=C:\path` to choose the location
+(last argument, unquoted, no trailing backslash).
+
 ### Windows (portable zip)
 
 Download `syodep-vX.Y.Z-win64.zip` from the
