@@ -122,7 +122,7 @@ Function CheckWritable
     CreateDirectory "$INSTDIR"
     ; "dir\*.*" is the NSIS idiom for "this directory exists".
     ${IfNot} ${FileExists} "$INSTDIR\*.*"
-        SetErrorLevel 2
+        SetErrorLevel 3
         Abort "Cannot create $INSTDIR."
     ${EndIf}
     ; A failed FileOpen leaves the handle empty, which is checkable directly.
@@ -130,14 +130,14 @@ Function CheckWritable
     FileOpen $0 "$INSTDIR\.syodep-writetest" w
     ${If} $0 == ""
     ${OrIf} ${Errors}
-        SetErrorLevel 2
+        SetErrorLevel 4
         Abort "Cannot write to $INSTDIR."
     ${EndIf}
     FileWrite $0 "w"
     FileClose $0
     ; And confirm it truly landed, rather than trusting the write.
     ${IfNot} ${FileExists} "$INSTDIR\.syodep-writetest"
-        SetErrorLevel 2
+        SetErrorLevel 5
         Abort "Cannot write to $INSTDIR."
     ${EndIf}
     Delete "$INSTDIR\.syodep-writetest"
