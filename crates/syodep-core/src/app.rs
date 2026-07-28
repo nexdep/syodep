@@ -21,8 +21,8 @@ use syodep_storage::{Position, Storage};
 use crate::caret::{
     column_index_of, column_ranges, continues_word_run, is_sentence_terminator,
     is_sentence_trailer, is_word_target, nearest_cell_in_line, nearest_line_in_column,
-    paragraph_segments, word_class, Caret, Dir, LineMark, Mode, ParagraphMark, SentenceMark,
-    VisualScope, VisualSelection, WordClass, WordMark,
+    paragraph_segments, word_class, Caret, Dir, LineMark, Mode, ParagraphMark, Scope, SentenceMark,
+    VisualSelection, WordClass, WordMark,
 };
 use crate::command::Command;
 use crate::input::{InputState, KeyOutcome, Keymap, KeymapError};
@@ -480,13 +480,11 @@ impl App {
             Command::ParagraphFocusNext => return self.paragraph_move(true, count),
             Command::ParagraphFocusPrev => return self.paragraph_move(false, count),
             Command::VisualEnter => return self.enter_visual(None),
-            Command::VisualEnterChar => return self.enter_visual(Some(VisualScope::Char)),
-            Command::VisualEnterWord => return self.enter_visual(Some(VisualScope::Word)),
-            Command::VisualEnterLine => return self.enter_visual(Some(VisualScope::Line)),
-            Command::VisualEnterSentence => return self.enter_visual(Some(VisualScope::Sentence)),
-            Command::VisualEnterParagraph => {
-                return self.enter_visual(Some(VisualScope::Paragraph))
-            }
+            Command::VisualEnterChar => return self.enter_visual(Some(Scope::Char)),
+            Command::VisualEnterWord => return self.enter_visual(Some(Scope::Word)),
+            Command::VisualEnterLine => return self.enter_visual(Some(Scope::Line)),
+            Command::VisualEnterSentence => return self.enter_visual(Some(Scope::Sentence)),
+            Command::VisualEnterParagraph => return self.enter_visual(Some(Scope::Paragraph)),
             Command::VisualExit => return self.exit_visual(),
             Command::VisualLeft => return self.visual_move(Dir::Left, count),
             Command::VisualRight => return self.visual_move(Dir::Right, count),
@@ -496,24 +494,16 @@ impl App {
             Command::VisualEndWord => return self.visual_word_move(WordMotion::End, count),
             Command::VisualPrevWord => return self.visual_word_move(WordMotion::PrevStart, count),
             Command::VisualSwapEnds => return self.visual_swap_ends(),
-            Command::VisualScopeChar => return self.set_head_scope(VisualScope::Char, false),
-            Command::VisualScopeWord => return self.set_head_scope(VisualScope::Word, false),
-            Command::VisualScopeLine => return self.set_head_scope(VisualScope::Line, false),
-            Command::VisualScopeSentence => {
-                return self.set_head_scope(VisualScope::Sentence, false)
-            }
-            Command::VisualScopeParagraph => {
-                return self.set_head_scope(VisualScope::Paragraph, false)
-            }
-            Command::VisualOtherChar => return self.set_head_scope(VisualScope::Char, true),
-            Command::VisualOtherWord => return self.set_head_scope(VisualScope::Word, true),
-            Command::VisualOtherLine => return self.set_head_scope(VisualScope::Line, true),
-            Command::VisualOtherSentence => {
-                return self.set_head_scope(VisualScope::Sentence, true)
-            }
-            Command::VisualOtherParagraph => {
-                return self.set_head_scope(VisualScope::Paragraph, true)
-            }
+            Command::VisualScopeChar => return self.set_head_scope(Scope::Char, false),
+            Command::VisualScopeWord => return self.set_head_scope(Scope::Word, false),
+            Command::VisualScopeLine => return self.set_head_scope(Scope::Line, false),
+            Command::VisualScopeSentence => return self.set_head_scope(Scope::Sentence, false),
+            Command::VisualScopeParagraph => return self.set_head_scope(Scope::Paragraph, false),
+            Command::VisualOtherChar => return self.set_head_scope(Scope::Char, true),
+            Command::VisualOtherWord => return self.set_head_scope(Scope::Word, true),
+            Command::VisualOtherLine => return self.set_head_scope(Scope::Line, true),
+            Command::VisualOtherSentence => return self.set_head_scope(Scope::Sentence, true),
+            Command::VisualOtherParagraph => return self.set_head_scope(Scope::Paragraph, true),
             _ => {}
         }
 
@@ -785,7 +775,7 @@ impl App {
         let goal_x = self.caret_goal_x;
         let goal_y = self.line_goal_y;
         for _ in 0..steps {
-            if !self.step_scope(&mut caret, VisualScope::Char, dir, goal_x, goal_y) {
+            if !self.step_scope(&mut caret, Scope::Char, dir, goal_x, goal_y) {
                 break; // reached a document edge
             }
         }
@@ -1197,7 +1187,7 @@ impl App {
             cell: 0,
         };
         for _ in 0..steps {
-            if !self.step_scope(&mut caret, VisualScope::Line, dir, goal_x, goal_y) {
+            if !self.step_scope(&mut caret, Scope::Line, dir, goal_x, goal_y) {
                 break; // document edge, or single-column page for H/L
             }
         }
@@ -1418,7 +1408,7 @@ impl App {
         let goal_y = self.line_goal_y;
         let mut caret = Self::word_mark_caret(mark);
         for _ in 0..steps {
-            if !self.step_scope(&mut caret, VisualScope::Word, dir, goal_x, goal_y) {
+            if !self.step_scope(&mut caret, Scope::Word, dir, goal_x, goal_y) {
                 break; // reached a document edge
             }
         }
@@ -1750,7 +1740,7 @@ impl App {
             cell: mark.start_cell,
         };
         for _ in 0..steps {
-            if !self.step_scope(&mut caret, VisualScope::Sentence, dir, 0.0, 0.0) {
+            if !self.step_scope(&mut caret, Scope::Sentence, dir, 0.0, 0.0) {
                 break; // reached a document edge
             }
         }
@@ -1958,7 +1948,7 @@ impl App {
             cell: 0,
         };
         for _ in 0..steps {
-            if !self.step_scope(&mut caret, VisualScope::Paragraph, dir, 0.0, 0.0) {
+            if !self.step_scope(&mut caret, Scope::Paragraph, dir, 0.0, 0.0) {
                 break; // reached a document edge
             }
         }
@@ -2117,16 +2107,16 @@ impl App {
     ///
     /// This is the whole of the per-scope behavior: everything else in visual
     /// mode is scope-independent.
-    fn scope_span(&mut self, at: Caret, scope: VisualScope) -> (Caret, Caret) {
+    fn scope_span(&mut self, at: Caret, scope: Scope) -> (Caret, Caret) {
         match scope {
-            VisualScope::Char => (at, at),
-            VisualScope::Word => (self.word_run_start(at), self.word_run_end(at)),
-            VisualScope::Line => {
+            Scope::Char => (at, at),
+            Scope::Word => (self.word_run_start(at), self.word_run_end(at)),
+            Scope::Line => {
                 let last = self.line_cell_count(at.page, at.line).saturating_sub(1);
                 (Caret { cell: 0, ..at }, Caret { cell: last, ..at })
             }
-            VisualScope::Sentence => (self.sentence_run_start(at), self.sentence_run_end(at)),
-            VisualScope::Paragraph => match self.paragraph_mark_containing(at.page, at.line) {
+            Scope::Sentence => (self.sentence_run_start(at), self.sentence_run_end(at)),
+            Scope::Paragraph => match self.paragraph_mark_containing(at.page, at.line) {
                 Some(p) => {
                     let last_cell = self.line_cell_count(at.page, p.end_line).saturating_sub(1);
                     (
@@ -2203,7 +2193,7 @@ impl App {
 
     /// Enter visual mode. `scope = None` inherits the current mode's
     /// granularity (`v` from word focus selects word-wise).
-    fn enter_visual(&mut self, scope: Option<VisualScope>) -> Effects {
+    fn enter_visual(&mut self, scope: Option<Scope>) -> Effects {
         if self.session.is_none() {
             return Effects::default();
         }
@@ -2220,7 +2210,7 @@ impl App {
             self.refresh_visual_span();
             return Effects::redraw();
         }
-        let scope = scope.unwrap_or_else(|| VisualScope::from_mode(self.mode));
+        let scope = scope.unwrap_or_else(|| Scope::from_mode(self.mode));
         let Some(at) = self.visual_entry_caret() else {
             return Effects::default();
         };
@@ -2287,7 +2277,7 @@ impl App {
 
     /// Set the active end's granularity, optionally switching ends first
     /// (`vw` vs `ow`).
-    fn set_head_scope(&mut self, scope: VisualScope, swap_first: bool) -> Effects {
+    fn set_head_scope(&mut self, scope: Scope, swap_first: bool) -> Effects {
         let Some(mut sel) = self.visual else {
             return Effects::default();
         };
@@ -2322,20 +2312,20 @@ impl App {
     fn step_scope(
         &mut self,
         caret: &mut Caret,
-        scope: VisualScope,
+        scope: Scope,
         dir: Dir,
         goal_x: f32,
         goal_y: f32,
     ) -> bool {
         let forward = matches!(dir, Dir::Right | Dir::Down);
         match scope {
-            VisualScope::Char => match dir {
+            Scope::Char => match dir {
                 Dir::Left => self.step_left(caret),
                 Dir::Right => self.step_right(caret),
                 Dir::Up => self.step_up(caret, goal_x),
                 Dir::Down => self.step_down(caret, goal_x),
             },
-            VisualScope::Word => match dir {
+            Scope::Word => match dir {
                 Dir::Left => self.step_prev_word_start(caret),
                 Dir::Right => self.step_next_word_start(caret),
                 Dir::Up | Dir::Down => {
@@ -2345,7 +2335,7 @@ impl App {
                     moved
                 }
             },
-            VisualScope::Line => {
+            Scope::Line => {
                 let mut mark = LineMark {
                     page: caret.page,
                     line: caret.line,
@@ -2363,7 +2353,7 @@ impl App {
                 };
                 moved
             }
-            VisualScope::Sentence => {
+            Scope::Sentence => {
                 let mut mark = self.sentence_mark_from_caret(*caret);
                 let moved = if forward {
                     self.sentence_step_next(&mut mark)
@@ -2377,7 +2367,7 @@ impl App {
                 };
                 moved
             }
-            VisualScope::Paragraph => {
+            Scope::Paragraph => {
                 let Some(mut mark) = self.paragraph_mark_containing(caret.page, caret.line) else {
                     return false;
                 };
@@ -2413,7 +2403,7 @@ impl App {
         // Horizontal motion redefines the column vertical motion aims for --
         // except in line scope, where the axes are swapped: there `h`/`l` jump
         // columns and `j`/`k` set the row those jumps aim at.
-        if scope == VisualScope::Line {
+        if scope == Scope::Line {
             if matches!(dir, Dir::Up | Dir::Down) {
                 self.update_visual_goal_y(sel.head);
             }
@@ -3602,7 +3592,7 @@ mod tests {
         press(&mut app, "c");
         assert_eq!(app.mode(), Mode::Visual);
         let sel = app.visual_selection().expect("selection");
-        assert_eq!(sel.head_scope, VisualScope::Char);
+        assert_eq!(sel.head_scope, Scope::Char);
         assert_eq!(sel.return_mode, Mode::Normal);
         // Anchor and head start together, so the span is a single cell.
         let (start, end) = app.visual_span().unwrap();
@@ -3622,7 +3612,7 @@ mod tests {
         press(&mut app, "vk");
         assert_eq!(app.mode(), Mode::Visual);
         let sel = app.visual_selection().unwrap();
-        assert_eq!(sel.head_scope, VisualScope::Word);
+        assert_eq!(sel.head_scope, Scope::Word);
         assert_eq!(sel.return_mode, Mode::WordFocus);
         // `k` had nowhere to go on a one-line document, so the span is still
         // exactly the entered word.
@@ -3637,7 +3627,7 @@ mod tests {
         let mut app = app_with_text_pages(dir.path(), &["alpha beta"]);
         press(&mut app, "ve");
         let sel = app.visual_selection().unwrap();
-        assert_eq!(sel.head_scope, VisualScope::Line);
+        assert_eq!(sel.head_scope, Scope::Line);
         // A whole line is selected from the very first entry.
         let (start, end) = app.visual_span().unwrap();
         assert_eq!(start.cell, 0);
@@ -3708,8 +3698,8 @@ mod tests {
         // that is not moving keeps its line scope.
         press(&mut app, "ow");
         let sel = app.visual_selection().unwrap();
-        assert_eq!(sel.head_scope, VisualScope::Word);
-        assert_eq!(sel.anchor_scope, VisualScope::Line);
+        assert_eq!(sel.head_scope, Scope::Word);
+        assert_eq!(sel.anchor_scope, Scope::Line);
         assert_eq!(app.visual_span().unwrap().1, end_before);
         assert!(app.status_text().contains("-- VISUAL (word/line) --"));
     }
@@ -3722,8 +3712,8 @@ mod tests {
         let sel_before = app.visual_selection().unwrap();
         press(&mut app, "vw");
         let sel = app.visual_selection().unwrap();
-        assert_eq!(sel.head_scope, VisualScope::Word);
-        assert_eq!(sel.anchor_scope, VisualScope::Char);
+        assert_eq!(sel.head_scope, Scope::Word);
+        assert_eq!(sel.anchor_scope, Scope::Char);
         assert_eq!(sel.head, sel_before.head, "no swap");
     }
 

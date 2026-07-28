@@ -36,16 +36,18 @@ pub enum Mode {
     /// `hjkl`/arrows step paragraph-wise (a linear sequence).
     ParagraphFocus,
     /// Visual mode: a two-ended selection. `hjkl`/arrows grow it by one unit of
-    /// the active end's [`VisualScope`]; `o` swaps which end moves.
+    /// the active end's [`Scope`]; `o` swaps which end moves.
     Visual,
 }
 
-/// The granularity one end of a [`VisualSelection`] moves and snaps by.
+/// A granularity that a position moves and snaps by.
 ///
-/// Each end carries its own scope, so a selection can be line-granular at one
-/// edge and word-granular at the other (`vl` then `ow`).
+/// Visual mode carries one per end, so a selection can be line-granular at one
+/// edge and word-granular at the other (`ve` then `ow`). `App::step_scope` is
+/// the single table mapping a scope and a direction onto a motion, shared by
+/// the focus modes and visual so a scope cannot mean two different things.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VisualScope {
+pub enum Scope {
     Char,
     Word,
     Line,
@@ -53,7 +55,7 @@ pub enum VisualScope {
     Paragraph,
 }
 
-impl VisualScope {
+impl Scope {
     /// The scope a focus mode hands to visual mode when entered with a bare
     /// `v`. Modes without a natural granularity select by character.
     pub fn from_mode(mode: Mode) -> Self {
@@ -91,9 +93,9 @@ impl VisualScope {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VisualSelection {
     pub anchor: Caret,
-    pub anchor_scope: VisualScope,
+    pub anchor_scope: Scope,
     pub head: Caret,
-    pub head_scope: VisualScope,
+    pub head_scope: Scope,
     /// The mode to restore when visual mode is left with `<Esc>`.
     pub return_mode: Mode,
 }
@@ -389,19 +391,13 @@ mod tests {
 
     #[test]
     fn visual_scope_is_inherited_from_the_focus_mode() {
-        assert_eq!(VisualScope::from_mode(Mode::WordFocus), VisualScope::Word);
-        assert_eq!(VisualScope::from_mode(Mode::LineFocus), VisualScope::Line);
-        assert_eq!(
-            VisualScope::from_mode(Mode::SentenceFocus),
-            VisualScope::Sentence
-        );
-        assert_eq!(
-            VisualScope::from_mode(Mode::ParagraphFocus),
-            VisualScope::Paragraph
-        );
+        assert_eq!(Scope::from_mode(Mode::WordFocus), Scope::Word);
+        assert_eq!(Scope::from_mode(Mode::LineFocus), Scope::Line);
+        assert_eq!(Scope::from_mode(Mode::SentenceFocus), Scope::Sentence);
+        assert_eq!(Scope::from_mode(Mode::ParagraphFocus), Scope::Paragraph);
         // Normal and caret focus have no larger unit, so they select by char.
-        assert_eq!(VisualScope::from_mode(Mode::Normal), VisualScope::Char);
-        assert_eq!(VisualScope::from_mode(Mode::CaretFocus), VisualScope::Char);
+        assert_eq!(Scope::from_mode(Mode::Normal), Scope::Char);
+        assert_eq!(Scope::from_mode(Mode::CaretFocus), Scope::Char);
     }
 
     #[test]
@@ -409,16 +405,16 @@ mod tests {
         let at = |page, line, cell| Caret { page, line, cell };
         let mut sel = VisualSelection {
             anchor: at(0, 0, 0),
-            anchor_scope: VisualScope::Line,
+            anchor_scope: Scope::Line,
             head: at(0, 3, 7),
-            head_scope: VisualScope::Word,
+            head_scope: Scope::Word,
             return_mode: Mode::Normal,
         };
         sel.swap_ends();
         assert_eq!(sel.anchor, at(0, 3, 7));
-        assert_eq!(sel.anchor_scope, VisualScope::Word);
+        assert_eq!(sel.anchor_scope, Scope::Word);
         assert_eq!(sel.head, at(0, 0, 0));
-        assert_eq!(sel.head_scope, VisualScope::Line);
+        assert_eq!(sel.head_scope, Scope::Line);
         // Swapping is an involution, so `oo` is a no-op.
         let once = sel;
         sel.swap_ends();
