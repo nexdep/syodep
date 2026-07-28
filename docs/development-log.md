@@ -124,20 +124,26 @@ Three traps it is written around:
   no directory page, so `$INSTDIR` is already final at `.onInit` and can be
   rejected there.
 
-  The real cause turned out to be in the *test*, not the installer. CI passed
-  `-ArgumentList "/S","/D=..."` as an array; PowerShell may quote array
-  elements, and **NSIS silently discards a quoted `/D=`**. The installer fell
-  back to its default directory — which is writable — so `CheckWritable`
-  correctly passed and the "must fail" case was never aimed at the bad path at
-  all. Instrumenting `.onInit` to log `$INSTDIR` showed it plainly:
-  `C:\Users\runneradmin\AppData\Local\Programs\syodep`, the default, not the
-  blocker path. Passing `-ArgumentList` as a single string fixes it.
+  **The test's premise was impossible.** Logging `${GetParameters}` and
+  `$INSTDIR` from `.onInit` on the runner showed `$INSTDIR` was the *default*
+  install directory, not the unwritable one: **NSIS validates `/D=` and
+  silently falls back to `InstallDir` when the path is unusable.** So the
+  installer installed itself to its default location and correctly exited 0.
+  `CheckWritable` passed because the directory it was handed genuinely was
+  writable. Nothing was ever aimed at the bad path.
 
-  Six dispatches were spent before that instrumentation went in, each testing a
-  hypothesis about NSIS when the fault was in how the installer was being
-  invoked. The lesson is cheap to state and was expensive to learn: when a
-  check "does not fire", confirm it is being given the input you think it is
-  before theorising about the check.
+  There is therefore no way to provoke a failed install through `/D=`, and the
+  negative test was removed rather than kept in a form that tests nothing.
+  `CheckWritable` remains unexercised by CI; it is reachable only through a
+  directory chosen interactively.
+
+  Seven dispatches went into this, each testing a hypothesis about NSIS
+  internals, when the fault was that the installer was never receiving the
+  input the test claimed to give it. Two process errors made it worse: the
+  instrumentation that settled it in one run should have gone in after the
+  second failure rather than the seventh, and it was reverted once before the
+  fix was confirmed, which cost another cycle. When something "does not fire",
+  log its input before theorising about its logic.
 
   Chasing this is what motivated running the installer under **Wine** locally,
   which turned a 12-minute dispatch into a few seconds and settled three
