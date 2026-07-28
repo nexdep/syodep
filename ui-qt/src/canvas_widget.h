@@ -13,6 +13,7 @@
 #include <QHash>
 #include <QImage>
 #include <QOpenGLWidget>
+#include <QTimer>
 
 #include "syodep_ffi.h"
 
@@ -47,7 +48,14 @@ private:
     void applyEffects(uint32_t effects);
     QImage pageImage(size_t page);
 
+    // A half-typed sequence (`c`, `v`, `o` while selecting) waits for either
+    // the next key or a pause. The core owns the decision; the widget only
+    // owns the clock, because the core must stay deterministic and testable.
+    void updatePendingTimer(uint32_t effects);
+
     SyoApp *m_app; // owned by MainWindow
+    QTimer m_pendingTimer;
+
     QColor m_background;
     // One colour for every focus mode, one for the selection: the highlight
     // says whether focus or selection is active, not which scope.

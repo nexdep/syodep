@@ -61,11 +61,14 @@ while IFS= read -r command; do
 done < <(awk '/pub fn default_visual_keybindings/,/^}/' crates/syodep-config/src/lib.rs \
     | grep -oP '", "\K[a-z_]+(?="\))')
 
-# Every [view] config field must appear in docs/config.md.
-while IFS= read -r option; do
-    grep -q "\`$option\`" docs/config.md || err "config option not documented: $option"
-done < <(awk '/pub struct ViewConfig/,/^}/' crates/syodep-config/src/lib.rs \
-    | grep -oP '^\s*pub \K[a-z_]+(?=:)')
+# Every [view] and [input] config field must appear in docs/config.md.
+for section in ViewConfig InputConfig; do
+    while IFS= read -r option; do
+        grep -q "\`$option\`" docs/config.md \
+            || err "config option not documented: $option"
+    done < <(awk "/pub struct $section/,/^}/" crates/syodep-config/src/lib.rs \
+        | grep -oP '^\s*pub \K[a-z_]+(?=:)')
+done
 
 # Cargo.toml holds the only copy of the version: CMake reads it at configure
 # time and the shell reports it via SYODEP_VERSION. Drift is impossible by

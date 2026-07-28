@@ -37,6 +37,10 @@ pub struct Effects {
     /// The shell should show a native file-open dialog and call
     /// [`App::open_document`] with the result.
     pub open_file_dialog: bool,
+    /// A partial key sequence is buffered. The shell should arm its pause
+    /// timer and call [`App::handle_timeout`] when it fires; when this is
+    /// false it should cancel any armed timer.
+    pub pending_input: bool,
 }
 
 impl Effects {
@@ -54,6 +58,9 @@ impl Effects {
             redraw: self.redraw || other.redraw,
             quit: self.quit || other.quit,
             open_file_dialog: self.open_file_dialog || other.open_file_dialog,
+            // Not a request like the others: it describes the state left
+            // behind, so the later value wins rather than OR-ing.
+            pending_input: other.pending_input,
         }
     }
 }
@@ -320,25 +327,44 @@ impl App {
     /// chords. The keymap is re-selected on every iteration, so a
     /// mode-changing command applies to the chords that follow it.
     pub fn handle_key(&mut self, chord: Chord) -> Effects {
+        // Scoped so the keymap borrow ends before `dispatch`. Borrowing the
+        // field directly (rather than through a `&self` helper) keeps it
+        // disjoint from `self.input`.
+        let outcome = {
+            let keymap = match self.mode {
+                Mode::Normal => &self.keymap,
+                Mode::Focus => &self.focus_keymap,
+                Mode::Visual => &self.visual_keymap,
+            };
+            self.input.handle(keymap, chord)
+        };
+        self.dispatch(outcome)
+    }
+
+    /// End a pending sequence because the shell's pause timer fired.
+    ///
+    /// The core never reads a clock: the shell owns the timer and arms it when
+    /// [`Effects::pending_input`] says a pause could resolve something.
+    pub fn handle_timeout(&mut self) -> Effects {
+        let outcome = {
+            let keymap = match self.mode {
+                Mode::Normal => &self.keymap,
+                Mode::Focus => &self.focus_keymap,
+                Mode::Visual => &self.visual_keymap,
+            };
+            self.input.timeout(keymap)
+        };
+        self.dispatch(outcome)
+    }
+
+    /// Run one input outcome and everything the replay queue produces after it.
+    fn dispatch(&mut self, outcome: KeyOutcome) -> Effects {
         let mut effects = Effects::default();
-        let mut next = Some(chord);
+        let mut next = Some(outcome);
         // The replay queue shrinks on every pass, so this always terminates;
         // the bound only guards against a future bug turning it into a spin.
         for _ in 0..32 {
-            let Some(chord) = next.take() else {
-                return effects;
-            };
-            // Scoped so the keymap borrow ends before `execute`. Borrowing the
-            // field directly (rather than through a `&self` helper) keeps it
-            // disjoint from `self.input`.
-            let outcome = {
-                let keymap = match self.mode {
-                    Mode::Normal => &self.keymap,
-                    Mode::Focus => &self.focus_keymap,
-                    Mode::Visual => &self.visual_keymap,
-                };
-                self.input.handle(keymap, chord)
-            };
+            let Some(outcome) = next.take() else { break };
             effects = effects.merge(match outcome {
                 // Redraw on pending input so the status line shows it.
                 KeyOutcome::Pending => Effects::redraw(),
@@ -348,9 +374,23 @@ impl App {
             if effects.quit {
                 break;
             }
-            next = self.input.next_replay();
+            // Re-select the keymap each pass: the command just run may have
+            // changed the mode, and the replayed chords must use the new one.
+            next = match self.input.next_replay() {
+                Some(chord) => {
+                    let keymap = match self.mode {
+                        Mode::Normal => &self.keymap,
+                        Mode::Focus => &self.focus_keymap,
+                        Mode::Visual => &self.visual_keymap,
+                    };
+                    Some(self.input.handle(keymap, chord))
+                }
+                None => None,
+            };
         }
-        self.input.clear();
+        // A partial sequence survives on purpose -- that is what the pause
+        // timer is for -- so only the replay queue is drained here.
+        effects.pending_input = self.input.has_pending_sequence();
         effects
     }
 
@@ -377,13 +417,14 @@ impl App {
                 };
             }
             Command::Cancel => return Effects::redraw(),
+            Command::FocusEnter => return self.enter_focus(self.focus_scope),
             Command::FocusEnterChar => return self.enter_focus(Scope::Char),
             Command::FocusEnterWord => return self.enter_focus(Scope::Word),
             Command::FocusEnterLine => return self.enter_focus(Scope::Line),
             Command::FocusEnterSentence => return self.enter_focus(Scope::Sentence),
             Command::FocusEnterParagraph => return self.enter_focus(Scope::Paragraph),
             Command::FocusExit => {
-                self.mode = Mode::Normal;
+                self.enter_normal_mode();
                 return Effects::redraw();
             }
             Command::FocusLeft => return self.focus_move(Dir::Left, count),
@@ -453,6 +494,7 @@ impl App {
             Command::Quit
             | Command::OpenFile
             | Command::Cancel
+            | Command::FocusEnter
             | Command::FocusEnterChar
             | Command::FocusEnterWord
             | Command::FocusEnterLine
@@ -1816,15 +1858,31 @@ impl App {
     /// visual mode (a `c` chord, say) is correct for free, for the same reason.
     fn exit_visual(&mut self) -> Effects {
         let Some(a) = self.visual else {
-            self.mode = Mode::Normal;
+            self.enter_normal_mode();
             return Effects::redraw();
         };
-        self.mode = a.return_mode;
+        if a.return_mode == Mode::Normal {
+            self.enter_normal_mode();
+        } else {
+            self.mode = a.return_mode;
+            self.refresh_focus_span();
+        }
         self.visual = None;
         self.visual_span = None;
-        self.refresh_focus_span();
         self.save_position();
         Effects::redraw()
+    }
+
+    /// Return to normal mode, resetting the scope.
+    ///
+    /// Normal mode has no granularity of its own, so it cannot sensibly
+    /// *remember* one: a bare `v` from a clean normal mode would otherwise
+    /// select by whatever unit you last happened to use. The position is kept
+    /// -- only the scope resets.
+    fn enter_normal_mode(&mut self) {
+        self.mode = Mode::Normal;
+        self.focus_scope = Scope::Char;
+        self.refresh_focus_span();
     }
 
     /// Exchange the anchored end with the live one, scopes included. Keeps the
@@ -1969,7 +2027,7 @@ impl App {
                     session.view.zoom() * 100.0
                 ));
             }
-            None => out.push_str("no document - press 'o' to open a PDF"),
+            None => out.push_str("no document - press <C-o> to open a PDF"),
         }
         if self.mode == Mode::Focus {
             // `-- FOCUS (word) --`, matching visual's `-- VISUAL (word) --`.
@@ -2292,8 +2350,12 @@ mod tests {
     #[test]
     fn open_file_key_requests_dialog() {
         let mut app = App::new(Config::default(), None);
-        let effects = press(&mut app, "o");
+        let effects = press(&mut app, "<C-o>");
         assert!(effects.open_file_dialog);
+        // A bare `o` is free for modes to claim -- visual mode swaps ends with
+        // it -- so it must not still open the dialog.
+        let effects = press(&mut app, "o");
+        assert!(!effects.open_file_dialog);
     }
 
     #[test]
@@ -3233,6 +3295,101 @@ mod tests {
         assert_eq!(start, end);
         assert!(app.visual_screen_rects().is_some());
         assert!(app.status_text().contains("-- VISUAL (char) --"));
+    }
+
+    /// A pause commits a half-typed sequence, so `c` and `v` can each enter
+    /// their mode on their own — keeping whatever scope is live.
+    #[test]
+    fn pausing_after_c_or_v_enters_the_mode_keeping_the_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta. gamma delta."]);
+
+        // `c` alone from normal mode: focus at char, since normal resets it.
+        press(&mut app, "c");
+        assert_eq!(app.mode(), Mode::Normal, "still waiting for a second key");
+        assert!(app.handle_timeout().redraw);
+        assert_eq!((app.mode(), app.focus_scope()), (Mode::Focus, Scope::Char));
+
+        // Change the scope, leave, and come back with a bare `c`: the scope is
+        // whatever focus mode last had.
+        press(&mut app, "cs");
+        assert_eq!(app.focus_scope(), Scope::Sentence);
+        press(&mut app, "v");
+        app.handle_timeout();
+        assert_eq!(app.mode(), Mode::Visual);
+        assert_eq!(
+            app.visual_selection().expect("selection").head_scope,
+            Scope::Sentence,
+            "a bare `v` inherits the live scope"
+        );
+
+        // `c` from visual mode keeps the selection's scope and drops the anchor.
+        let head = app.visual_selection().unwrap().head;
+        press(&mut app, "c");
+        app.handle_timeout();
+        assert_eq!(
+            (app.mode(), app.focus_scope()),
+            (Mode::Focus, Scope::Sentence)
+        );
+        assert_eq!(app.focus_caret(), Some(head));
+        assert!(app.visual_selection().is_none());
+    }
+
+    /// Typing a sequence at speed must never reach the pause, and the shell is
+    /// told exactly when a pause could do something.
+    #[test]
+    fn pending_input_effect_tracks_partial_sequences() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta"]);
+        // Half a chord: the shell should arm its timer.
+        assert!(press(&mut app, "c").pending_input);
+        // Completing it disarms, and `cw` means word focus -- not "focus, then
+        // move a word", which is what a pause between the keys would give.
+        let effects = press(&mut app, "w");
+        assert!(!effects.pending_input);
+        assert_eq!((app.mode(), app.focus_scope()), (Mode::Focus, Scope::Word));
+        assert_eq!(
+            app.focus_caret().unwrap().cell,
+            0,
+            "`cw` must not also move"
+        );
+        // A count on its own is not a partial sequence: nothing for a pause to
+        // resolve, so no timer.
+        assert!(!press(&mut app, "5").pending_input);
+    }
+
+    /// Normal mode has no granularity, so it does not remember one: a scope
+    /// used before an `<Esc>` must not leak into the next thing you do.
+    #[test]
+    fn scope_resets_when_returning_to_normal() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta. gamma delta."]);
+
+        // From focus mode.
+        press(&mut app, "cs");
+        assert_eq!(app.focus_scope(), Scope::Sentence);
+        press(&mut app, "<Esc>");
+        assert_eq!((app.mode(), app.focus_scope()), (Mode::Normal, Scope::Char));
+        // So a bare `v` now selects by character, not by sentence.
+        press(&mut app, "vk");
+        assert_eq!(
+            app.visual_selection().expect("selection").head_scope,
+            Scope::Char
+        );
+
+        // And from visual mode entered straight from normal.
+        press(&mut app, "vs");
+        assert_eq!(app.focus_scope(), Scope::Sentence);
+        press(&mut app, "<Esc>");
+        assert_eq!((app.mode(), app.focus_scope()), (Mode::Normal, Scope::Char));
+
+        // Leaving visual back into *focus* still carries the scope: focus does
+        // have a granularity, so there is something to remember.
+        press(&mut app, "cw");
+        press(&mut app, "vk");
+        press(&mut app, "ve");
+        press(&mut app, "<Esc>");
+        assert_eq!((app.mode(), app.focus_scope()), (Mode::Focus, Scope::Line));
     }
 
     #[test]

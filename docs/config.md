@@ -60,7 +60,7 @@ rather than silently interpreted.
 
 | Option | Type | Default | Meaning |
 |---|---|---|---|
-| `open_dir` | string | *(unset)* | starting directory for the Open dialog (the `open_file`/`o` command) |
+| `open_dir` | string | *(unset)* | starting directory for the Open dialog (the `open_file` command, `<C-o>`) |
 
 When `open_dir` is unset, the Open dialog starts in the directory syodep was
 launched from (the process working directory) — useful when launching from a
@@ -74,6 +74,30 @@ directory, syodep falls back to the launch directory and shows a warning.
 ```toml
 [files]
 open_dir = "/home/me/papers"
+```
+
+## `[input]`
+
+| Option | Type | Default | Meaning |
+|---|---|---|---|
+| `timeout_ms` | integer (ms) | `500` | how long a half-typed key sequence waits before acting on its own; `0` disables the pause |
+
+Some keys are both a command and the start of a longer sequence — `c`, `v`, and
+`o` while selecting. Rather than firing eagerly, syodep waits to see whether
+another key follows. The pause is the second way that wait can end: press the
+key, stop, and it acts.
+
+Sequences typed at normal speed never reach it, so `cw` still means word focus.
+Raise it if you type chords slowly and find them splitting in two; lower it if a
+deliberate pause feels sluggish. `0` restores the original behaviour, where only
+the next key press ever ends a wait — with the consequence that a binding which
+is also a prefix can then only be reached by following it with an unrelated key.
+
+See `docs/keybindings.md` for the full disambiguation rule.
+
+```toml
+[input]
+timeout_ms = 500
 ```
 
 ## `[keys]`

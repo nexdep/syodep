@@ -19,16 +19,28 @@ and the internals):
 a count that has already started (so `0` itself is bindable).
 
 **Disambiguation rule:** if a sequence is both a complete binding and a
-prefix of a longer one (e.g. binding both `o` and `ow`), syodep waits for
-more input rather than firing eagerly; press `<Esc>` to cancel pending
-input. There is no timeout — behavior is fully deterministic.
+prefix of a longer one (e.g. binding both `o` and `ow`), syodep waits
+rather than firing eagerly. The wait ends in one of three ways: the next
+key press, **a pause**, or `<Esc>`, which cancels pending input.
 
 If the wait ends in a sequence that is bound to nothing, syodep falls back
 to the **longest prefix that is itself a complete binding**: that command
 runs, and the leftover keys are replayed. So with both `o` and `ow` bound,
 `ow` runs `ow`, while `oj` runs `o` and then `j`. Without this, a binding
 that is also a prefix of a longer one could never be triggered on its own.
-The decision is still made by the next key press, never by elapsed time.
+
+**The pause** (`[input] timeout_ms`, 500 ms by default) is what lets such a
+binding be used on its own: press `o`, pause, and it runs. Sequences typed at
+normal speed never reach it — `cw` is word focus, while `c`, pause, `w` is
+focus mode followed by a word motion. Two details worth knowing:
+
+- a half-typed sequence bound to nothing (`g` on its own) is **dropped** by
+  the pause rather than waiting indefinitely;
+- a bare count never times out, so `12`, a pause, then `G` still jumps to
+  page 12.
+
+Set `timeout_ms = 0` to switch the pause off entirely, leaving the next key
+press as the only thing that ends a wait.
 
 Counts survive the replay, and they go to the command that resolves first:
 `5oj` gives the count to `o`, whereas `o5j` runs `o` and then gives the
@@ -72,6 +84,7 @@ focus mode:
 
 | Keys | Command |
 |---|---|
+| `c` | `focus_enter` — enter focus keeping the current scope (needs the pause) |
 | `cc` | `focus_enter_char` |
 | `ce` | `focus_enter_line` |
 | `cw` | `focus_enter_word` |
@@ -93,7 +106,7 @@ Application:
 
 | Keys | Command |
 |---|---|
-| `o` | `open_file` |
+| `<C-o>` | `open_file` |
 | `q` | `quit` |
 | `<Esc>` | `cancel` |
 

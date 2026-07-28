@@ -10,8 +10,9 @@ own, so there is one focus mode with five granularities rather than five modes.
 The status bar shows `-- FOCUS (word) --` with the highlighted line and column,
 matching visual mode's `-- VISUAL (word) --`.
 
-Press `<Esc>` (`focus_exit`) to return to normal mode; the position and scope
-are remembered.
+Press `<Esc>` (`focus_exit`) to return to normal mode. The position is
+remembered, but the scope resets to char: normal mode has no granularity of its
+own, so it does not keep one — a later bare `v` always starts by character.
 
 Counts work here too (`5l`, `3j`).
 
@@ -19,6 +20,7 @@ Counts work here too (`5l`, `3j`).
 
 | Command | Effect | Count |
 |---|---|---|
+| `focus_enter` | enter focus mode keeping the current scope | — |
 | `focus_enter_char` | focus character by character | — |
 | `focus_enter_word` | focus word by word | — |
 | `focus_enter_line` | focus line by line | — |
@@ -28,6 +30,12 @@ Counts work here too (`5l`, `3j`).
 
 Bound to `cc` / `cw` / `ce` / `cs` / `cp`. Line scope is `ce`, not `cl`: `l` is
 the forward motion in every mode.
+
+`focus_enter` is bound to a bare `c`, which acts once you **pause** — `c` is
+also the start of the five chords above, so it waits to see whether another key
+follows (see the disambiguation rule in `docs/keybindings.md`). It keeps
+whatever scope is live: char coming from normal mode, which resets the scope,
+and the selection's scope coming from visual mode.
 
 **The same chords change the scope from inside focus mode**, and they do it
 *in place* — `cw` then `ce` highlights the line you are already on, it does not

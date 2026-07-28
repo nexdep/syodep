@@ -38,6 +38,9 @@ pub enum Command {
     // Entering is also how the scope is changed: `cw` from normal mode enters
     // focus word-granular, and `cw` while already focused re-reads the current
     // position as a word without moving it.
+    /// Enter focus mode keeping the current scope — char from normal mode,
+    /// which resets it, and the live scope from visual mode.
+    FocusEnter,
     /// Focus the nearest content character by character.
     FocusEnterChar,
     /// Focus the nearest content word by word.
@@ -141,6 +144,7 @@ pub const ALL_COMMANDS: &[(&str, Command)] = &[
     ("zoom_out", Command::ZoomOut),
     ("fit_width", Command::FitWidth),
     ("zoom_reset", Command::ZoomReset),
+    ("focus_enter", Command::FocusEnter),
     ("focus_enter_char", Command::FocusEnterChar),
     ("focus_enter_word", Command::FocusEnterWord),
     ("focus_enter_line", Command::FocusEnterLine),

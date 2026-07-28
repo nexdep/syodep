@@ -16,6 +16,13 @@ CanvasWidget::CanvasWidget(SyoApp *app, QWidget *parent)
     , m_visualColor(0xd3, 0xd3, 0xd3, 102)
 {
     setFocusPolicy(Qt::StrongFocus);
+    // Single-shot: each key press re-arms it, so the pause is measured from
+    // the last key rather than the first.
+    m_pendingTimer.setSingleShot(true);
+    m_pendingTimer.setInterval(int(syo_app_key_timeout_ms(m_app)));
+    connect(&m_pendingTimer, &QTimer::timeout, this, [this] {
+        applyEffects(syo_app_key_timeout(m_app));
+    });
 }
 
 void CanvasWidget::resizeGL(int w, int h)
@@ -36,6 +43,16 @@ void CanvasWidget::keyPressEvent(QKeyEvent *event)
     applyEffects(syo_app_key_event(m_app, chord.toUtf8().constData()));
 }
 
+void CanvasWidget::updatePendingTimer(uint32_t effects)
+{
+    // `timeout_ms = 0` switches the pause off: only the next key press ends
+    // the wait, which is how the input state machine behaved originally.
+    if ((effects & SYO_EFFECT_PENDING_INPUT) && m_pendingTimer.interval() > 0)
+        m_pendingTimer.start();
+    else
+        m_pendingTimer.stop();
+}
+
 void CanvasWidget::wheelEvent(QWheelEvent *event)
 {
     const qreal dpr = devicePixelRatioF();
@@ -48,9 +65,11 @@ void CanvasWidget::wheelEvent(QWheelEvent *event)
 void CanvasWidget::applyEffects(uint32_t effects)
 {
     if (effects & SYO_EFFECT_QUIT) {
+        m_pendingTimer.stop();
         emit quitRequested();
         return;
     }
+    updatePendingTimer(effects);
     if (effects & SYO_EFFECT_OPEN_FILE_DIALOG)
         emit openFileRequested();
     if (effects & SYO_EFFECT_REDRAW)
