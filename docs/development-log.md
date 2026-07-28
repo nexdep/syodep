@@ -7,6 +7,36 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-07-28 — 0.5.0
+
+First release carrying the Windows installer, and the first where
+`--version` is trustworthy.
+
+Since 0.4.0:
+
+- **Visual selection mode** — a two-ended selection over the content layer.
+  `v` inherits the current focus mode's granularity, `vc`/`vw`/`vl`/`vs`/`vp`
+  name it, and each end carries its own scope so `o` plus a scope letter
+  re-scopes the far end independently. Required teaching the input state
+  machine longest-prefix fallback, which is a behaviour change in its own
+  right.
+- **Windows installer** — `syodep-vX.Y.Z-win64-setup.exe`: per-user, no UAC,
+  silent-capable, opt-in PDF handler, and an uninstaller that leaves
+  `%APPDATA%\syodep` alone because Scoop and portable installs share it.
+- **One version source.** `Cargo.toml` is now the only place the version
+  exists; CMake reads it and the shell reports it. 0.4.0 shipped binaries that
+  told users they were 0.3.0.
+- **App icon.** `syodep.exe` finally has one, plus a version resource, and the
+  SVG no longer depends on a font — which also fixes the AppImage icon.
+- **Release pipeline fix.** The AppImage build had been failing on a missing
+  `unzip` in the container, so nothing was published between 2026-06-26 and
+  2026-07-27.
+
+Bumping `Cargo.toml` is the whole of a version bump now: `syodep --version`
+reported 0.5.0 from a clean rebuild with no other file touched.
+
+---
+
 ## 2026-07-27 — Windows NSIS installer
 
 ### Implemented
