@@ -107,7 +107,7 @@ the `caret_focus_*` command names.
 
 ## `[line_focus_keys]`
 
-Keybindings that apply only in **line focus mode** (entered with `cl`). They
+Keybindings that apply only in **line focus mode** (entered with `ce`). They
 overlay the normal `[keys]` while line focus mode is active, mirroring
 `[caret_focus_keys]`. Defaults: `j`/`k` (and `<Up>`/`<Down>`) move the
 highlight line-wise, `h`/`l` (and `<Left>`/`<Right>`) move between columns,
@@ -165,12 +165,12 @@ overlay the normal `[keys]` while paragraph focus mode is active. Defaults:
 ## `[visual_keys]`
 
 Keybindings that apply only in **visual mode** (entered with `v`, or with
-`vc`/`vl`/`vw`/`vs`/`vp` to name the granularity). They overlay the normal
+`vc`/`ve`/`vw`/`vs`/`vp` to name the granularity). They overlay the normal
 `[keys]` while visual mode is active. Defaults: `hjkl` and the arrow keys move
 the active end of the selection by one unit of its scope; `w`/`b`/`e` move it
 by a word whatever the scope; `o` switches which end moves (`oo` does so
-without waiting for a motion) and `oc`/`ol`/`ow`/`os`/`op` switch ends *and*
-set that end's scope; `vc`/`vl`/`vw`/`vs`/`vp` set the active end's scope
+without waiting for a motion) and `oc`/`oe`/`ow`/`os`/`op` switch ends *and*
+set that end's scope; `vc`/`ve`/`vw`/`vs`/`vp` set the active end's scope
 without switching; `<Esc>` (or `v`) exits. See `docs/keybindings.md` for the
 full description and `docs/commands-visual-mode.md` for the `visual_*` command
 names.

@@ -13,7 +13,7 @@ syodep has seven input modes, each with its own command page:
   `hjkl` move a modal cursor (the caret) through the document content; the
   view, page-navigation and zoom commands stay available, and scroll / page
   jumps carry the caret along.
-- **[Line focus mode](commands-line-focus-mode.md)** — entered with `cl`.
+- **[Line focus mode](commands-line-focus-mode.md)** — entered with `ce`.
   A whole line is highlighted; `j`/`k` move it line by line and `h`/`l` move
   between columns on multi-column pages. The view, page-navigation and zoom
   commands stay available, and scroll / page jumps carry the highlight along.
@@ -30,7 +30,7 @@ syodep has seven input modes, each with its own command page:
   `cp`. A whole paragraph (a block of lines) is highlighted; like sentence
   focus, `hjkl`/arrows collapse to previous/next. The view, page-navigation and
   zoom commands stay available, and scroll / page jumps carry the highlight along.
-- **[Visual mode](commands-visual-mode.md)** — entered with `v` (or `vc`/`vl`/
+- **[Visual mode](commands-visual-mode.md)** — entered with `v` (or `vc`/`ve`/
   `vw`/`vs`/`vp`). Selects a *range* rather than a single unit: motions move one
   end while the other stays anchored, `o` switches which end moves, and each end
   has its own granularity. A bare `v` inherits the scope of the mode it was

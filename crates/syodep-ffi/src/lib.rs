@@ -1028,12 +1028,14 @@ mod tests {
             syo_app_key_event(app, esc.as_ptr());
             assert_eq!(syo_app_caret(app).valid, 0);
 
-            // Line focus: inactive until entered with `cl`, then valid; `<Esc>`
-            // hides it again.
+            // Line focus: inactive until entered with `ce`, then valid; `<Esc>`
+            // hides it again. `e` rather than `l`: `l` is the forward motion in
+            // every mode, so the line scope is identified by `e`.
+            let e_key = CString::new("e").unwrap();
             assert_eq!(syo_app_line(app).valid, 0);
             syo_app_key_event(app, c_key.as_ptr());
             assert_eq!(syo_app_line(app).valid, 0);
-            syo_app_key_event(app, l_key.as_ptr());
+            syo_app_key_event(app, e_key.as_ptr());
             assert_eq!(syo_app_line(app).valid, 1);
             syo_app_key_event(app, esc.as_ptr());
             assert_eq!(syo_app_line(app).valid, 0);

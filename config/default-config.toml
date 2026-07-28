@@ -70,7 +70,7 @@ visual_opacity = 0.4
 "J" = "next_page"
 "K" = "prev_page"
 "cc" = "caret_focus_enter"
-"cl" = "line_focus_enter"
+"ce" = "line_focus_enter"
 "cp" = "paragraph_focus_enter"
 "cs" = "sentence_focus_enter"
 "cw" = "word_focus_enter"
@@ -83,7 +83,7 @@ visual_opacity = 0.4
 "q" = "quit"
 "v" = "visual_enter"
 "vc" = "visual_enter_char"
-"vl" = "visual_enter_line"
+"ve" = "visual_enter_line"
 "vp" = "visual_enter_paragraph"
 "vs" = "visual_enter_sentence"
 "vw" = "visual_enter_word"
@@ -107,7 +107,7 @@ visual_opacity = 0.4
 "l" = "caret_focus_right"
 "w" = "caret_focus_next_word"
 
-# Line-focus-mode keybindings (active after pressing "cl"). j/k move the
+# Line-focus-mode keybindings (active after pressing "ce"). j/k move the
 # highlighted line, h/l move between columns and <Esc> exits.
 [line_focus_keys]
 "<Down>" = "line_focus_down"
@@ -179,14 +179,14 @@ visual_opacity = 0.4
 "l" = "visual_right"
 "o" = "visual_swap_ends"
 "oc" = "visual_other_char"
-"ol" = "visual_other_line"
+"oe" = "visual_other_line"
 "oo" = "visual_swap_ends"
 "op" = "visual_other_paragraph"
 "os" = "visual_other_sentence"
 "ow" = "visual_other_word"
 "v" = "visual_exit"
 "vc" = "visual_scope_char"
-"vl" = "visual_scope_line"
+"ve" = "visual_scope_line"
 "vp" = "visual_scope_paragraph"
 "vs" = "visual_scope_sentence"
 "vw" = "visual_scope_word"

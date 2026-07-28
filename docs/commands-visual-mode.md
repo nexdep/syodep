@@ -27,7 +27,7 @@ Counts work here too (`3l`, `2w`).
 | `visual_enter_paragraph` | start selecting paragraph by paragraph | - |
 | `visual_exit` | leave visual mode, returning to the prior mode | - |
 
-Bound to `v` (inherit) and `vc` / `vl` / `vw` / `vs` / `vp` (explicit). Because
+Bound to `v` (inherit) and `vc` / `ve` / `vw` / `vs` / `vp` (explicit). Because
 `v` is both a binding and the start of the longer ones, it takes effect
 together with the next key you press - see the disambiguation rule in
 `docs/keybindings.md`.
@@ -80,7 +80,7 @@ by line, and `ow` starts moving that same beginning word by word while the
 other end stays line-granular. `vw` changes the scope of the end that is
 already moving, without switching.
 
-Like `v`, a bare `o` is also the start of `oc`/`ow`/`ol`/`os`/`op`, so it takes
+Like `v`, a bare `o` is also the start of `oc`/`ow`/`oe`/`os`/`op`, so it takes
 effect together with the key that follows it (`oj` swaps ends and then moves
 down). Type `oo` to swap ends on its own.
 
@@ -100,7 +100,7 @@ selection is an explicit range, and moving it out from under the reader would
 lose work. Only the parts of the selection on screen are drawn.
 
 **Entering a focus mode discards the selection.** The focus-mode entry chords
-(`cc`, `cl`, `cw`, `cs`, `cp`) still work in visual mode and switch modes as
+(`cc`, `ce`, `cw`, `cs`, `cp`) still work in visual mode and switch modes as
 usual.
 
 The application commands `open_file`, `quit` and `cancel` also keep their

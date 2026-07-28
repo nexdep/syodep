@@ -3180,10 +3180,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_doc(dir.path(), 3);
         assert_eq!(app.mode(), Mode::Normal);
-        // A single `c` is only the first half of `cl`: still pending.
+        // A single `c` is only the first half of `ce`: still pending.
         press(&mut app, "c");
         assert_eq!(app.mode(), Mode::Normal);
-        press(&mut app, "l");
+        press(&mut app, "e");
         assert_eq!(app.mode(), Mode::LineFocus);
         let mark = app.line_mark().expect("line marked");
         assert_eq!((mark.page, mark.line), (0, 0));
@@ -3196,7 +3196,7 @@ mod tests {
     fn line_vertical_crosses_pages() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_doc(dir.path(), 3);
-        press(&mut app, "cl");
+        press(&mut app, "ce");
         // Each page has a single line, so `j` crosses to the next page.
         press(&mut app, "j");
         assert_eq!(app.line_mark().unwrap().page, 1);
@@ -3211,7 +3211,7 @@ mod tests {
     fn line_exit_restores_scrolling() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_doc(dir.path(), 3);
-        press(&mut app, "cl");
+        press(&mut app, "ce");
         assert_eq!(app.mode(), Mode::LineFocus);
         press(&mut app, "<Esc>");
         assert_eq!(app.mode(), Mode::Normal);
@@ -3226,7 +3226,7 @@ mod tests {
     fn line_focus_keeps_non_hjkl_bindings_and_carries_mark() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_doc(dir.path(), 5);
-        press(&mut app, "cl");
+        press(&mut app, "ce");
         press(&mut app, "G");
         assert_eq!(app.current_page(), 4);
         assert_eq!(app.line_mark().unwrap().page, 4);
@@ -3241,7 +3241,7 @@ mod tests {
     fn line_horizontal_is_noop_on_single_column() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_doc(dir.path(), 2);
-        press(&mut app, "cl");
+        press(&mut app, "ce");
         let before = app.line_mark().unwrap();
         press(&mut app, "l");
         assert_eq!(app.line_mark().unwrap(), before);
@@ -3253,7 +3253,7 @@ mod tests {
     fn line_horizontal_jumps_columns() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_two_column_page(dir.path());
-        press(&mut app, "cl");
+        press(&mut app, "ce");
         // Start in the left column on its first line.
         let start = app.line_mark().unwrap();
         // `l` jumps to the right column, keeping the goal row (same first line).
@@ -3271,7 +3271,7 @@ mod tests {
     #[test]
     fn line_without_document_does_not_crash() {
         let mut app = App::new(Config::default(), None);
-        press(&mut app, "cl");
+        press(&mut app, "ce");
         assert!(app.line_screen_rect().is_none());
         press(&mut app, "j");
         assert!(app.line_mark().is_none());
@@ -3610,7 +3610,7 @@ mod tests {
     fn visual_explicit_scope_overrides_the_inherited_one() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_text_pages(dir.path(), &["alpha beta"]);
-        press(&mut app, "vl");
+        press(&mut app, "ve");
         let sel = app.visual_selection().unwrap();
         assert_eq!(sel.head_scope, VisualScope::Line);
         // A whole line is selected from the very first entry.
@@ -3677,7 +3677,7 @@ mod tests {
     fn visual_other_scope_changes_only_that_end() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma"]);
-        press(&mut app, "vl");
+        press(&mut app, "ve");
         let (_, end_before) = app.visual_span().unwrap();
         // `ow` switches to the other end and makes it word-granular; the end
         // that is not moving keeps its line scope.
@@ -3790,7 +3790,7 @@ mod tests {
         press(&mut app, "vw");
         assert!(app.visual_selection().is_some());
         // The focus-mode entry chords stay bound inside visual mode.
-        press(&mut app, "cl");
+        press(&mut app, "ce");
         assert_eq!(app.mode(), Mode::LineFocus);
         assert!(app.visual_selection().is_none());
         assert!(app.visual_screen_rects().is_none());

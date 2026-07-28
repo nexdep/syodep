@@ -176,7 +176,7 @@ pub fn default_keybindings() -> BTreeMap<String, String> {
         ("zw", "fit_width"),
         ("z0", "zoom_reset"),
         ("cc", "caret_focus_enter"),
-        ("cl", "line_focus_enter"),
+        ("ce", "line_focus_enter"),
         ("cw", "word_focus_enter"),
         ("cs", "sentence_focus_enter"),
         ("cp", "paragraph_focus_enter"),
@@ -186,7 +186,7 @@ pub fn default_keybindings() -> BTreeMap<String, String> {
         ("v", "visual_enter"),
         ("vc", "visual_enter_char"),
         ("vw", "visual_enter_word"),
-        ("vl", "visual_enter_line"),
+        ("ve", "visual_enter_line"),
         ("vs", "visual_enter_sentence"),
         ("vp", "visual_enter_paragraph"),
         ("o", "open_file"),
@@ -344,13 +344,13 @@ pub fn default_visual_keybindings() -> BTreeMap<String, String> {
         ("oo", "visual_swap_ends"),
         ("oc", "visual_other_char"),
         ("ow", "visual_other_word"),
-        ("ol", "visual_other_line"),
+        ("oe", "visual_other_line"),
         ("os", "visual_other_sentence"),
         ("op", "visual_other_paragraph"),
         ("v", "visual_exit"),
         ("vc", "visual_scope_char"),
         ("vw", "visual_scope_word"),
-        ("vl", "visual_scope_line"),
+        ("ve", "visual_scope_line"),
         ("vs", "visual_scope_sentence"),
         ("vp", "visual_scope_paragraph"),
         ("<Esc>", "visual_exit"),
@@ -520,7 +520,7 @@ pub fn default_config_doc() -> String {
     );
 
     out.push_str(
-        "\n# Line-focus-mode keybindings (active after pressing \"cl\"). j/k move the\n\
+        "\n# Line-focus-mode keybindings (active after pressing \"ce\"). j/k move the\n\
          # highlighted line, h/l move between columns and <Esc> exits.\n",
     );
     push_keytable(

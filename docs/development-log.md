@@ -7,6 +7,59 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-07-28 — Line scope is identified by `e`, not `l`
+
+### Implemented
+
+Renamed the *line scope identifier* in every chord:
+
+| was | now |
+|---|---|
+| `cl` | `ce` — enter line focus |
+| `vl` | `ve` — enter visual with line scope |
+| `vl` (in visual) | `ve` — set the active end to line scope |
+| `ol` (in visual) | `oe` — switch ends and set line scope |
+
+`l` as a *motion* is untouched: it still moves forward in every mode and
+scrolls right in normal mode.
+
+### Why
+
+Groundwork for bare scope letters (pressing `w`, `s`, `p`, … inside a focus or
+visual mode to switch granularity in place). That feature needs one letter per
+scope, and `l` cannot be it: `l` is the forward motion in **all seven** modes
+(`scroll_right`, `caret_focus_right`, `line_focus_right`, `word_focus_right`,
+`sentence_focus_next`, `paragraph_focus_next`, `visual_right`), so binding it
+to a scope would gut navigation everywhere.
+
+`e` costs far less: it is only bound in caret focus (`caret_focus_end_word`)
+and visual (`visual_end_word`), and those keep working — this change touches
+only the `c`-, `v`- and `o`-prefixed chords, which live on different trie paths
+from the bare `e` binding.
+
+Doing the rename first, on its own, keeps it separable from the behavioural
+change that follows.
+
+### Test strategy
+
+No new behaviour, so no new tests: the existing suite covers the rename by
+construction. The three FFI and app-level tests that drove line focus through
+`c`+`l` now use `c`+`e`, and one comment that read "a single `c` is only the
+first half of `cl`" was updated. `config/default-config.toml` was regenerated
+from `default_config_doc()` rather than hand-edited; the diff is exactly the
+five renamed bindings and the one prose line.
+
+### Notes / remaining
+
+- **This breaks muscle memory and existing user configs.** Anyone with `cl` in
+  a `[keys]` table keeps it working — user tables extend the defaults rather
+  than replacing them — but `cl` no longer enters line focus by default, and a
+  config that rebinds `cl` to something else now leaves `ce` live as well.
+- Historical dev-log entries still say `cl`/`vl`/`ol`. They describe what was
+  true when written and are deliberately left alone.
+
+---
+
 ## 2026-07-28 — 0.6.0
 
 Since 0.5.0:

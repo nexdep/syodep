@@ -1,6 +1,6 @@
 # Line focus mode commands
 
-**Line focus mode** is entered with `cl` (`line_focus_enter`) from normal
+**Line focus mode** is entered with `ce` (`line_focus_enter`) from normal
 mode. It highlights a whole content line and moves that highlight line by
 line, independently of scrolling. On multi-column pages, `h`/`l` move the
 highlight between columns. The status bar shows `-- LINE FOCUS --` with the

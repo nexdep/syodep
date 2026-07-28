@@ -72,7 +72,7 @@ Caret (see "Caret focus mode" below):
 | Keys | Command |
 |---|---|
 | `cc` | `caret_focus_enter` |
-| `cl` | `line_focus_enter` |
+| `ce` | `line_focus_enter` |
 | `cw` | `word_focus_enter` |
 | `cs` | `sentence_focus_enter` |
 | `cp` | `paragraph_focus_enter` |
@@ -83,7 +83,7 @@ Selection (see "Visual mode" below):
 |---|---|
 | `v` | `visual_enter` — inherit the current mode's scope |
 | `vc` | `visual_enter_char` |
-| `vl` | `visual_enter_line` |
+| `ve` | `visual_enter_line` |
 | `vw` | `visual_enter_word` |
 | `vs` | `visual_enter_sentence` |
 | `vp` | `visual_enter_paragraph` |
@@ -140,7 +140,7 @@ in later phases (`docs/roadmap.md`).
 
 ## Line focus mode
 
-Press `cl` (`line_focus_enter`) to switch to **line focus mode**, where a
+Press `ce` (`line_focus_enter`) to switch to **line focus mode**, where a
 whole content line is highlighted:
 
 | Keys | Command |
@@ -246,7 +246,7 @@ active.
 
 Press `v` (`visual_enter`) to switch to **visual mode** and select a range. A
 bare `v` inherits the granularity of the mode you were in, so `cw` then `v`
-selects word by word; `vc`/`vl`/`vw`/`vs`/`vp` name the granularity instead.
+selects word by word; `vc`/`ve`/`vw`/`vs`/`vp` name the granularity instead.
 
 Motion moves one end of the selection — the **head** — while the other stays
 anchored:
@@ -269,8 +269,8 @@ other one:
 |---|---|
 | `o` | `visual_swap_ends` — move the other end from now on |
 | `oo` | `visual_swap_ends` — swap without waiting for a motion |
-| `oc`, `ol`, `ow`, `os`, `op` | `visual_other_char`, `visual_other_line`, `visual_other_word`, `visual_other_sentence`, `visual_other_paragraph` — switch ends *and* set that end's scope |
-| `vc`, `vl`, `vw`, `vs`, `vp` | `visual_scope_char`, `visual_scope_line`, `visual_scope_word`, `visual_scope_sentence`, `visual_scope_paragraph` — set the active end's scope |
+| `oc`, `oe`, `ow`, `os`, `op` | `visual_other_char`, `visual_other_line`, `visual_other_word`, `visual_other_sentence`, `visual_other_paragraph` — switch ends *and* set that end's scope |
+| `vc`, `ve`, `vw`, `vs`, `vp` | `visual_scope_char`, `visual_scope_line`, `visual_scope_word`, `visual_scope_sentence`, `visual_scope_paragraph` — set the active end's scope |
 | `v` | `visual_exit` |
 
 So from a line selection, `o` then `j`/`k` moves the beginning of the selection
