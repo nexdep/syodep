@@ -36,7 +36,7 @@ pub struct SyoApp {
     open_dir_source: String,
     /// Canvas background, resolved from `[view] background`.
     background_color: SyoColor,
-    /// Highlight for every focus mode, from `[view] focus_color`/`focus_opacity`.
+    /// Highlight for focus mode, from `[view] focus_color`/`focus_opacity`.
     focus_color: SyoColor,
     /// Highlight for the visual selection, from `[view] visual_color`/`visual_opacity`.
     visual_color: SyoColor,
@@ -158,21 +158,7 @@ pub struct SyoVisiblePage {
     pub height: f32,
 }
 
-/// The caret rectangle in canvas pixels, for the overlay the shell paints.
-/// `valid` is 0 when not in caret focus mode or no caret is placed, in which case
-/// the remaining fields are unspecified.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct SyoCaret {
-    pub valid: u8,
-    pub page: usize,
-    pub x: f32,
-    pub y: f32,
-    pub width: f32,
-    pub height: f32,
-}
-
-/// One rectangle (canvas pixels) of a multi-rect overlay, e.g. a sentence.
+/// One rectangle (canvas pixels) of an overlay.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct SyoRect {
@@ -182,27 +168,17 @@ pub struct SyoRect {
     pub height: f32,
 }
 
-/// The sentence-focus overlay: zero or more rectangles (one per spanned line) in
-/// canvas pixels. `valid` is 0 when not in sentence focus mode or no sentence is
-/// marked, in which case `rects` is NULL and `rect_count` is 0. The `rects`
-/// buffer is owned by the core and must be released with [`syo_sentence_free`].
-#[repr(C)]
-pub struct SyoSentence {
-    pub valid: u8,
-    pub page: usize,
-    pub rects: *const SyoRect,
-    pub rect_count: usize,
-}
-
-/// The visual-mode selection overlay: zero or more rectangles (one per spanned
-/// line) in canvas pixels. `valid` is 0 when not in visual mode, in which case
+/// A highlight overlay: zero or more rectangles (one per spanned line) in
+/// canvas pixels. `valid` is 0 when the overlay is not active, in which case
 /// `rects` is NULL and `rect_count` is 0. The `rects` buffer is owned by the
-/// core and must be released with [`syo_selection_free`].
+/// core and must be released with [`syo_overlay_free`].
 ///
-/// Unlike the single-unit overlays there is no `page` field: a selection may
-/// span pages, and the rectangles are already in absolute canvas coordinates.
+/// Both the focus highlight and the visual selection use this shape, because a
+/// focus highlight *is* a selection whose two ends coincide. There is no `page`
+/// field: an overlay may span pages, and the rectangles are already in absolute
+/// canvas coordinates.
 #[repr(C)]
-pub struct SyoSelection {
+pub struct SyoOverlay {
     pub valid: u8,
     pub rects: *const SyoRect,
     pub rect_count: usize,
@@ -445,222 +421,9 @@ pub unsafe extern "C" fn syo_app_visible_pages(
     pages.len()
 }
 
-/// The caret rectangle (canvas pixels) for the overlay. When `valid` is 0 the
-/// shell draws nothing.
-///
-/// # Safety
-/// `app` must be valid.
-#[no_mangle]
-pub unsafe extern "C" fn syo_app_caret(app: *const SyoApp) -> SyoCaret {
-    let invalid = SyoCaret {
-        valid: 0,
-        page: 0,
-        x: 0.0,
-        y: 0.0,
-        width: 0.0,
-        height: 0.0,
-    };
-    let Some(app) = (unsafe { app.as_ref() }) else {
-        return invalid;
-    };
-    catch_unwind(AssertUnwindSafe(|| match app.app.caret_screen_rect() {
-        Some((page, rect)) => SyoCaret {
-            valid: 1,
-            page,
-            x: rect.x,
-            y: rect.y,
-            width: rect.width,
-            height: rect.height,
-        },
-        None => invalid,
-    }))
-    .unwrap_or(invalid)
-}
-
-/// The line-focus rectangle (canvas pixels) for the overlay. Reuses the
-/// [`SyoCaret`] layout; `valid` is 0 unless line focus mode is active with a
-/// line marked.
-///
-/// # Safety
-/// `app` must be valid.
-#[no_mangle]
-pub unsafe extern "C" fn syo_app_line(app: *const SyoApp) -> SyoCaret {
-    let invalid = SyoCaret {
-        valid: 0,
-        page: 0,
-        x: 0.0,
-        y: 0.0,
-        width: 0.0,
-        height: 0.0,
-    };
-    let Some(app) = (unsafe { app.as_ref() }) else {
-        return invalid;
-    };
-    catch_unwind(AssertUnwindSafe(|| match app.app.line_screen_rect() {
-        Some((page, rect)) => SyoCaret {
-            valid: 1,
-            page,
-            x: rect.x,
-            y: rect.y,
-            width: rect.width,
-            height: rect.height,
-        },
-        None => invalid,
-    }))
-    .unwrap_or(invalid)
-}
-
-/// The word-focus rectangle (canvas pixels) for the overlay. Reuses the
-/// [`SyoCaret`] layout; `valid` is 0 unless word focus mode is active with a
-/// word marked.
-///
-/// # Safety
-/// `app` must be valid.
-#[no_mangle]
-pub unsafe extern "C" fn syo_app_word(app: *const SyoApp) -> SyoCaret {
-    let invalid = SyoCaret {
-        valid: 0,
-        page: 0,
-        x: 0.0,
-        y: 0.0,
-        width: 0.0,
-        height: 0.0,
-    };
-    let Some(app) = (unsafe { app.as_ref() }) else {
-        return invalid;
-    };
-    catch_unwind(AssertUnwindSafe(|| match app.app.word_screen_rect() {
-        Some((page, rect)) => SyoCaret {
-            valid: 1,
-            page,
-            x: rect.x,
-            y: rect.y,
-            width: rect.width,
-            height: rect.height,
-        },
-        None => invalid,
-    }))
-    .unwrap_or(invalid)
-}
-
-/// The paragraph-focus rectangle (canvas pixels) for the overlay. Reuses the
-/// [`SyoCaret`] layout; `valid` is 0 unless paragraph focus mode is active with a
-/// paragraph marked.
-///
-/// # Safety
-/// `app` must be valid.
-#[no_mangle]
-pub unsafe extern "C" fn syo_app_paragraph(app: *const SyoApp) -> SyoCaret {
-    let invalid = SyoCaret {
-        valid: 0,
-        page: 0,
-        x: 0.0,
-        y: 0.0,
-        width: 0.0,
-        height: 0.0,
-    };
-    let Some(app) = (unsafe { app.as_ref() }) else {
-        return invalid;
-    };
-    catch_unwind(AssertUnwindSafe(|| match app.app.paragraph_screen_rect() {
-        Some((page, rect)) => SyoCaret {
-            valid: 1,
-            page,
-            x: rect.x,
-            y: rect.y,
-            width: rect.width,
-            height: rect.height,
-        },
-        None => invalid,
-    }))
-    .unwrap_or(invalid)
-}
-
-/// The sentence-focus overlay: one rectangle per spanned line (a text-selection
-/// shape). `valid` is 0 unless sentence focus mode is active with a sentence
-/// marked. The returned `rects` buffer is owned by the core and must be released
-/// with [`syo_sentence_free`].
-///
-/// # Safety
-/// `app` must be valid.
-#[no_mangle]
-pub unsafe extern "C" fn syo_app_sentence(app: *const SyoApp) -> SyoSentence {
-    // `SyoSentence` owns a raw pointer and so is not `Copy`; build a fresh
-    // "invalid" value wherever one is needed rather than moving a shared one.
-    fn invalid() -> SyoSentence {
-        SyoSentence {
-            valid: 0,
-            page: 0,
-            rects: std::ptr::null(),
-            rect_count: 0,
-        }
-    }
-    let Some(app) = (unsafe { app.as_ref() }) else {
-        return invalid();
-    };
-    catch_unwind(AssertUnwindSafe(|| match app.app.sentence_screen_rects() {
-        Some((page, rects)) if !rects.is_empty() => {
-            let boxed: Box<[SyoRect]> = rects
-                .into_iter()
-                .map(|r| SyoRect {
-                    x: r.x,
-                    y: r.y,
-                    width: r.width,
-                    height: r.height,
-                })
-                .collect();
-            let rect_count = boxed.len();
-            let rects = Box::into_raw(boxed) as *const SyoRect;
-            SyoSentence {
-                valid: 1,
-                page,
-                rects,
-                rect_count,
-            }
-        }
-        _ => invalid(),
-    }))
-    .unwrap_or_else(|_| invalid())
-}
-
-/// Free the `rects` buffer of a [`SyoSentence`] returned by `syo_app_sentence`.
-///
-/// # Safety
-/// `sentence` must be a value returned by `syo_app_sentence`, not freed before.
-#[no_mangle]
-pub unsafe extern "C" fn syo_sentence_free(sentence: SyoSentence) {
-    if sentence.rects.is_null() || sentence.rect_count == 0 {
-        return;
-    }
-    unsafe {
-        drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(
-            sentence.rects as *mut SyoRect,
-            sentence.rect_count,
-        )));
-    }
-}
-
-/// The visual-mode selection overlay, one rectangle per spanned visible line.
-/// `valid` is 0 outside visual mode. The result must be released with
-/// [`syo_selection_free`].
-///
-/// # Safety
-/// `app` must be valid.
-#[no_mangle]
-pub unsafe extern "C" fn syo_app_selection(app: *const SyoApp) -> SyoSelection {
-    // Owns a raw pointer and so is not `Copy`; build a fresh "invalid" value
-    // wherever one is needed rather than moving a shared one.
-    fn invalid() -> SyoSelection {
-        SyoSelection {
-            valid: 0,
-            rects: std::ptr::null(),
-            rect_count: 0,
-        }
-    }
-    let Some(app) = (unsafe { app.as_ref() }) else {
-        return invalid();
-    };
-    catch_unwind(AssertUnwindSafe(|| match app.app.visual_screen_rects() {
+/// Collect screen rectangles into a freshly allocated [`SyoOverlay`].
+fn overlay_from(rects: Option<Vec<syodep_core::layout::ScreenRect>>) -> SyoOverlay {
+    match rects {
         Some(rects) if !rects.is_empty() => {
             let boxed: Box<[SyoRect]> = rects
                 .into_iter()
@@ -673,32 +436,76 @@ pub unsafe extern "C" fn syo_app_selection(app: *const SyoApp) -> SyoSelection {
                 .collect();
             let rect_count = boxed.len();
             let rects = Box::into_raw(boxed) as *const SyoRect;
-            SyoSelection {
+            SyoOverlay {
                 valid: 1,
                 rects,
                 rect_count,
             }
         }
-        _ => invalid(),
-    }))
-    .unwrap_or_else(|_| invalid())
+        _ => invalid_overlay(),
+    }
 }
 
-/// Free the `rects` buffer of a [`SyoSelection`] returned by
-/// `syo_app_selection`. A no-op for an invalid selection, so the shell can call
-/// it unconditionally.
+/// [`SyoOverlay`] owns a raw pointer and so is not `Copy`; build a fresh
+/// "nothing to draw" value wherever one is needed rather than sharing one.
+fn invalid_overlay() -> SyoOverlay {
+    SyoOverlay {
+        valid: 0,
+        rects: std::ptr::null(),
+        rect_count: 0,
+    }
+}
+
+/// The focus highlight, one rectangle per spanned visible line. `valid` is 0
+/// outside focus mode. One call covers every scope: what the highlight *is* --
+/// a character, word, line, sentence or paragraph -- is the core's business,
+/// not the shell's. The result must be released with [`syo_overlay_free`].
 ///
 /// # Safety
-/// `selection` must be a value returned by `syo_app_selection`, not freed before.
+/// `app` must be valid.
 #[no_mangle]
-pub unsafe extern "C" fn syo_selection_free(selection: SyoSelection) {
-    if selection.rects.is_null() || selection.rect_count == 0 {
+pub unsafe extern "C" fn syo_app_focus(app: *const SyoApp) -> SyoOverlay {
+    let Some(app) = (unsafe { app.as_ref() }) else {
+        return invalid_overlay();
+    };
+    catch_unwind(AssertUnwindSafe(|| {
+        overlay_from(app.app.focus_screen_rects())
+    }))
+    .unwrap_or_else(|_| invalid_overlay())
+}
+
+/// The visual-mode selection, one rectangle per spanned visible line. `valid`
+/// is 0 outside visual mode. The result must be released with
+/// [`syo_overlay_free`].
+///
+/// # Safety
+/// `app` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn syo_app_selection(app: *const SyoApp) -> SyoOverlay {
+    let Some(app) = (unsafe { app.as_ref() }) else {
+        return invalid_overlay();
+    };
+    catch_unwind(AssertUnwindSafe(|| {
+        overlay_from(app.app.visual_screen_rects())
+    }))
+    .unwrap_or_else(|_| invalid_overlay())
+}
+
+/// Free the `rects` buffer of a [`SyoOverlay`]. A no-op for an invalid overlay,
+/// so the shell can call it unconditionally.
+///
+/// # Safety
+/// `overlay` must be a value returned by `syo_app_focus` or
+/// `syo_app_selection`, not freed before.
+#[no_mangle]
+pub unsafe extern "C" fn syo_overlay_free(overlay: SyoOverlay) {
+    if overlay.rects.is_null() || overlay.rect_count == 0 {
         return;
     }
     unsafe {
         drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(
-            selection.rects as *mut SyoRect,
-            selection.rect_count,
+            overlay.rects as *mut SyoRect,
+            overlay.rect_count,
         )));
     }
 }
@@ -802,10 +609,9 @@ pub unsafe extern "C" fn syo_app_background_color(app: *const SyoApp) -> SyoColo
     app.background_color
 }
 
-/// Highlight colour for every focus mode, from `[view] focus_color` and
-/// `focus_opacity`. One colour covers caret, line, word, sentence and
-/// paragraph focus: the highlight signals that focus is active, not which
-/// scope is in use.
+/// Highlight colour for focus mode, from `[view] focus_color` and
+/// `focus_opacity`. One colour covers every scope: the highlight signals that
+/// focus is active, not which granularity is in use.
 ///
 /// # Safety
 /// `app` must be valid.
@@ -1008,86 +814,76 @@ mod tests {
             assert!(!(*bitmap).data.is_null());
             syo_bitmap_free(bitmap);
 
-            // Caret focus: inactive until entered with `cc`, then valid and movable.
-            assert_eq!(syo_app_caret(app).valid, 0);
+            // Focus mode: inactive until entered, then valid at every scope.
+            // One getter covers all five, so the round-trip walks the scope
+            // letters rather than five different functions.
             let c_key = CString::new("c").unwrap();
+            let esc = CString::new("<Esc>").unwrap();
+            let focus = syo_app_focus(app);
+            assert_eq!(focus.valid, 0);
+            syo_overlay_free(focus);
             // `cc` is a two-key sequence: one `c` is pending, the second enters.
             syo_app_key_event(app, c_key.as_ptr());
-            assert_eq!(syo_app_caret(app).valid, 0);
+            let pending = syo_app_focus(app);
+            assert_eq!(pending.valid, 0);
+            syo_overlay_free(pending);
             syo_app_key_event(app, c_key.as_ptr());
-            let caret0 = syo_app_caret(app);
-            assert_eq!(caret0.valid, 1);
+            let char_scope = syo_app_focus(app);
+            assert_eq!(char_scope.valid, 1);
+            assert_eq!(char_scope.rect_count, 1);
+            let first_x = (*char_scope.rects).x;
+            syo_overlay_free(char_scope);
+
+            // Moving right does not move the highlight left.
             let l_key = CString::new("l").unwrap();
             syo_app_key_event(app, l_key.as_ptr());
-            let caret1 = syo_app_caret(app);
-            assert_eq!(caret1.valid, 1);
-            // Moving right does not move the caret left.
-            assert!(caret1.x >= caret0.x);
-            // Leaving caret focus mode hides the overlay again.
-            let esc = CString::new("<Esc>").unwrap();
-            syo_app_key_event(app, esc.as_ptr());
-            assert_eq!(syo_app_caret(app).valid, 0);
+            let moved = syo_app_focus(app);
+            assert_eq!(moved.valid, 1);
+            assert!((*moved.rects).x >= first_x);
+            syo_overlay_free(moved);
 
-            // Line focus: inactive until entered with `ce`, then valid; `<Esc>`
-            // hides it again. `e` rather than `l`: `l` is the forward motion in
-            // every mode, so the line scope is identified by `e`.
-            let e_key = CString::new("e").unwrap();
-            assert_eq!(syo_app_line(app).valid, 0);
-            syo_app_key_event(app, c_key.as_ptr());
-            assert_eq!(syo_app_line(app).valid, 0);
-            syo_app_key_event(app, e_key.as_ptr());
-            assert_eq!(syo_app_line(app).valid, 1);
-            syo_app_key_event(app, esc.as_ptr());
-            assert_eq!(syo_app_line(app).valid, 0);
+            // Every other scope, entered with `c` plus its letter. `e` rather
+            // than `l` for lines: `l` is the forward motion in every mode.
+            for letter in ["w", "e", "s", "p"] {
+                let key = CString::new(letter).unwrap();
+                syo_app_key_event(app, c_key.as_ptr());
+                syo_app_key_event(app, key.as_ptr());
+                let overlay = syo_app_focus(app);
+                assert_eq!(overlay.valid, 1, "scope {letter} produced no overlay");
+                assert!(overlay.rect_count >= 1);
+                syo_overlay_free(overlay);
+            }
 
-            // Paragraph focus: inactive until entered with `cp`, then valid.
-            let p_key = CString::new("p").unwrap();
-            assert_eq!(syo_app_paragraph(app).valid, 0);
-            syo_app_key_event(app, c_key.as_ptr());
-            syo_app_key_event(app, p_key.as_ptr());
-            assert_eq!(syo_app_paragraph(app).valid, 1);
+            // Leaving focus mode hides the overlay again.
             syo_app_key_event(app, esc.as_ptr());
-            assert_eq!(syo_app_paragraph(app).valid, 0);
-
-            // Sentence focus: inactive until entered with `cs`, then valid with
-            // at least one rect; the rect buffer must be freed.
-            let s_key = CString::new("s").unwrap();
-            assert_eq!(syo_app_sentence(app).valid, 0);
-            syo_app_key_event(app, c_key.as_ptr());
-            syo_app_key_event(app, s_key.as_ptr());
-            let sentence = syo_app_sentence(app);
-            assert_eq!(sentence.valid, 1);
-            assert!(sentence.rect_count >= 1);
-            syo_sentence_free(sentence);
-            syo_app_key_event(app, esc.as_ptr());
-            let empty = syo_app_sentence(app);
-            assert_eq!(empty.valid, 0);
-            syo_sentence_free(empty);
+            let hidden = syo_app_focus(app);
+            assert_eq!(hidden.valid, 0);
+            // Freeing an invalid overlay is a no-op, so the shell can call it
+            // unconditionally.
+            syo_overlay_free(hidden);
 
             // Visual mode: inactive until entered with `vw`, then valid with at
-            // least one rect; the rect buffer must be freed. Unlike the focus
-            // overlays the selection may span pages, so it carries no page.
+            // least one rect; the rect buffer must be freed.
             let v_key = CString::new("v").unwrap();
             let w_key = CString::new("w").unwrap();
-            let l_key = CString::new("l").unwrap();
-            assert_eq!(syo_app_selection(app).valid, 0);
+            let none = syo_app_selection(app);
+            assert_eq!(none.valid, 0);
+            syo_overlay_free(none);
             syo_app_key_event(app, v_key.as_ptr());
             syo_app_key_event(app, w_key.as_ptr());
             let selection = syo_app_selection(app);
             assert_eq!(selection.valid, 1);
             assert!(selection.rect_count >= 1);
-            syo_selection_free(selection);
+            syo_overlay_free(selection);
             // Growing the selection keeps it valid.
             syo_app_key_event(app, l_key.as_ptr());
             let grown = syo_app_selection(app);
             assert_eq!(grown.valid, 1);
-            syo_selection_free(grown);
+            syo_overlay_free(grown);
             syo_app_key_event(app, esc.as_ptr());
             let gone = syo_app_selection(app);
             assert_eq!(gone.valid, 0);
-            // Freeing an invalid selection is a no-op, so the shell can call it
-            // unconditionally.
-            syo_selection_free(gone);
+            syo_overlay_free(gone);
 
             // Out-of-range render fails cleanly.
             let bad = syo_app_render_page(app, 99);

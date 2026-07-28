@@ -28,29 +28,14 @@ pub struct Config {
     /// Parsed and validated into a keymap by `syodep-core`.
     #[serde(default)]
     pub keys: BTreeMap<String, String>,
-    /// Caret-focus-mode keybindings (the `[caret_focus_keys]` table). These overlay
-    /// the normal `keys` while caret focus mode is active, so `hjkl`/`<Esc>` can mean
+    /// Focus-mode keybindings (the `[focus_keys]` table). These overlay the
+    /// normal `keys` while focus mode is active, so `hjkl`/`<Esc>` can mean
     /// something different there while every other binding still works.
+    ///
+    /// One table covers every scope: the motion commands dispatch on the active
+    /// scope, so there is nothing scope-specific left to bind.
     #[serde(default)]
-    pub caret_focus_keys: BTreeMap<String, String>,
-    /// Line-focus-mode keybindings (the `[line_focus_keys]` table). These overlay
-    /// the normal `keys` while line focus mode is active, mirroring
-    /// `caret_focus_keys`.
-    #[serde(default)]
-    pub line_focus_keys: BTreeMap<String, String>,
-    /// Word-focus-mode keybindings (the `[word_focus_keys]` table). These overlay
-    /// the normal `keys` while word focus mode is active, mirroring
-    /// `caret_focus_keys` and `line_focus_keys`.
-    #[serde(default)]
-    pub word_focus_keys: BTreeMap<String, String>,
-    /// Sentence-focus-mode keybindings (the `[sentence_focus_keys]` table). These
-    /// overlay the normal `keys` while sentence focus mode is active.
-    #[serde(default)]
-    pub sentence_focus_keys: BTreeMap<String, String>,
-    /// Paragraph-focus-mode keybindings (the `[paragraph_focus_keys]` table).
-    /// These overlay the normal `keys` while paragraph focus mode is active.
-    #[serde(default)]
-    pub paragraph_focus_keys: BTreeMap<String, String>,
+    pub focus_keys: BTreeMap<String, String>,
     /// Visual-mode keybindings (the `[visual_keys]` table). These overlay the
     /// normal `keys` while visual mode is active.
     #[serde(default)]
@@ -89,9 +74,9 @@ pub struct ViewConfig {
     pub zoom_step: f32,
     /// Canvas background color as `#rrggbb`.
     pub background: String,
-    /// Highlight color for every focus mode (caret, line, word, sentence,
-    /// paragraph) as `#rrggbb`. One colour for all of them on purpose: the
-    /// useful signal is focus vs selection, not which scope is active.
+    /// Highlight color for focus mode as `#rrggbb`. One colour for every
+    /// scope on purpose: the useful signal is focus vs selection, not which
+    /// granularity is active.
     pub focus_color: String,
     /// Opacity of the focus highlight, 0.0 (invisible) to 1.0 (opaque).
     pub focus_opacity: f32,
@@ -136,11 +121,7 @@ impl Default for Config {
         Self {
             view: ViewConfig::default(),
             keys: default_keybindings(),
-            caret_focus_keys: default_caret_focus_keybindings(),
-            line_focus_keys: default_line_focus_keybindings(),
-            word_focus_keys: default_word_focus_keybindings(),
-            sentence_focus_keys: default_sentence_focus_keybindings(),
-            paragraph_focus_keys: default_paragraph_focus_keybindings(),
+            focus_keys: default_focus_keybindings(),
             visual_keys: default_visual_keybindings(),
             files: FilesConfig::default(),
         }
@@ -175,13 +156,16 @@ pub fn default_keybindings() -> BTreeMap<String, String> {
         ("-", "zoom_out"),
         ("zw", "fit_width"),
         ("z0", "zoom_reset"),
-        ("cc", "caret_focus_enter"),
-        ("ce", "line_focus_enter"),
-        ("cw", "word_focus_enter"),
-        ("cs", "sentence_focus_enter"),
-        ("cp", "paragraph_focus_enter"),
-        // `v` alone inherits the current mode's granularity; `v` plus a scope
-        // letter names it. `v` is a binding *and* a prefix, which the input
+        // `c` plus a scope letter focuses at that granularity. The same
+        // bindings work *inside* focus mode, where they change the scope
+        // without moving the highlight.
+        ("cc", "focus_enter_char"),
+        ("ce", "focus_enter_line"),
+        ("cw", "focus_enter_word"),
+        ("cs", "focus_enter_sentence"),
+        ("cp", "focus_enter_paragraph"),
+        // `v` alone inherits the focus scope; `v` plus a scope letter names
+        // it. `v` is a binding *and* a prefix, which the input
         // state machine resolves by longest-prefix fallback.
         ("v", "visual_enter"),
         ("vc", "visual_enter_char"),
@@ -198,119 +182,33 @@ pub fn default_keybindings() -> BTreeMap<String, String> {
     .collect()
 }
 
-/// Built-in caret-focus-mode keybindings (the `[caret_focus_keys]` table). These overlay
-/// the normal bindings while caret focus mode is active: `hjkl` move the caret and
-/// `<Esc>` leaves caret focus mode, while everything else keeps its normal meaning.
+/// Built-in focus-mode keybindings (the `[focus_keys]` table). These overlay
+/// the normal bindings while focus mode is active: `hjkl`/arrows move the
+/// highlight by one unit of the active scope, `w`/`e`/`b` move a word at a time
+/// whatever the scope, and `<Esc>` leaves the mode; everything else keeps its
+/// normal meaning.
+///
+/// The shape deliberately mirrors [`default_visual_keybindings`]: the same keys
+/// do the same things to one position that they do to the moving end of a
+/// selection. Scope-specific meanings (line scope's `h`/`l` jumping columns,
+/// sentence and paragraph collapsing all four directions to previous/next) come
+/// from the commands, not from the bindings.
 ///
 /// Every entry here must be documented in `docs/keybindings.md`.
-pub fn default_caret_focus_keybindings() -> BTreeMap<String, String> {
+pub fn default_focus_keybindings() -> BTreeMap<String, String> {
     [
-        ("h", "caret_focus_left"),
-        ("j", "caret_focus_down"),
-        ("k", "caret_focus_up"),
-        ("l", "caret_focus_right"),
-        ("w", "caret_focus_next_word"),
-        ("e", "caret_focus_end_word"),
-        ("b", "caret_focus_prev_word"),
-        ("<Left>", "caret_focus_left"),
-        ("<Down>", "caret_focus_down"),
-        ("<Up>", "caret_focus_up"),
-        ("<Right>", "caret_focus_right"),
-        ("<Esc>", "caret_focus_exit"),
-    ]
-    .into_iter()
-    .map(|(k, v)| (k.to_owned(), v.to_owned()))
-    .collect()
-}
-
-/// Built-in line-focus-mode keybindings (the `[line_focus_keys]` table). These
-/// overlay the normal bindings while line focus mode is active: `j`/`k` move the
-/// highlight line-wise, `h`/`l` move between columns, and `<Esc>` leaves the mode,
-/// while everything else keeps its normal meaning.
-///
-/// Every entry here must be documented in `docs/keybindings.md`.
-pub fn default_line_focus_keybindings() -> BTreeMap<String, String> {
-    [
-        ("h", "line_focus_left"),
-        ("j", "line_focus_down"),
-        ("k", "line_focus_up"),
-        ("l", "line_focus_right"),
-        ("<Left>", "line_focus_left"),
-        ("<Down>", "line_focus_down"),
-        ("<Up>", "line_focus_up"),
-        ("<Right>", "line_focus_right"),
-        ("<Esc>", "line_focus_exit"),
-    ]
-    .into_iter()
-    .map(|(k, v)| (k.to_owned(), v.to_owned()))
-    .collect()
-}
-
-/// Built-in word-focus-mode keybindings (the `[word_focus_keys]` table). These
-/// overlay the normal bindings while word focus mode is active: `h`/`l` (and
-/// `w`/`b`) step word-wise, `j`/`k` move by line, and `<Esc>` leaves the mode,
-/// while everything else keeps its normal meaning.
-///
-/// Every entry here must be documented in `docs/keybindings.md`.
-pub fn default_word_focus_keybindings() -> BTreeMap<String, String> {
-    [
-        ("h", "word_focus_left"),
-        ("j", "word_focus_down"),
-        ("k", "word_focus_up"),
-        ("l", "word_focus_right"),
-        ("w", "word_focus_right"),
-        ("b", "word_focus_left"),
-        ("<Left>", "word_focus_left"),
-        ("<Down>", "word_focus_down"),
-        ("<Up>", "word_focus_up"),
-        ("<Right>", "word_focus_right"),
-        ("<Esc>", "word_focus_exit"),
-    ]
-    .into_iter()
-    .map(|(k, v)| (k.to_owned(), v.to_owned()))
-    .collect()
-}
-
-/// Built-in sentence-focus-mode keybindings (the `[sentence_focus_keys]` table).
-/// These overlay the normal bindings while sentence focus mode is active.
-/// Sentences are a linear sequence, so all of `hjkl`/arrows collapse to
-/// previous/next and `<Esc>` leaves the mode; everything else keeps its meaning.
-///
-/// Every entry here must be documented in `docs/keybindings.md`.
-pub fn default_sentence_focus_keybindings() -> BTreeMap<String, String> {
-    [
-        ("h", "sentence_focus_prev"),
-        ("k", "sentence_focus_prev"),
-        ("<Up>", "sentence_focus_prev"),
-        ("<Left>", "sentence_focus_prev"),
-        ("l", "sentence_focus_next"),
-        ("j", "sentence_focus_next"),
-        ("<Down>", "sentence_focus_next"),
-        ("<Right>", "sentence_focus_next"),
-        ("<Esc>", "sentence_focus_exit"),
-    ]
-    .into_iter()
-    .map(|(k, v)| (k.to_owned(), v.to_owned()))
-    .collect()
-}
-
-/// Built-in paragraph-focus-mode keybindings (the `[paragraph_focus_keys]`
-/// table). These overlay the normal bindings while paragraph focus mode is
-/// active, mirroring `sentence_focus_keys`: `hjkl`/arrows collapse to
-/// previous/next and `<Esc>` leaves the mode.
-///
-/// Every entry here must be documented in `docs/keybindings.md`.
-pub fn default_paragraph_focus_keybindings() -> BTreeMap<String, String> {
-    [
-        ("h", "paragraph_focus_prev"),
-        ("k", "paragraph_focus_prev"),
-        ("<Up>", "paragraph_focus_prev"),
-        ("<Left>", "paragraph_focus_prev"),
-        ("l", "paragraph_focus_next"),
-        ("j", "paragraph_focus_next"),
-        ("<Down>", "paragraph_focus_next"),
-        ("<Right>", "paragraph_focus_next"),
-        ("<Esc>", "paragraph_focus_exit"),
+        ("h", "focus_left"),
+        ("j", "focus_down"),
+        ("k", "focus_up"),
+        ("l", "focus_right"),
+        ("<Left>", "focus_left"),
+        ("<Down>", "focus_down"),
+        ("<Up>", "focus_up"),
+        ("<Right>", "focus_right"),
+        ("w", "focus_next_word"),
+        ("e", "focus_end_word"),
+        ("b", "focus_prev_word"),
+        ("<Esc>", "focus_exit"),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_owned(), v.to_owned()))
@@ -373,31 +271,59 @@ pub enum ConfigError {
     Parse { path: String, message: String },
 }
 
+/// Tables that existed before the five focus modes collapsed into one.
+const REMOVED_FOCUS_TABLES: [&str; 5] = [
+    "caret_focus_keys",
+    "line_focus_keys",
+    "word_focus_keys",
+    "sentence_focus_keys",
+    "paragraph_focus_keys",
+];
+
+/// Append a migration hint when a parse failure looks like a pre-0.7 config.
+///
+/// `deny_unknown_fields` rejects the *whole* file, so a config still naming
+/// `[word_focus_keys]` loses `[view]`, `[files]` and everything else — and the
+/// bare serde message ("unknown field `word_focus_keys`") does not say what to
+/// do about it. The clean break stands; this just makes it legible.
+fn migration_hint(text: &str, message: String) -> String {
+    let stale: Vec<&str> = REMOVED_FOCUS_TABLES
+        .iter()
+        .copied()
+        .filter(|table| text.contains(&format!("[{table}]")))
+        .collect();
+    if stale.is_empty() {
+        return message;
+    }
+    format!(
+        "{message}\n\
+         hint: the five focus modes are now one mode with a scope, so {} \
+         became a single [focus_keys] table. Rename it and replace the \
+         per-scope command names ({}_left, ...) with focus_left / focus_right \
+         / focus_up / focus_down. See docs/config.md.",
+        stale
+            .iter()
+            .map(|t| format!("[{t}]"))
+            .collect::<Vec<_>>()
+            .join(", "),
+        stale[0].trim_end_matches("_focus_keys"),
+    )
+}
+
 impl Config {
     /// Parse a configuration from TOML text.
     pub fn from_toml(text: &str) -> Result<Self, String> {
-        let mut config: Config = toml::from_str(text).map_err(|e| e.to_string())?;
+        let mut config: Config =
+            toml::from_str(text).map_err(|e| migration_hint(text, e.to_string()))?;
         // An empty or missing [keys] table means "use the defaults". Users who
         // want extra bindings list only their additions; defaults still apply
         // unless explicitly rebound.
         let mut keys = default_keybindings();
         keys.extend(std::mem::take(&mut config.keys));
         config.keys = keys;
-        let mut caret_focus_keys = default_caret_focus_keybindings();
-        caret_focus_keys.extend(std::mem::take(&mut config.caret_focus_keys));
-        config.caret_focus_keys = caret_focus_keys;
-        let mut line_focus_keys = default_line_focus_keybindings();
-        line_focus_keys.extend(std::mem::take(&mut config.line_focus_keys));
-        config.line_focus_keys = line_focus_keys;
-        let mut word_focus_keys = default_word_focus_keybindings();
-        word_focus_keys.extend(std::mem::take(&mut config.word_focus_keys));
-        config.word_focus_keys = word_focus_keys;
-        let mut sentence_focus_keys = default_sentence_focus_keybindings();
-        sentence_focus_keys.extend(std::mem::take(&mut config.sentence_focus_keys));
-        config.sentence_focus_keys = sentence_focus_keys;
-        let mut paragraph_focus_keys = default_paragraph_focus_keybindings();
-        paragraph_focus_keys.extend(std::mem::take(&mut config.paragraph_focus_keys));
-        config.paragraph_focus_keys = paragraph_focus_keys;
+        let mut focus_keys = default_focus_keybindings();
+        focus_keys.extend(std::mem::take(&mut config.focus_keys));
+        config.focus_keys = focus_keys;
         let mut visual_keys = default_visual_keybindings();
         visual_keys.extend(std::mem::take(&mut config.visual_keys));
         config.visual_keys = visual_keys;
@@ -509,55 +435,15 @@ pub fn default_config_doc() -> String {
     push_keytable(&mut out, "keys", &default_keybindings());
 
     out.push_str(
-        "\n# Caret-focus-mode keybindings (active after pressing \"cc\"). These overlay the\n\
-         # normal [keys] while caret focus mode is active: h/j/k/l move the caret\n\
-         # (h/l by character, j/k by line) and <Esc> exits.\n",
+        "\n# Focus-mode keybindings (active after pressing \"cc\", \"cw\", \"ce\", \"cs\" or\n\
+         # \"cp\"). These overlay the normal [keys] while focus mode is active: hjkl and\n\
+         # the arrows move the highlight by one unit of the active scope, w/e/b move a\n\
+         # word at a time whatever the scope, and <Esc> exits.\n\
+         # One table covers every scope, because the commands dispatch on the scope:\n\
+         # \"focus_left\" is a character in char scope, a word in word scope, a column\n\
+         # jump in line scope and the previous unit in sentence/paragraph scope.\n",
     );
-    push_keytable(
-        &mut out,
-        "caret_focus_keys",
-        &default_caret_focus_keybindings(),
-    );
-
-    out.push_str(
-        "\n# Line-focus-mode keybindings (active after pressing \"ce\"). j/k move the\n\
-         # highlighted line, h/l move between columns and <Esc> exits.\n",
-    );
-    push_keytable(
-        &mut out,
-        "line_focus_keys",
-        &default_line_focus_keybindings(),
-    );
-
-    out.push_str(
-        "\n# Word-focus-mode keybindings (active after pressing \"cw\"). h/b move to the\n\
-         # previous word run, l/w move to the next, j/k move by line and <Esc> exits.\n",
-    );
-    push_keytable(
-        &mut out,
-        "word_focus_keys",
-        &default_word_focus_keybindings(),
-    );
-
-    out.push_str(
-        "\n# Sentence-focus-mode keybindings (active after pressing \"cs\"). Sentences are\n\
-         # linear, so hjkl/arrows collapse to previous/next and <Esc> exits.\n",
-    );
-    push_keytable(
-        &mut out,
-        "sentence_focus_keys",
-        &default_sentence_focus_keybindings(),
-    );
-
-    out.push_str(
-        "\n# Paragraph-focus-mode keybindings (active after pressing \"cp\"). Like sentence\n\
-         # focus, hjkl/arrows collapse to previous/next and <Esc> exits.\n",
-    );
-    push_keytable(
-        &mut out,
-        "paragraph_focus_keys",
-        &default_paragraph_focus_keybindings(),
-    );
+    push_keytable(&mut out, "focus_keys", &default_focus_keybindings());
 
     out.push_str(
         "\n# Visual-mode keybindings (active after pressing \"v\"). hjkl/arrows grow the\n\
@@ -690,79 +576,51 @@ mod tests {
     }
 
     #[test]
-    fn caret_focus_keys_default_and_user_override() {
+    fn focus_keys_default_and_user_override() {
         let config = Config::from_toml(
             r#"
-            [caret_focus_keys]
-            "w" = "caret_focus_right"
+            [focus_keys]
+            "y" = "focus_right"
             "#,
         )
         .unwrap();
-        // Built-in caret bindings survive.
+        // Built-in focus bindings survive.
         assert_eq!(
-            config.caret_focus_keys.get("h").map(String::as_str),
-            Some("caret_focus_left")
+            config.focus_keys.get("h").map(String::as_str),
+            Some("focus_left")
         );
         assert_eq!(
-            config.caret_focus_keys.get("j").map(String::as_str),
-            Some("caret_focus_down")
+            config.focus_keys.get("j").map(String::as_str),
+            Some("focus_down")
         );
         assert_eq!(
-            config.caret_focus_keys.get("e").map(String::as_str),
-            Some("caret_focus_end_word")
+            config.focus_keys.get("e").map(String::as_str),
+            Some("focus_end_word")
         );
         assert_eq!(
-            config.caret_focus_keys.get("b").map(String::as_str),
-            Some("caret_focus_prev_word")
-        );
-        // User override is merged in.
-        assert_eq!(
-            config.caret_focus_keys.get("w").map(String::as_str),
-            Some("caret_focus_right")
-        );
-        // The enter binding (`cc`) lives in the normal table.
-        assert_eq!(
-            config.keys.get("cc").map(String::as_str),
-            Some("caret_focus_enter")
-        );
-    }
-
-    #[test]
-    fn word_focus_keys_default_and_user_override() {
-        let config = Config::from_toml(
-            r#"
-            [word_focus_keys]
-            "w" = "word_focus_down"
-            "#,
-        )
-        .unwrap();
-        // Built-in word-focus bindings survive.
-        assert_eq!(
-            config.word_focus_keys.get("h").map(String::as_str),
-            Some("word_focus_left")
+            config.focus_keys.get("b").map(String::as_str),
+            Some("focus_prev_word")
         );
         assert_eq!(
-            config.word_focus_keys.get("l").map(String::as_str),
-            Some("word_focus_right")
-        );
-        assert_eq!(
-            config.word_focus_keys.get("j").map(String::as_str),
-            Some("word_focus_down")
-        );
-        assert_eq!(
-            config.word_focus_keys.get("<Esc>").map(String::as_str),
-            Some("word_focus_exit")
+            config.focus_keys.get("<Esc>").map(String::as_str),
+            Some("focus_exit")
         );
         // User override is merged in.
         assert_eq!(
-            config.word_focus_keys.get("w").map(String::as_str),
-            Some("word_focus_down")
+            config.focus_keys.get("y").map(String::as_str),
+            Some("focus_right")
         );
-        // The enter binding (`cw`) lives in the normal table.
-        assert_eq!(
-            config.keys.get("cw").map(String::as_str),
-            Some("word_focus_enter")
-        );
+        // The enter bindings live in the normal table, one per scope. They are
+        // also what changes the scope from inside focus mode.
+        for (key, command) in [
+            ("cc", "focus_enter_char"),
+            ("cw", "focus_enter_word"),
+            ("ce", "focus_enter_line"),
+            ("cs", "focus_enter_sentence"),
+            ("cp", "focus_enter_paragraph"),
+        ] {
+            assert_eq!(config.keys.get(key).map(String::as_str), Some(command));
+        }
     }
 
     #[test]
@@ -817,71 +675,25 @@ mod tests {
     }
 
     #[test]
-    fn sentence_focus_keys_default_and_user_override() {
-        let config = Config::from_toml(
+    fn pre_collapse_focus_tables_get_a_migration_hint() {
+        let err = Config::from_toml(
             r#"
-            [sentence_focus_keys]
-            "n" = "sentence_focus_next"
+            [word_focus_keys]
+            "x" = "word_focus_right"
             "#,
         )
-        .unwrap();
-        // Built-in sentence-focus bindings survive.
-        assert_eq!(
-            config.sentence_focus_keys.get("h").map(String::as_str),
-            Some("sentence_focus_prev")
-        );
-        assert_eq!(
-            config.sentence_focus_keys.get("l").map(String::as_str),
-            Some("sentence_focus_next")
-        );
-        assert_eq!(
-            config.sentence_focus_keys.get("<Esc>").map(String::as_str),
-            Some("sentence_focus_exit")
-        );
-        // User override is merged in.
-        assert_eq!(
-            config.sentence_focus_keys.get("n").map(String::as_str),
-            Some("sentence_focus_next")
-        );
-        // The enter binding (`cs`) lives in the normal table.
-        assert_eq!(
-            config.keys.get("cs").map(String::as_str),
-            Some("sentence_focus_enter")
-        );
+        .unwrap_err();
+        // The underlying serde message survives...
+        assert!(err.contains("word_focus_keys"), "{err}");
+        // ...and is followed by something actionable.
+        assert!(err.contains("[focus_keys]"), "{err}");
+        assert!(err.contains("focus_left"), "{err}");
     }
 
     #[test]
-    fn paragraph_focus_keys_default_and_user_override() {
-        let config = Config::from_toml(
-            r#"
-            [paragraph_focus_keys]
-            "n" = "paragraph_focus_next"
-            "#,
-        )
-        .unwrap();
-        // Built-in paragraph-focus bindings survive.
-        assert_eq!(
-            config.paragraph_focus_keys.get("h").map(String::as_str),
-            Some("paragraph_focus_prev")
-        );
-        assert_eq!(
-            config.paragraph_focus_keys.get("j").map(String::as_str),
-            Some("paragraph_focus_next")
-        );
-        assert_eq!(
-            config.paragraph_focus_keys.get("<Esc>").map(String::as_str),
-            Some("paragraph_focus_exit")
-        );
-        // User override is merged in.
-        assert_eq!(
-            config.paragraph_focus_keys.get("n").map(String::as_str),
-            Some("paragraph_focus_next")
-        );
-        // The enter binding (`cp`) lives in the normal table.
-        assert_eq!(
-            config.keys.get("cp").map(String::as_str),
-            Some("paragraph_focus_enter")
-        );
+    fn unrelated_parse_errors_get_no_migration_hint() {
+        let err = Config::from_toml("[view]\nscroll_step = \"not a number\"\n").unwrap_err();
+        assert!(!err.contains("hint:"), "{err}");
     }
 
     #[test]
@@ -965,7 +777,10 @@ mod tests {
         let doc = default_config_doc();
         assert!(doc.contains("scroll_step = 60.0"), "{doc}");
         assert!(doc.contains("\"j\" = \"scroll_down\""), "{doc}");
-        // The section the stale reference file is missing.
-        assert!(doc.contains("[paragraph_focus_keys]"), "{doc}");
+        // Both overlay tables are emitted, with their scope-dispatching
+        // commands rather than per-scope ones.
+        assert!(doc.contains("[focus_keys]"), "{doc}");
+        assert!(doc.contains("\"h\" = \"focus_left\""), "{doc}");
+        assert!(doc.contains("[visual_keys]"), "{doc}");
     }
 }

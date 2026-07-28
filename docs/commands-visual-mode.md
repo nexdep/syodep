@@ -1,17 +1,17 @@
 # Visual mode commands
 
 **Visual mode** selects a *range* of content. It is entered with `v` from
-normal mode or from any focus mode, and unlike the focus modes it has two ends:
+normal mode or from focus mode, and unlike focus mode it has two ends:
 an **anchor** that stays put and a **head** that motions move. The status bar
 shows `-- VISUAL (scope) --` with the selected line range.
 
 Each end carries its own **scope** - the granularity it moves and snaps by -
 so a selection can be line-granular at one edge and word-granular at the other.
-A bare `v` inherits the scope of the mode it was entered from, so `cw` then `v`
-starts selecting word by word with the same keys you were already using.
+A bare `v` inherits the focus scope, so `cw` then `v` starts selecting word by
+word with the same keys you were already using.
 
 Press `<Esc>` (`visual_exit`) to return to the mode visual mode was entered
-from; that mode's highlight carries over to wherever the head ended up.
+from; the focus highlight carries over to wherever the head ended up.
 
 Counts work here too (`3l`, `2w`).
 
@@ -19,7 +19,7 @@ Counts work here too (`3l`, `2w`).
 
 | Command | Effect | Count |
 |---|---|---|
-| `visual_enter` | start selecting, inheriting the current mode's scope | - |
+| `visual_enter` | start selecting, inheriting the focus scope | - |
 | `visual_enter_char` | start selecting character by character | - |
 | `visual_enter_line` | start selecting line by line | - |
 | `visual_enter_word` | start selecting word by word | - |
@@ -47,7 +47,7 @@ together with the next key you press - see the disambiguation rule in
 `hjkl` and the arrow keys move by the active end's scope: one character in char
 scope, one word in word scope, one line in line scope, and so on. In sentence
 and paragraph scope the unit is a linear sequence, so all four directions
-collapse to previous/next - the same shape as sentence and paragraph focus mode.
+collapse to previous/next - the same shape as focus mode at those scopes.
 
 `w`, `b` and `e` always move by a word, whatever the scope is. In line scope
 the head still moves a word at a time while the edge snaps out to the whole
@@ -94,14 +94,13 @@ binding - only `hjkl`, `w`/`b`/`e`, `o`, `v`, the arrow keys and `<Esc>` are
 remapped. So the page-scroll, page-navigation and zoom commands all work here
 too.
 
-**Scrolling and page jumps leave the selection alone.** Unlike the focus modes,
+**Scrolling and page jumps leave the selection alone.** Unlike focus mode,
 scrolling does not drag the selection to the newly visible content - a
 selection is an explicit range, and moving it out from under the reader would
 lose work. Only the parts of the selection on screen are drawn.
 
-**Entering a focus mode discards the selection.** The focus-mode entry chords
-(`cc`, `ce`, `cw`, `cs`, `cp`) still work in visual mode and switch modes as
-usual.
+**Entering focus mode discards the selection.** The focus entry chords (`cc`,
+`ce`, `cw`, `cs`, `cp`) still work in visual mode and switch modes as usual.
 
 The application commands `open_file`, `quit` and `cancel` also keep their
 normal-mode behavior. See `docs/commands-normal-mode.md` for those.

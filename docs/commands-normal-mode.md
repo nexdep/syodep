@@ -1,8 +1,8 @@
 # Normal mode commands
 
 **Normal mode** is the default mode: `hjkl` (and the arrow keys) scroll the
-page. Press `cc` (`caret_focus_enter`) to switch to **caret focus mode** —
-see `docs/commands-caret-focus-mode.md`.
+page. Press `cc` (`focus_enter_char`) to switch to **focus mode** — see
+`docs/commands-focus-mode.md`.
 
 Every user-visible action is a *command*. Keybindings map key sequences to
 command names (see `docs/keybindings.md`); future features (command palette,
@@ -50,21 +50,23 @@ The "current page" is the page under the center of the window.
 Zoom keeps the document point at the window center fixed and is clamped to
 5%–1600%.
 
-## Focus modes
+## Focus mode
+
+Focus mode highlights one position in the document's content. Which unit it
+covers is the *scope*, chosen when entering — there is one focus mode with five
+granularities, not five modes.
 
 | Command | Effect | Count |
 |---|---|---|
-| `caret_focus_enter` | enter caret focus mode, placing the caret on the nearest content | — |
-| `line_focus_enter` | enter line focus mode, highlighting the nearest content line | — |
-| `word_focus_enter` | enter word focus mode, highlighting the first visible word run | — |
-| `sentence_focus_enter` | enter sentence focus mode, highlighting the nearest sentence | — |
-| `paragraph_focus_enter` | enter paragraph focus mode, highlighting the nearest paragraph | — |
+| `focus_enter_char` | focus character by character, on the nearest content | — |
+| `focus_enter_word` | focus word by word, on the first visible word run | — |
+| `focus_enter_line` | focus line by line, on the nearest content line | — |
+| `focus_enter_sentence` | focus sentence by sentence, on the nearest sentence | — |
+| `focus_enter_paragraph` | focus paragraph by paragraph, on the nearest paragraph | — |
 
-See `docs/commands-caret-focus-mode.md` for everything available once in
-caret focus mode, `docs/commands-line-focus-mode.md` for line focus mode,
-`docs/commands-word-focus-mode.md` for word focus mode,
-`docs/commands-sentence-focus-mode.md` for sentence focus mode and
-`docs/commands-paragraph-focus-mode.md` for paragraph focus mode.
+These also change the scope from *inside* focus mode, without moving the
+highlight. See `docs/commands-focus-mode.md` for everything available once
+focused.
 
 ## Application
 

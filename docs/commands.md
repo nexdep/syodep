@@ -4,38 +4,27 @@ Every user-visible action in syodep is a *command*. Keybindings map key
 sequences to command names (see `docs/keybindings.md`); future features
 (command palette, text objects) reuse the same registry.
 
-syodep has seven input modes, each with its own command page:
+syodep has three input modes, each with its own command page:
 
 - **[Normal mode](commands-normal-mode.md)** — the default. `hjkl` scroll
-  the page; covers scrolling, page navigation, zoom, entering the focus
-  modes, and the application commands.
-- **[Caret focus mode](commands-caret-focus-mode.md)** — entered with `cc`.
-  `hjkl` move a modal cursor (the caret) through the document content; the
-  view, page-navigation and zoom commands stay available, and scroll / page
-  jumps carry the caret along.
-- **[Line focus mode](commands-line-focus-mode.md)** — entered with `ce`.
-  A whole line is highlighted; `j`/`k` move it line by line and `h`/`l` move
-  between columns on multi-column pages. The view, page-navigation and zoom
-  commands stay available, and scroll / page jumps carry the highlight along.
-- **[Word focus mode](commands-word-focus-mode.md)** - entered with `cw`.
-  A whole Vim-like word run is highlighted; `h`/`b` and `l`/`w` move between
-  word runs, while `j`/`k` move line-wise. The view, page-navigation and zoom
-  commands stay available, and scroll / page jumps carry the highlight along.
-- **[Sentence focus mode](commands-sentence-focus-mode.md)** — entered with
-  `cs`. A whole sentence (possibly spanning lines) is highlighted; sentences are
-  a linear sequence, so all of `hjkl`/arrows collapse to previous/next. The
+  the page; covers scrolling, page navigation, zoom, entering focus mode, and
+  the application commands.
+- **[Focus mode](commands-focus-mode.md)** — entered with `cc`, `cw`, `ce`,
+  `cs` or `cp`. One position in the document content is highlighted and `hjkl`
+  move it. How much a step covers is the **scope** — a character, word, line,
+  sentence or paragraph — which is a setting of the mode, not a mode of its
+  own: the same five chords change it in place while you stay focused. The
   view, page-navigation and zoom commands stay available, and scroll / page
   jumps carry the highlight along.
-- **[Paragraph focus mode](commands-paragraph-focus-mode.md)** — entered with
-  `cp`. A whole paragraph (a block of lines) is highlighted; like sentence
-  focus, `hjkl`/arrows collapse to previous/next. The view, page-navigation and
-  zoom commands stay available, and scroll / page jumps carry the highlight along.
 - **[Visual mode](commands-visual-mode.md)** — entered with `v` (or `vc`/`ve`/
   `vw`/`vs`/`vp`). Selects a *range* rather than a single unit: motions move one
   end while the other stays anchored, `o` switches which end moves, and each end
-  has its own granularity. A bare `v` inherits the scope of the mode it was
-  entered from. Unlike the focus modes, scroll and page jumps leave the
-  selection where it is.
+  has its own scope. A bare `v` inherits the focus scope. Unlike focus mode,
+  scroll and page jumps leave the selection where it is.
+
+Focus and visual are the same idea at different arities — a focus highlight is
+a selection whose two ends coincide — so they share one per-scope motion table
+and one set of key meanings. Learning one teaches the other.
 
 Counts: most commands accept a count prefix typed before the binding
 (`5j`, `3J`, `12G`). Where a count has a special meaning it is noted on the

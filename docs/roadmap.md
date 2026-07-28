@@ -41,7 +41,7 @@ Ordered roughly by dependency:
 
 Delivered ahead of the rest: a **modal caret** (`c` to enter, then `hjkl`)
 navigates the content layer character- and line-wise across text and images,
-auto-scrolling to follow, plus word/line/sentence/paragraph focus modes over
+auto-scrolling to follow, plus word/line/sentence/paragraph scopes over
 the same layer. **Visual mode** (item 2) builds a two-ended selection on top of
 them, and is the seam highlighting builds on. See the development log.
 

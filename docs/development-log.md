@@ -7,6 +7,121 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-07-28 — Five focus modes collapse into one mode with a scope
+
+### Implemented
+
+`Mode` went from seven variants to three: `Normal`, `Focus`, `Visual`.
+Granularity is no longer a mode — `Focus` carries a `Scope` (char, word, line,
+sentence, paragraph), exactly as each end of a visual selection already did.
+
+| | before | after |
+|---|---|---|
+| `Mode` variants | 7 | 3 |
+| Focus commands | 29 | 13 |
+| Focus keymaps / config tables | 5 | 1 |
+| FFI overlay getters | 5 | 1 (`syo_app_focus`) |
+| Focus state fields | 8 | 5 |
+| Per-mode docs pages | 5 | 1 |
+
+The app now stores one `Caret` plus a `Scope`. What is *drawn* is derived by
+`scope_span(caret, scope)` and cached in `focus_span`, mirroring how
+`visual_span` has always worked. The five stored marks (`line_mark`,
+`word_mark`, `sentence_mark`, `paragraph_mark`, plus three goal values) are
+gone: they were derivable state the code stored and then failed to keep
+consistent.
+
+Breaking changes, all deliberate:
+
+- `[caret_focus_keys]`, `[line_focus_keys]`, `[word_focus_keys]`,
+  `[sentence_focus_keys]` and `[paragraph_focus_keys]` are **removed**,
+  replaced by one `[focus_keys]`.
+- The `caret_focus_*` / `line_focus_*` / `word_focus_*` / `sentence_focus_*` /
+  `paragraph_focus_*` command names are **removed**, replaced by
+  `focus_enter_{char,word,line,sentence,paragraph}`, `focus_exit`,
+  `focus_{left,right,up,down}` and `focus_{next,prev,end}_word`.
+- The status bar reads `-- FOCUS (word) --`, matching `-- VISUAL (word) --`.
+- FFI: `SyoCaret`, `SyoSentence`, `SyoSelection`, `syo_app_caret`,
+  `syo_app_line`, `syo_app_word`, `syo_app_sentence`, `syo_app_paragraph` and
+  `syo_sentence_free` are replaced by `SyoOverlay`, `syo_app_focus`,
+  `syo_app_selection` and `syo_overlay_free`.
+
+Default *keys* are unchanged: `cc`/`cw`/`ce`/`cs`/`cp` still enter, `hjkl` still
+move, `<Esc>` still exits.
+
+### Why
+
+A bug fixed by construction. `enter_*_focus` seeded its mark only when it was
+`None`, so switching granularity landed you on a *stale* position: work in word
+focus, scroll to page 30, press `ce`, and you were back wherever you last left
+line focus. With one position and a scope field the bug is unrepresentable —
+there is nothing to be stale. `changing_scope_keeps_the_position` covers it and
+fails on the old code.
+
+Three earlier items were symptoms of the same duplication: unifying five
+hardcoded overlay colours, `Mode::CaretFocus` appearing in a dozen
+enumerations that grew with every mode, and the planned bare-scope-letter
+feature being self-contradictory under five modes ("stay in the mode" *is* a
+mode change under the old model; under the new one it is a field assignment).
+
+The unifying idea, now written into `docs/architecture.md`: **a focus highlight
+is a selection whose two ends coincide.** That is why one `scope_span` derives
+both extents, one `step_scope` table serves both motions, and one
+`span_screen_rects` produces both overlays.
+
+The entry chords doubling as scope switches falls out for free — the focus
+keymap is the normal keymap plus overrides, and `c` is not overridden, so `cw`
+already worked inside focus mode. It now changes the scope in place instead of
+switching modes. No `focus_scope_*` commands were needed.
+
+### Test strategy
+
+The two de-risking commits landed first and separately: extracting the shared
+`step_scope` motion table (which passed the existing suite with **zero test
+edits**, converting "focus and visual already agree scope-for-scope" from an
+assumption into a result — and exposing that Line scope did *not* agree), then
+renaming `VisualScope` to `Scope`.
+
+For the collapse itself, the ~100 test call sites that read the old per-scope
+marks were kept working by **deriving** those shapes from `focus_span` in
+`#[cfg(test)]` helpers. That is not a compatibility shim for its own sake: it
+means every one of those assertions now checks what is actually drawn rather
+than a parallel field, so they kept their value instead of being rewritten into
+something weaker. 198 tests pass.
+
+New tests: `changing_scope_keeps_the_position` (the bug above),
+`visual_inherits_and_returns_every_focus_scope` (round-trips all five scopes
+through visual and back), `word_motions_work_at_every_scope`, and
+`pre_collapse_focus_tables_get_a_migration_hint`.
+
+Verified beyond the suite: `cargo fmt`, `clippy -D warnings`,
+`./scripts/check-docs.sh`, the Qt build, the offscreen smoke test, and an Xvfb
+screenshot per scope confirming each highlight still renders at the right
+extent in one uniform colour with no borders — plus a visual-mode capture
+confirming the two overlays still differ.
+
+### Notes / remaining
+
+- **Old configs fail to parse entirely.** `deny_unknown_fields` rejects the
+  whole file, so a config still naming `[word_focus_keys]` loses `[view]` and
+  `[files]` too. The clean break stands, but the parse error now appends a
+  migration hint naming the stale tables and the replacement — the bare serde
+  message did not say what to do.
+- **Paragraph highlights now render per line** rather than as one solid block,
+  matching sentence and visual paragraph scope. The right edge is ragged where
+  it used to be flush. Deliberate: it is the same span machinery for everything.
+- Entering focus mode now always starts from the top-most visible line, for
+  every scope. Char and line focus previously started at line 0 of the current
+  page while word, sentence and paragraph used the viewport. The viewport
+  behaviour is the better one and is now uniform.
+- Warrants a **0.7.0** release with the breaking-change note.
+- The bare-scope-letter feature (`w`/`e`/`s`/`p`/`c` switching scope in place)
+  is now coherent to specify, and is the natural next step. Note the tension it
+  still has to resolve: `w`, `e` and `b` are already word *motions* in both
+  focus and visual mode.
+
+---
+
 ## 2026-07-28 — Line scope is identified by `e`, not `l`
 
 ### Implemented

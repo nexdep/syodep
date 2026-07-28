@@ -2,10 +2,11 @@
 //! content (text characters and images) independently of scrolling.
 //!
 //! The caret is *modal*: the app is either in [`Mode::Normal`] (where `hjkl`
-//! scroll the page) or [`Mode::CaretFocus`] (where `hjkl` move the caret — `h`/`l`
-//! by character, `j`/`k` by line — and the view auto-scrolls to follow it).
-//! Each image is a single caret stop, so the caret traverses text and images
-//! uniformly.
+//! scroll the page) or [`Mode::Focus`] (where `hjkl` move the caret and the view
+//! auto-scrolls to follow it). What a step of `hjkl` covers is the focus
+//! [`Scope`] — a character, word, line, sentence or paragraph — not a separate
+//! mode. Each image is a single caret stop, so the caret traverses text and
+//! images uniformly.
 //!
 //! This module owns the small pieces that are pure and unit-testable in
 //! isolation: the position type, the movement direction, and the
@@ -15,26 +16,22 @@
 
 use syodep_pdf::{Cell, CellKind, ContentLine};
 
-/// Whether `hjkl` scroll the page or move the caret.
+/// Whether `hjkl` scroll the page, move a focus highlight, or grow a selection.
+///
+/// There are exactly three modes. Granularity is *not* a mode: both [`Focus`]
+/// and [`Visual`] carry a [`Scope`], so "word focus" and "line focus" are the
+/// same mode holding a different scope.
+///
+/// [`Focus`]: Mode::Focus
+/// [`Visual`]: Mode::Visual
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Mode {
     /// `hjkl` scroll the page (the original behavior).
     #[default]
     Normal,
-    /// Caret focus mode: `hjkl` move the caret; the view follows it.
-    CaretFocus,
-    /// Line focus mode: a whole line is highlighted; `j`/`k` move it line-wise
-    /// and `H`/`L` move between columns (multi-column pages only).
-    LineFocus,
-    /// Word focus mode: a whole word is highlighted; `h`/`l` (and `w`/`b`) step
-    /// word-wise and `j`/`k` move by line, keeping a goal column like the caret.
-    WordFocus,
-    /// Sentence focus mode: a whole sentence (possibly spanning several lines) is
-    /// highlighted; `hjkl`/arrows step sentence-wise (a linear sequence).
-    SentenceFocus,
-    /// Paragraph focus mode: a whole paragraph (a block of lines) is highlighted;
-    /// `hjkl`/arrows step paragraph-wise (a linear sequence).
-    ParagraphFocus,
+    /// Focus mode: one position is highlighted at the active [`Scope`] and
+    /// `hjkl`/arrows move it by one unit of that scope; the view follows it.
+    Focus,
     /// Visual mode: a two-ended selection. `hjkl`/arrows grow it by one unit of
     /// the active end's [`Scope`]; `o` swaps which end moves.
     Visual,
@@ -42,12 +39,14 @@ pub enum Mode {
 
 /// A granularity that a position moves and snaps by.
 ///
-/// Visual mode carries one per end, so a selection can be line-granular at one
-/// edge and word-granular at the other (`ve` then `ow`). `App::step_scope` is
-/// the single table mapping a scope and a direction onto a motion, shared by
-/// the focus modes and visual so a scope cannot mean two different things.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Focus mode carries one; visual mode carries one *per end*, so a selection
+/// can be line-granular at one edge and word-granular at the other (`ve` then
+/// `ow`). `App::step_scope` is the single table mapping a scope and a direction
+/// onto a motion, shared by focus and visual so a scope cannot mean two
+/// different things.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Scope {
+    #[default]
     Char,
     Word,
     Line,
@@ -56,18 +55,6 @@ pub enum Scope {
 }
 
 impl Scope {
-    /// The scope a focus mode hands to visual mode when entered with a bare
-    /// `v`. Modes without a natural granularity select by character.
-    pub fn from_mode(mode: Mode) -> Self {
-        match mode {
-            Mode::WordFocus => Self::Word,
-            Mode::LineFocus => Self::Line,
-            Mode::SentenceFocus => Self::Sentence,
-            Mode::ParagraphFocus => Self::Paragraph,
-            Mode::Normal | Mode::CaretFocus | Mode::Visual => Self::Char,
-        }
-    }
-
     /// Lower-case name for the status line.
     pub fn name(self) -> &'static str {
         match self {
@@ -387,17 +374,6 @@ mod tests {
         let (a, b) = (at(2, 1, 3), at(0, 5, 0));
         assert_eq!(a.min(b), at(0, 5, 0));
         assert_eq!(a.max(b), at(2, 1, 3));
-    }
-
-    #[test]
-    fn visual_scope_is_inherited_from_the_focus_mode() {
-        assert_eq!(Scope::from_mode(Mode::WordFocus), Scope::Word);
-        assert_eq!(Scope::from_mode(Mode::LineFocus), Scope::Line);
-        assert_eq!(Scope::from_mode(Mode::SentenceFocus), Scope::Sentence);
-        assert_eq!(Scope::from_mode(Mode::ParagraphFocus), Scope::Paragraph);
-        // Normal and caret focus have no larger unit, so they select by char.
-        assert_eq!(Scope::from_mode(Mode::Normal), Scope::Char);
-        assert_eq!(Scope::from_mode(Mode::CaretFocus), Scope::Char);
     }
 
     #[test]

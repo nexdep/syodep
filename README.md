@@ -129,7 +129,8 @@ no document logic. Details in `docs/architecture.md`.
 - `docs/architecture.md` – module boundaries, data flow, decisions
 - `docs/commands.md` – command index, linking the per-mode pages below
 - `docs/commands-normal-mode.md` – commands available in normal mode
-- `docs/commands-caret-focus-mode.md` – commands available in caret focus mode
+- `docs/commands-focus-mode.md` – commands available in focus mode
+- `docs/commands-visual-mode.md` – commands available in visual mode
 - `docs/keybindings.md` – every default binding + key syntax
 - `docs/config.md` – every config option
 - `docs/testing.md` – test strategy and how to run tests

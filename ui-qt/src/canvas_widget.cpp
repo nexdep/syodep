@@ -111,9 +111,8 @@ void CanvasWidget::paintGL()
         painter.drawImage(target, image);
     }
 
-    // Overlays. At most one is ever valid -- the core's getters each guard on
-    // a distinct Mode -- so collecting from all of them yields exactly one
-    // mode's rectangles.
+    // Overlays. At most one is ever valid -- focus and visual are different
+    // modes -- so collecting from both yields exactly one mode's rectangles.
     //
     // Every rectangle goes into a QPainterPath that is simplified before a
     // single fill. simplified() merges intersecting subpaths into an outline
@@ -135,41 +134,21 @@ void CanvasWidget::paintGL()
         path.addRect(box);
     };
 
-    QPainterPath focusPath;
-    const SyoCaret caret = syo_app_caret(m_app);
-    if (caret.valid)
-        addRect(focusPath, caret.x, caret.y, caret.width, caret.height);
-    const SyoCaret line = syo_app_line(m_app);
-    if (line.valid)
-        addRect(focusPath, line.x, line.y, line.width, line.height);
-    const SyoCaret word = syo_app_word(m_app);
-    if (word.valid)
-        addRect(focusPath, word.x, word.y, word.width, word.height);
-    const SyoCaret paragraph = syo_app_paragraph(m_app);
-    if (paragraph.valid)
-        addRect(focusPath, paragraph.x, paragraph.y, paragraph.width, paragraph.height);
-    const SyoSentence sentence = syo_app_sentence(m_app);
-    if (sentence.valid) {
-        for (uintptr_t i = 0; i < sentence.rect_count; ++i) {
-            const SyoRect r = sentence.rects[i];
-            addRect(focusPath, r.x, r.y, r.width, r.height);
+    const auto fillOverlay = [&](SyoOverlay overlay, const QColor &color) {
+        QPainterPath path;
+        if (overlay.valid) {
+            for (uintptr_t i = 0; i < overlay.rect_count; ++i) {
+                const SyoRect r = overlay.rects[i];
+                addRect(path, r.x, r.y, r.width, r.height);
+            }
         }
-    }
-    syo_sentence_free(sentence);
-    if (!focusPath.isEmpty())
-        painter.fillPath(focusPath.simplified(), m_focusColor);
+        syo_overlay_free(overlay);
+        if (!path.isEmpty())
+            painter.fillPath(path.simplified(), color);
+    };
 
-    QPainterPath visualPath;
-    const SyoSelection selection = syo_app_selection(m_app);
-    if (selection.valid) {
-        for (uintptr_t i = 0; i < selection.rect_count; ++i) {
-            const SyoRect r = selection.rects[i];
-            addRect(visualPath, r.x, r.y, r.width, r.height);
-        }
-    }
-    syo_selection_free(selection);
-    if (!visualPath.isEmpty())
-        painter.fillPath(visualPath.simplified(), m_visualColor);
+    fillOverlay(syo_app_focus(m_app), m_focusColor);
+    fillOverlay(syo_app_selection(m_app), m_visualColor);
 }
 
 } // namespace syodep

@@ -20,11 +20,7 @@ required_docs=(
     docs/development-log.md
     docs/commands.md
     docs/commands-normal-mode.md
-    docs/commands-caret-focus-mode.md
-    docs/commands-line-focus-mode.md
-    docs/commands-word-focus-mode.md
-    docs/commands-sentence-focus-mode.md
-    docs/commands-paragraph-focus-mode.md
+    docs/commands-focus-mode.md
     docs/commands-visual-mode.md
     docs/keybindings.md
     docs/config.md
@@ -38,7 +34,7 @@ done
 
 # Every command name in ALL_COMMANDS must appear on a per-mode commands page
 # (docs/commands.md is the index; the tables live in the per-mode pages).
-command_docs=(docs/commands-normal-mode.md docs/commands-caret-focus-mode.md docs/commands-line-focus-mode.md docs/commands-word-focus-mode.md docs/commands-sentence-focus-mode.md docs/commands-paragraph-focus-mode.md docs/commands-visual-mode.md)
+command_docs=(docs/commands-normal-mode.md docs/commands-focus-mode.md docs/commands-visual-mode.md)
 while IFS= read -r command; do
     grep -q "\`$command\`" "${command_docs[@]}" || err "command not documented: $command"
 done < <(grep -oP '^\s*\("\K[a-z0-9_]+(?=",)' crates/syodep-core/src/command.rs)
@@ -49,40 +45,13 @@ while IFS= read -r binding; do
     grep -qF "$binding" docs/keybindings.md || err "default keybinding not documented: $binding"
 done < <(grep -oP '^\s*\("\K[^"]+(?=", ")' crates/syodep-config/src/lib.rs)
 
-# Every caret-focus binding's command (default_caret_focus_keybindings) must
-# appear in docs/keybindings.md, so caret focus mode stays documented.
+# Every focus-mode binding's command (default_focus_keybindings) must appear in
+# docs/keybindings.md, so focus mode stays documented. One block covers every
+# scope, because one keymap does.
 while IFS= read -r command; do
     grep -q "\`$command\`" docs/keybindings.md \
-        || err "caret keybinding command not documented: $command"
-done < <(awk '/pub fn default_caret_focus_keybindings/,/^}/' crates/syodep-config/src/lib.rs \
-    | grep -oP '", "\K[a-z_]+(?="\))')
-
-# Likewise for line-focus bindings (default_line_focus_keybindings).
-while IFS= read -r command; do
-    grep -q "\`$command\`" docs/keybindings.md \
-        || err "line keybinding command not documented: $command"
-done < <(awk '/pub fn default_line_focus_keybindings/,/^}/' crates/syodep-config/src/lib.rs \
-    | grep -oP '", "\K[a-z_]+(?="\))')
-
-# Likewise for word-focus bindings (default_word_focus_keybindings).
-while IFS= read -r command; do
-    grep -q "\`$command\`" docs/keybindings.md \
-        || err "word keybinding command not documented: $command"
-done < <(awk '/pub fn default_word_focus_keybindings/,/^}/' crates/syodep-config/src/lib.rs \
-    | grep -oP '", "\K[a-z_]+(?="\))')
-
-# Likewise for sentence-focus bindings (default_sentence_focus_keybindings).
-while IFS= read -r command; do
-    grep -q "\`$command\`" docs/keybindings.md \
-        || err "sentence keybinding command not documented: $command"
-done < <(awk '/pub fn default_sentence_focus_keybindings/,/^}/' crates/syodep-config/src/lib.rs \
-    | grep -oP '", "\K[a-z_]+(?="\))')
-
-# Likewise for paragraph-focus bindings (default_paragraph_focus_keybindings).
-while IFS= read -r command; do
-    grep -q "\`$command\`" docs/keybindings.md \
-        || err "paragraph keybinding command not documented: $command"
-done < <(awk '/pub fn default_paragraph_focus_keybindings/,/^}/' crates/syodep-config/src/lib.rs \
+        || err "focus keybinding command not documented: $command"
+done < <(awk '/pub fn default_focus_keybindings/,/^}/' crates/syodep-config/src/lib.rs \
     | grep -oP '", "\K[a-z_]+(?="\))')
 
 # Likewise for visual-mode bindings (default_visual_keybindings).
