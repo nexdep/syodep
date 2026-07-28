@@ -306,7 +306,7 @@ fn migration_hint(text: &str, message: String) -> String {
             .map(|t| format!("[{t}]"))
             .collect::<Vec<_>>()
             .join(", "),
-        stale[0].trim_end_matches("_focus_keys"),
+        stale[0].trim_end_matches("_keys"),
     )
 }
 
@@ -688,6 +688,9 @@ mod tests {
         // ...and is followed by something actionable.
         assert!(err.contains("[focus_keys]"), "{err}");
         assert!(err.contains("focus_left"), "{err}");
+        // The example it cites must be a command name that really existed --
+        // a migration hint naming a command nobody ever had is worse than none.
+        assert!(err.contains("word_focus_left"), "{err}");
     }
 
     #[test]
