@@ -7,6 +7,69 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-07-28 — 0.7.0
+
+Since 0.6.0. **This release breaks existing configs.** See the migration below.
+
+- **The five focus modes are now one focus mode with a scope.** `Mode` went
+  from seven variants to three (`Normal`, `Focus`, `Visual`). Granularity —
+  char, word, line, sentence, paragraph — is a *setting* of focus mode, not a
+  mode of its own, matching how visual mode has always worked.
+- **Changing granularity no longer teleports you.** Pressing `ce` while focused
+  on a word now highlights the line you are on. It used to restore wherever you
+  last left line focus, possibly pages away, because each mode kept its own
+  mark. There is one position now, so the bug cannot occur.
+- **The entry chords double as scope switches.** `cc`/`cw`/`ce`/`cs`/`cp` work
+  from inside focus mode and change the scope in place.
+- **`w`/`e`/`b` move by a word at every scope**, mirroring visual mode. They
+  used to be bound only in caret focus, and meant scope motion in word focus.
+- **The line scope is identified by `e`, not `l`** (`ce`, `ve`, `oe`). `l` is
+  the forward motion in every mode and could not also name a scope.
+
+Your keys are otherwise unchanged: `cc`/`cw`/`ce`/`cs`/`cp` still enter, `hjkl`
+still move, `<Esc>` still exits.
+
+### Migrating a config
+
+If your config has none of the tables below, nothing to do.
+
+The five focus key tables became one. Rename whichever you have to
+`[focus_keys]`, merging them if you had more than one, and replace the command
+names:
+
+| was | now |
+|---|---|
+| `[caret_focus_keys]`, `[line_focus_keys]`, `[word_focus_keys]`, `[sentence_focus_keys]`, `[paragraph_focus_keys]` | `[focus_keys]` |
+| `caret_focus_left`, `line_focus_left`, `word_focus_left`, `sentence_focus_prev`, `paragraph_focus_prev` | `focus_left` |
+| the `*_right` / `*_next` equivalents | `focus_right` |
+| the `*_up` equivalents | `focus_up` |
+| the `*_down` equivalents | `focus_down` |
+| `caret_focus_next_word` / `_end_word` / `_prev_word` | `focus_next_word` / `focus_end_word` / `focus_prev_word` |
+| `*_focus_exit` | `focus_exit` |
+| `caret_focus_enter`, `line_focus_enter`, … | `focus_enter_char`, `focus_enter_line`, … |
+
+The motion commands dispatch on the active scope, which is why five sets
+collapse to one: `focus_left` is a character in char scope, a word in word
+scope, a column jump in line scope and the previous unit in sentence or
+paragraph scope.
+
+**An unmigrated config fails to load entirely**, not just its key table —
+syodep rejects unknown fields so a typo cannot silently do nothing. The error
+message names the stale tables and their replacement. A fresh, fully commented
+reference config is at `config/default-config.toml`, and `syodep --defaults`
+writes one.
+
+### For anyone embedding the core
+
+The C ABI changed shape. `SyoCaret`, `SyoSentence` and `SyoSelection`, plus
+`syo_app_caret`, `syo_app_line`, `syo_app_word`, `syo_app_sentence`,
+`syo_app_paragraph` and `syo_sentence_free`, are replaced by one `SyoOverlay`
+with `syo_app_focus`, `syo_app_selection` and `syo_overlay_free`. Focus and
+selection overlays are the same shape because a focus highlight is a selection
+whose two ends coincide.
+
+---
+
 ## 2026-07-28 — Five focus modes collapse into one mode with a scope
 
 ### Implemented
