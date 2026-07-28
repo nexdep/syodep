@@ -85,11 +85,22 @@ input take plain data). Key pieces:
   cached per page in the session; the pure goal-column and word-boundary
   helpers live in `caret.rs`.
 - **Visual mode** (`caret.rs` + `app.rs`): a two-ended selection over the same
-  content layer. `VisualSelection` holds an `anchor` and a `head` — the head is
-  what motions move — each with its own `Scope`. `o` swaps the two wholesale,
-  so there is no separate "which end is active" flag to drift. Rendering
-  expands each end by its own scope and takes the outermost edges, which makes
-  the ends crossing a non-case and `o` provably invisible.
+  content layer. It stores only the anchored end (`VisualAnchor`); the *moving*
+  end is the app's `focus`/`focus_scope`. There is exactly one "where you are"
+  in the whole app, and visual mode adds a second endpoint rather than a second
+  position. `o` exchanges the anchor with the focus position, scopes included,
+  so there is no separate "which end is active" flag to drift. Rendering expands
+  each end by its own scope and takes the outermost edges, which makes the ends
+  crossing a non-case and `o` provably invisible.
+  `VisualSelection` still exists, but as a *read-only view* assembled by
+  `visual_selection()` — it is what the tests and status line read, never what
+  the app stores.
+- **Why the moving end is not stored separately**: it was, and that was a bug.
+  `enter_focus` (the `c` chords) read `focus` while `hjkl` moved
+  `visual.head`, and the two only reconciled inside `exit_visual` — so leaving
+  visual mode any other way silently restored the pre-selection position. The
+  fix was to delete the duplicate rather than sync it: `exit_visual` now just
+  drops the anchor, and `enter_focus` needs no visual-aware branch at all.
 - **Why focus and visual share almost everything**: a focus highlight is a
   selection whose two ends coincide. Both resolve to an inclusive `(Caret,
   Caret)` span, so one `scope_span` derives the extent, one `step_scope` table
@@ -99,9 +110,9 @@ input take plain data). Key pieces:
   by discipline. The FFI reflects this: a single `SyoOverlay` shape serves both,
   fetched with `syo_app_focus` / `syo_app_selection`. Overlays are drawn per
   *visible* page, so cost does not grow with span length.
-  The two stay separate modes because their exit semantics differ, focus moves
-  a single position rather than one end of a range, and they want distinct
-  colours.
+  The two stay separate modes because their exit semantics differ, focus draws
+  one end where visual draws two, and they want distinct colours — but they
+  share the position itself.
 
 ### syodep-pdf
 

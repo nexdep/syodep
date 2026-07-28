@@ -11,7 +11,9 @@ A bare `v` inherits the focus scope, so `cw` then `v` starts selecting word by
 word with the same keys you were already using.
 
 Press `<Esc>` (`visual_exit`) to return to the mode visual mode was entered
-from; the focus highlight carries over to wherever the head ended up.
+from. The moving end *is* the focus position, so both where you are and the
+granularity you were last using carry straight over — `cw`, `v`, `ve`, `<Esc>`
+leaves you in line focus at the head, not back where you started.
 
 Counts work here too (`3l`, `2w`).
 
@@ -99,8 +101,11 @@ scrolling does not drag the selection to the newly visible content - a
 selection is an explicit range, and moving it out from under the reader would
 lose work. Only the parts of the selection on screen are drawn.
 
-**Entering focus mode discards the selection.** The focus entry chords (`cc`,
-`ce`, `cw`, `cs`, `cp`) still work in visual mode and switch modes as usual.
+**Entering focus mode discards the selection but keeps your place.** The
+focus entry chords (`cc`, `ce`, `cw`, `cs`, `cp`) still work in visual mode;
+they drop the anchor and leave you focused on the moving end at the scope you
+named. Leaving by a `c` chord and leaving by `<Esc>` differ only in whether you
+also change the scope.
 
 The application commands `open_file`, `quit` and `cancel` also keep their
 normal-mode behavior. See `docs/commands-normal-mode.md` for those.

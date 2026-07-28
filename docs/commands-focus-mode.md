@@ -115,10 +115,11 @@ normal-mode behavior. See `docs/commands-normal-mode.md` for those.
 ## Relationship to visual mode
 
 A focus highlight is a selection whose two ends coincide. Pressing `v` from
-focus mode enters visual mode inheriting the focus scope, and `<Esc>` comes
-back to focus mode at wherever the head ended up. The two modes share one
-per-scope motion table, so a scope cannot mean one thing in focus mode and
-something else in visual mode. See `docs/commands-visual-mode.md`.
+focus mode enters visual mode inheriting the focus scope; visual mode's moving
+end *is* the focus position, so leaving it — by `<Esc>` or by naming a new
+scope with a `c` chord — always leaves you where that end was. The two modes
+share one per-scope motion table, so a scope cannot mean one thing in focus
+mode and something else in visual mode. See `docs/commands-visual-mode.md`.
 
 ## Customizing
 

@@ -22,7 +22,7 @@ use crate::caret::{
     column_index_of, column_ranges, continues_word_run, is_sentence_terminator,
     is_sentence_trailer, is_word_target, nearest_cell_in_line, nearest_line_in_column,
     paragraph_segments, word_class, Caret, Dir, LineMark, Mode, ParagraphMark, Scope, SentenceMark,
-    VisualSelection, WordClass, WordMark,
+    VisualAnchor, VisualSelection, WordClass, WordMark,
 };
 use crate::command::Command;
 use crate::input::{InputState, KeyOutcome, Keymap, KeymapError};
@@ -109,11 +109,15 @@ pub struct App {
     viewport: (f32, f32),
     /// Whether `hjkl` scroll, move the focus, or grow a selection.
     mode: Mode,
-    /// The focused position, remembered across mode toggles. A single point:
-    /// what is *highlighted* is derived from it by [`Self::scope_span`], so
-    /// changing the scope cannot leave the highlight somewhere else.
+    /// The live position, remembered across mode toggles. A single point: what
+    /// is *highlighted* is derived from it by [`Self::scope_span`], so changing
+    /// the scope cannot leave the highlight somewhere else.
+    ///
+    /// In visual mode this is also the end that motions move, which is why
+    /// leaving visual by any route keeps your place.
     focus: Option<Caret>,
-    /// Granularity the focus highlight snaps to, remembered across mode toggles.
+    /// Granularity the highlight snaps to, remembered across mode toggles. In
+    /// visual mode this is the moving end's scope.
     focus_scope: Scope,
     /// The focus highlight resolved to a document-order cell range, recomputed
     /// after every change to `focus` or `focus_scope`. Cached for the same
@@ -124,17 +128,15 @@ pub struct App {
     focus_goal_x: f32,
     /// Remembered goal row (page-space y center) for line-scope column motion.
     focus_goal_y: f32,
-    /// The live selection while in visual mode.
-    visual: Option<VisualSelection>,
+    /// The anchored end, present only in visual mode. The *moving* end is
+    /// `focus`/`focus_scope` above — there is no second position, so no pair of
+    /// fields to drift apart.
+    visual: Option<VisualAnchor>,
     /// The selection resolved to a document-order cell range, recomputed after
-    /// every change to `visual`. Cached because resolving it needs page content
-    /// (`&mut self`) while the overlay getter the shell calls is `&self`.
+    /// every change to either end. Cached because resolving it needs page
+    /// content (`&mut self`) while the overlay getter the shell calls is
+    /// `&self`.
     visual_span: Option<(Caret, Caret)>,
-    /// Remembered goal column (page-space x) for vertical motion of the head.
-    visual_goal_x: f32,
-    /// Remembered goal row (page-space y) for line-scope column motion, the
-    /// counterpart of `line_goal_y` on the focus side.
-    visual_goal_y: f32,
     /// Config/keymap problems collected at startup, for the UI to surface.
     startup_warnings: Vec<String>,
     last_error: Option<String>,
@@ -182,8 +184,6 @@ impl App {
             focus_goal_y: 0.0,
             visual: None,
             visual_span: None,
-            visual_goal_x: 0.0,
-            visual_goal_y: 0.0,
             startup_warnings,
             last_error: None,
         }
@@ -261,8 +261,6 @@ impl App {
         self.focus_goal_y = 0.0;
         self.visual = None;
         self.visual_span = None;
-        self.visual_goal_x = 0.0;
-        self.visual_goal_y = 0.0;
         self.last_error = None;
         Ok(())
     }
@@ -1733,8 +1731,18 @@ impl App {
 
     // ---- Visual mode ----------------------------------------------------
 
+    /// The selection as a two-ended view: the anchor as stored, the head read
+    /// from the live position. Assembled on demand — the head is not stored
+    /// twice, so this cannot disagree with what motions actually move.
     pub fn visual_selection(&self) -> Option<VisualSelection> {
-        self.visual
+        let a = self.visual?;
+        Some(VisualSelection {
+            anchor: a.anchor,
+            anchor_scope: a.anchor_scope,
+            head: self.focus?,
+            head_scope: self.focus_scope,
+            return_mode: a.return_mode,
+        })
     }
 
     /// The selection resolved to an inclusive, document-order cell range.
@@ -1746,31 +1754,16 @@ impl App {
     /// own scope, then the outermost edges win — so the ends crossing needs no
     /// special case, and swapping them cannot change what is drawn.
     fn refresh_visual_span(&mut self) {
-        let Some(sel) = self.visual else {
+        let (Some(a), Some(head)) = (self.visual, self.focus) else {
             self.visual_span = None;
             return;
         };
-        let (a0, a1) = self.scope_span(sel.anchor, sel.anchor_scope);
-        let (h0, h1) = self.scope_span(sel.head, sel.head_scope);
+        let (a0, a1) = self.scope_span(a.anchor, a.anchor_scope);
+        let (h0, h1) = self.scope_span(head, self.focus_scope);
         self.visual_span = Some((a0.min(h0), a1.max(h1)));
     }
 
-    /// Update the remembered goal row from the head's line, for line-scope
-    /// column motion.
-    fn update_visual_goal_y(&mut self, head: Caret) {
-        if let Some(b) = self.line_bbox(head.page, head.line) {
-            self.visual_goal_y = (b.y0 + b.y1) / 2.0;
-        }
-    }
-
-    /// Update the remembered goal column from the head's cell.
-    fn update_visual_goal_x(&mut self, head: Caret) {
-        if let Some(r) = self.cell_rect(head.page, head.line, head.cell) {
-            self.visual_goal_x = (r.x0 + r.x1) / 2.0;
-        }
-    }
-
-    /// Where a fresh selection starts: the focused position, else the topmost
+    /// Where a fresh selection starts: the live position, else the topmost
     /// visible line.
     fn visual_entry_caret(&mut self) -> Option<Caret> {
         match self.focus {
@@ -1779,22 +1772,21 @@ impl App {
         }
     }
 
-    /// Enter visual mode. `scope = None` inherits the focus scope (`v` from
+    /// Enter visual mode. `scope = None` inherits the current scope (`v` from
     /// word focus selects word-wise).
     fn enter_visual(&mut self, scope: Option<Scope>) -> Effects {
         if self.session.is_none() {
             return Effects::default();
         }
         // Re-entering visual mode collapses the selection onto the head.
-        if let Some(mut sel) = self.visual.filter(|_| self.mode == Mode::Visual) {
-            sel.anchor = sel.head;
+        let live = self.visual.filter(|_| self.mode == Mode::Visual);
+        if let (Some(mut a), Some(head)) = (live, self.focus) {
+            a.anchor = head;
             if let Some(scope) = scope {
-                sel.anchor_scope = scope;
-                sel.head_scope = scope;
-            } else {
-                sel.anchor_scope = sel.head_scope;
+                self.focus_scope = scope;
             }
-            self.visual = Some(sel);
+            a.anchor_scope = self.focus_scope;
+            self.visual = Some(a);
             self.refresh_visual_span();
             return Effects::redraw();
         }
@@ -1802,49 +1794,63 @@ impl App {
         let Some(at) = self.visual_entry_caret() else {
             return Effects::default();
         };
-        self.visual = Some(VisualSelection {
+        self.visual = Some(VisualAnchor {
             anchor: at,
             anchor_scope: scope,
-            head: at,
-            head_scope: scope,
             return_mode: self.mode,
         });
+        self.focus = Some(at);
+        self.focus_scope = scope;
         self.mode = Mode::Visual;
-        self.update_visual_goal_x(at);
+        self.update_focus_goal_x(at);
         self.refresh_visual_span();
         self.ensure_visual_head_visible();
         self.save_position();
         Effects::redraw()
     }
 
-    /// Leave visual mode, restoring the mode it was entered from and carrying
-    /// the head into the focused position, so the highlight does not appear to
-    /// jump back to where the selection started.
+    /// Leave visual mode, restoring the mode it was entered from.
+    ///
+    /// Nothing is carried across: the head already *is* the live position, so
+    /// dropping the anchor is the whole operation. Every other way out of
+    /// visual mode (a `c` chord, say) is correct for free, for the same reason.
     fn exit_visual(&mut self) -> Effects {
-        let Some(sel) = self.visual else {
+        let Some(a) = self.visual else {
             self.mode = Mode::Normal;
             return Effects::redraw();
         };
-        self.mode = sel.return_mode;
-        self.focus = Some(sel.head);
-        self.refresh_focus_span();
+        self.mode = a.return_mode;
         self.visual = None;
         self.visual_span = None;
+        self.refresh_focus_span();
         self.save_position();
         Effects::redraw()
+    }
+
+    /// Exchange the anchored end with the live one, scopes included. Keeps the
+    /// invariant that the focus position is whichever end moves.
+    fn swap_visual_ends(&mut self) {
+        let (Some(mut a), Some(head)) = (self.visual, self.focus) else {
+            return;
+        };
+        self.focus = Some(a.anchor);
+        a.anchor = head;
+        std::mem::swap(&mut self.focus_scope, &mut a.anchor_scope);
+        self.visual = Some(a);
     }
 
     /// `o`: make the other end the one motions move. Purely a state change —
     /// the rendered selection is unaffected.
     fn visual_swap_ends(&mut self) -> Effects {
-        let Some(mut sel) = self.visual else {
+        if self.visual.is_none() {
             return Effects::default();
-        };
-        sel.swap_ends();
-        self.visual = Some(sel);
+        }
+        self.swap_visual_ends();
         // The goal column belongs to whichever end is moving, so it has to
         // follow the swap or the next `j`/`k` jumps to the old head's column.
-        self.update_visual_goal_x(sel.head);
+        if let Some(head) = self.focus {
+            self.update_focus_goal_x(head);
+        }
         self.ensure_visual_head_visible();
         Effects::redraw()
     }
@@ -1852,16 +1858,17 @@ impl App {
     /// Set the active end's granularity, optionally switching ends first
     /// (`vw` vs `ow`).
     fn set_head_scope(&mut self, scope: Scope, swap_first: bool) -> Effects {
-        let Some(mut sel) = self.visual else {
+        if self.visual.is_none() {
             return Effects::default();
-        };
-        if swap_first {
-            sel.swap_ends();
         }
-        sel.head_scope = scope;
-        self.visual = Some(sel);
         if swap_first {
-            self.update_visual_goal_x(sel.head);
+            self.swap_visual_ends();
+        }
+        self.focus_scope = scope;
+        if swap_first {
+            if let Some(head) = self.focus {
+                self.update_focus_goal_x(head);
+            }
         }
         self.refresh_visual_span();
         self.ensure_visual_head_visible();
@@ -1869,28 +1876,28 @@ impl App {
     }
 
     fn visual_move(&mut self, dir: Dir, count: Option<u32>) -> Effects {
-        let Some(mut sel) = self.visual else {
+        let (Some(_), Some(mut head)) = (self.visual, self.focus) else {
             return Effects::default();
         };
         let steps = count.unwrap_or(1).max(1);
-        let goal_x = self.visual_goal_x;
-        let goal_y = self.visual_goal_y;
-        let scope = sel.head_scope;
+        let goal_x = self.focus_goal_x;
+        let goal_y = self.focus_goal_y;
+        let scope = self.focus_scope;
         for _ in 0..steps {
-            if !self.step_scope(&mut sel.head, scope, dir, goal_x, goal_y) {
+            if !self.step_scope(&mut head, scope, dir, goal_x, goal_y) {
                 break;
             }
         }
-        self.visual = Some(sel);
+        self.focus = Some(head);
         // Horizontal motion redefines the column vertical motion aims for --
         // except in line scope, where the axes are swapped: there `h`/`l` jump
         // columns and `j`/`k` set the row those jumps aim at.
         if scope == Scope::Line {
             if matches!(dir, Dir::Up | Dir::Down) {
-                self.update_visual_goal_y(sel.head);
+                self.update_focus_goal_y(head);
             }
         } else if matches!(dir, Dir::Left | Dir::Right) {
-            self.update_visual_goal_x(sel.head);
+            self.update_focus_goal_x(head);
         }
         self.refresh_visual_span();
         self.ensure_visual_head_visible();
@@ -1901,22 +1908,22 @@ impl App {
     /// `w`/`b`/`e` move the head a word at a time in *every* scope: they are
     /// word-named motions, and the edge still snaps to the active scope.
     fn visual_word_move(&mut self, motion: WordMotion, count: Option<u32>) -> Effects {
-        let Some(mut sel) = self.visual else {
+        let (Some(_), Some(mut head)) = (self.visual, self.focus) else {
             return Effects::default();
         };
         let steps = count.unwrap_or(1).max(1);
         for _ in 0..steps {
             let moved = match motion {
-                WordMotion::NextStart => self.step_next_word_start(&mut sel.head),
-                WordMotion::End => self.step_word_end(&mut sel.head),
-                WordMotion::PrevStart => self.step_prev_word_start(&mut sel.head),
+                WordMotion::NextStart => self.step_next_word_start(&mut head),
+                WordMotion::End => self.step_word_end(&mut head),
+                WordMotion::PrevStart => self.step_prev_word_start(&mut head),
             };
             if !moved {
                 break;
             }
         }
-        self.visual = Some(sel);
-        self.update_visual_goal_x(sel.head);
+        self.focus = Some(head);
+        self.update_focus_goal_x(head);
         self.refresh_visual_span();
         self.ensure_visual_head_visible();
         self.save_position();
@@ -1926,13 +1933,13 @@ impl App {
     /// Scroll so the moving end stays on screen. Only the head is followed —
     /// the anchor may be arbitrarily far away.
     fn ensure_visual_head_visible(&mut self) {
-        let Some(sel) = self.visual else {
+        let Some(head) = self.focus else {
             return;
         };
-        let Some(rect) = self.cell_rect(sel.head.page, sel.head.line, sel.head.cell) else {
+        let Some(rect) = self.cell_rect(head.page, head.line, head.cell) else {
             return;
         };
-        self.scroll_page_rect_into_view(sel.head.page, rect);
+        self.scroll_page_rect_into_view(head.page, rect);
     }
 
     /// The selection as one screen rectangle per spanned line. `None` outside
@@ -1976,15 +1983,16 @@ impl App {
             }
         }
         if self.mode == Mode::Visual {
-            if let Some(sel) = self.visual {
+            if let Some(a) = self.visual {
                 // Both scopes are shown, head first, when the ends differ.
-                if sel.head_scope == sel.anchor_scope {
-                    out.push_str(&format!("  -- VISUAL ({}) --", sel.head_scope.name()));
+                let head_scope = self.focus_scope;
+                if head_scope == a.anchor_scope {
+                    out.push_str(&format!("  -- VISUAL ({}) --", head_scope.name()));
                 } else {
                     out.push_str(&format!(
                         "  -- VISUAL ({}/{}) --",
-                        sel.head_scope.name(),
-                        sel.anchor_scope.name()
+                        head_scope.name(),
+                        a.anchor_scope.name()
                     ));
                 }
             } else {
@@ -2879,6 +2887,97 @@ mod tests {
                 "switching to {scope:?} left the stale position behind"
             );
         }
+    }
+
+    /// Leaving visual mode by naming a scope keeps your place, exactly as
+    /// `<Esc>` does.
+    ///
+    /// The moving end of a selection *is* the focus position, so there is no
+    /// second copy to go stale. When they were separate fields, the `c` chords
+    /// read the pre-selection position and silently discarded the head.
+    #[test]
+    fn leaving_visual_by_scope_chord_keeps_the_position() {
+        let dir = tempfile::tempdir().unwrap();
+        // Exit at word scope, so the landing cell is the word run containing
+        // the head rather than the start of a line — otherwise snapping would
+        // hide the bug on a single-line fixture.
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma delta"]);
+        press(&mut app, "cw");
+        press(&mut app, "vk");
+        press(&mut app, "l");
+        let head = app.visual_selection().expect("selection").head;
+        assert!(head.cell > 0, "the head must have actually moved");
+        press(&mut app, "cw");
+        assert_eq!((app.mode(), app.focus_scope()), (Mode::Focus, Scope::Word));
+        assert_eq!(
+            app.focus_caret(),
+            Some(head),
+            "the scope chord dropped back to the pre-selection position"
+        );
+
+        // And across lines, where a line-scope exit is meaningful: the head's
+        // line is kept, snapping only the column.
+        let mut app = app_with_two_line_pdf(dir.path(), "alpha beta", "gamma delta");
+        press(&mut app, "cw");
+        assert_eq!(app.focus_caret().unwrap().line, 0);
+        press(&mut app, "vk");
+        press(&mut app, "j"); // head down to the second line
+        let head = app.visual_selection().expect("selection").head;
+        assert_eq!(head.line, 1, "the head must have changed line");
+        press(&mut app, "ce");
+        assert_eq!((app.mode(), app.focus_scope()), (Mode::Focus, Scope::Line));
+        assert_eq!(
+            app.focus_caret(),
+            Some(Caret { cell: 0, ..head }),
+            "the scope chord dropped back to the pre-selection line"
+        );
+    }
+
+    /// The scope follows you out of visual mode, the same way the position
+    /// does. `ve` inside a selection means "I am working line-wise now", and
+    /// that survives `<Esc>`.
+    #[test]
+    fn scope_carries_out_of_visual() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma delta"]);
+        press(&mut app, "cw");
+        press(&mut app, "vk");
+        press(&mut app, "ve");
+        let head = app.visual_selection().expect("selection").head;
+        press(&mut app, "<Esc>");
+        assert_eq!((app.mode(), app.focus_scope()), (Mode::Focus, Scope::Line));
+        assert_eq!(app.focus_caret(), Some(head));
+    }
+
+    /// `oo` exchanges the two ends wholesale — positions *and* scopes — so the
+    /// invariant stays "the focus position is the end that moves".
+    #[test]
+    fn swapping_ends_exchanges_positions_and_scopes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma delta"]);
+        press(&mut app, "cc");
+        press(&mut app, "vk"); // visual, char scope at both ends
+        press(&mut app, "l"); // head moves off the anchor
+        press(&mut app, "vw"); // head becomes word-granular
+        let before = app.visual_selection().expect("selection");
+        let span_before = app.visual_span();
+        assert_ne!(before.head, before.anchor);
+        assert_eq!(
+            (before.head_scope, before.anchor_scope),
+            (Scope::Word, Scope::Char)
+        );
+
+        press(&mut app, "oo");
+        let after = app.visual_selection().expect("selection");
+        assert_eq!(after.head, before.anchor);
+        assert_eq!(after.anchor, before.head);
+        assert_eq!(after.head_scope, before.anchor_scope);
+        assert_eq!(after.anchor_scope, before.head_scope);
+        // The focus position tracks whichever end is now moving.
+        assert_eq!(app.focus_caret(), Some(after.head));
+        assert_eq!(app.focus_scope(), after.head_scope);
+        // Swapping never changes what is drawn.
+        assert_eq!(app.visual_span(), span_before);
     }
 
     /// Entering visual mode inherits the focus scope, and leaving it hands the
