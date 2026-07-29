@@ -78,6 +78,13 @@ Because scope is per end, this is decided independently at each edge. An end at
 char scope sitting inside a table is *not* expanded — that is how you select a
 single figure from a table while the other end selects whole paragraphs.
 
+### Headings
+
+A heading is one step for `s` and `p` here too, so `vs` then `s` selects a whole
+section heading and the next `s` takes the paragraph under it. At word or char
+scope the ends move through a heading normally, since a heading is not atomic —
+see `docs/commands-focus-mode.md`.
+
 ## Choosing the end and its scope
 
 **`v` acts on the end that is moving, `o` on the other one.**

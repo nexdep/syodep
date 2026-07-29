@@ -140,6 +140,20 @@ every line on a page, or that map to a non-contiguous set of lines, are
 discarded rather than guessed at — degrading to line-by-line navigation is
 always safe, whereas a wrong atomic unit is a very visible navigation bug.
 
+**Decision — a heading is a *region*, not an atomic object:** `ObjectKind`
+carries `is_atomic()`, false only for `Heading`. Motion and highlighting go
+through the atomic accessors, so a heading keeps its words individually
+reachable; sentence runs and paragraph splitting go through the region
+accessors, which include headings, and that alone makes a heading one step at
+sentence and paragraph scope. Headings are found from typography rather than
+structure: a line set noticeably larger than the page's body size (the
+character-count mode, which body text dominates on every page), or entirely
+bold at body size without filling the column. Both signals come free from the
+pass that extracts the text. MuPDF's own heading detection
+(`FZ_STEXT_PARAGRAPH_BREAK`) is unusable here for the same reason as its table
+grids — it hides the text inside structure nodes the bindings cannot walk — and
+it keys on bold alone, missing size, the stronger signal.
+
 **Decision — use `mupdf-rs` instead of hand-rolled bindgen FFI:** building
 MuPDF from vendored source via cargo gives reproducible Linux+Windows
 builds with zero system dependencies, and the bindings already encapsulate

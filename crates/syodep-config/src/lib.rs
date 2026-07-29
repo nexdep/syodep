@@ -112,6 +112,9 @@ pub struct ViewConfig {
     /// motions above char scope. Costs a second text-extraction pass per page
     /// and relies on a heuristic, so it can be turned off.
     pub detect_tables: bool,
+    /// Detect headings so each is a single step at sentence and paragraph
+    /// scope. Costs nothing extra to extract, but relies on a heuristic.
+    pub detect_headings: bool,
 }
 
 impl Default for ViewConfig {
@@ -129,6 +132,7 @@ impl Default for ViewConfig {
             visual_color: "#d3d3d3".to_owned(),
             visual_opacity: 0.4,
             detect_tables: true,
+            detect_headings: true,
         }
     }
 }
@@ -459,6 +463,12 @@ pub fn default_config_doc() -> String {
          # which costs a second text pass per page.\n",
     );
     let _ = writeln!(out, "detect_tables = {}", view.detect_tables);
+    out.push_str(
+        "# Treat each heading as one step at sentence and paragraph scope,\n\
+         # so it is not glued to the text below it for want of a full stop.\n\
+         # Word and line scope still move through a heading normally.\n",
+    );
+    let _ = writeln!(out, "detect_headings = {}", view.detect_headings);
     out.push('\n');
 
     out.push_str(

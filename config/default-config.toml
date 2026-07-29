@@ -39,6 +39,10 @@ visual_opacity = 0.4
 # Images are always single stops; this only controls table detection,
 # which costs a second text pass per page.
 detect_tables = true
+# Treat each heading as one step at sentence and paragraph scope,
+# so it is not glued to the text below it for want of a full stop.
+# Word and line scope still move through a heading normally.
+detect_headings = true
 
 [files]
 # Starting directory for the Open dialog (<C-o>). When unset, the

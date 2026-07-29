@@ -359,6 +359,98 @@ pub fn pdf_with_table(cols: usize, rows: usize) -> Vec<u8> {
     buf
 }
 
+/// Build a single A4 page with a large bold heading, several lines of body
+/// prose, a short bold subheading at body size, and more prose. Used to
+/// exercise heading detection.
+pub fn pdf_with_heading() -> Vec<u8> {
+    let mut content = String::new();
+    // Heading: 18pt bold, well above the 10pt body.
+    content.push_str("BT /F2 18 Tf 100 740 Td (2.1. Directory layout) Tj ET\n");
+    // Body prose. Long lines so they set the column width.
+    let body = [
+        "The database is a set of directories that each contain a copy of the",
+        "same layout, so that applications may add to it without touching any",
+        "of the files that another application installed there previously.",
+    ];
+    for (i, text) in body.iter().enumerate() {
+        let y = 710.0 - i as f32 * 14.0;
+        content.push_str(&format!("BT /F1 10 Tf 100 {y} Td ({text}) Tj ET\n"));
+    }
+    // Subheading: bold at body size, short enough not to fill the column.
+    content.push_str("BT /F2 10 Tf 100 650 Td (Ordering) Tj ET\n");
+    for (i, text) in body.iter().enumerate() {
+        let y = 630.0 - i as f32 * 14.0;
+        content.push_str(&format!("BT /F1 10 Tf 100 {y} Td ({text}) Tj ET\n"));
+    }
+
+    let mut buf: Vec<u8> = b"%PDF-1.4\n".to_vec();
+    let total_objects = 6; // catalog, pages, regular font, bold font, page, content
+    let mut offsets: Vec<usize> = vec![0; total_objects + 1];
+    let write_obj = |buf: &mut Vec<u8>, offsets: &mut Vec<usize>, num: usize, body: &[u8]| {
+        offsets[num] = buf.len();
+        buf.extend_from_slice(format!("{num} 0 obj\n").as_bytes());
+        buf.extend_from_slice(body);
+        buf.extend_from_slice(b"\nendobj\n");
+    };
+
+    write_obj(
+        &mut buf,
+        &mut offsets,
+        1,
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+    );
+    write_obj(
+        &mut buf,
+        &mut offsets,
+        2,
+        b"<< /Type /Pages /Kids [5 0 R] /Count 1 >>",
+    );
+    write_obj(
+        &mut buf,
+        &mut offsets,
+        3,
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    );
+    write_obj(
+        &mut buf,
+        &mut offsets,
+        4,
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>",
+    );
+    write_obj(
+        &mut buf,
+        &mut offsets,
+        5,
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] \
+          /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents 6 0 R >>",
+    );
+    write_obj(
+        &mut buf,
+        &mut offsets,
+        6,
+        format!(
+            "<< /Length {} >>\nstream\n{content}\nendstream",
+            content.len()
+        )
+        .as_bytes(),
+    );
+
+    let xref_offset = buf.len();
+    buf.extend_from_slice(format!("xref\n0 {}\n", total_objects + 1).as_bytes());
+    buf.extend_from_slice(b"0000000000 65535 f \n");
+    for offset in &offsets[1..] {
+        buf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    buf.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n",
+            total_objects + 1
+        )
+        .as_bytes(),
+    );
+    buf
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

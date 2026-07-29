@@ -51,6 +51,8 @@ them, and is the seam highlighting builds on. See the development log.
   (focus modes, and as visual-mode selection scopes)
 - ✅ Tables and images as atomic units: detected in the content layer and
   treated as one stop by every scope above char, in focus and visual mode
+- ✅ Headings as sentence/paragraph units: detected from type size and weight,
+  so a heading is one step for `s` and `p` while `w` still walks its words
 - ⬜ Text-object selection, highlighting, annotation (`viw`-style
   composability on top of the existing command/count system)
 - ⬜ Smart jump to references, figures, tables, equations (the table/image

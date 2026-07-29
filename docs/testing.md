@@ -20,8 +20,9 @@ real files. The strategy, in descending order of coverage:
    spec-conforming PDF builder (`syodep-pdf/src/test_support.rs`, feature
    `test-support`) creates multi-page documents with known text, so no
    binary fixtures live in the repository. Alongside `pdf_with_pages` there
-   are `pdf_two_column_page`, `pdf_with_image` and `pdf_with_table` (a ruled
-   grid between a heading and a caption, for table detection).
+   are `pdf_two_column_page`, `pdf_with_image`, `pdf_with_table` (a ruled
+   grid between a heading and a caption, for table detection) and
+   `pdf_with_heading` (a large heading plus a bold subheading over body prose).
 
    Navigation over tables is tested two ways on purpose. The mapping from
    detected boxes to line ranges (`content_objects`) is a pure function tested

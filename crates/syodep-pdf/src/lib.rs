@@ -22,7 +22,10 @@ pub mod test_support;
 
 use std::path::Path;
 
-use mupdf::{text_page::TextBlockType, Colorspace, Matrix, TextPageFlags};
+use mupdf::{
+    text_page::{TextBlockType, TextCharFlags},
+    Colorspace, Matrix, TextPageFlags,
+};
 
 /// Errors surfaced by the PDF backend.
 #[derive(Debug, thiserror::Error)]
@@ -115,12 +118,27 @@ pub struct ContentLine {
 pub enum ObjectKind {
     Image,
     Table,
+    Heading,
+}
+
+impl ObjectKind {
+    /// Whether this is a single stop at *every* scope above char.
+    ///
+    /// Tables and images are: there is nothing useful inside them to move
+    /// through word by word. A heading is not — it is ordinary prose that you
+    /// may well want to select a word of, so it is a unit only for sentence
+    /// and paragraph scope, which it gets by bounding runs rather than by
+    /// being atomic.
+    pub fn is_atomic(self) -> bool {
+        !matches!(self, Self::Heading)
+    }
 }
 
 /// A run of content lines that navigation treats as a single unit.
 ///
 /// `start_line..=end_line` is inclusive and indexes [`PageContent::lines`].
-/// An image is always a one-line object; a table covers every line inside it.
+/// An image is always a one-line object; a table covers every line inside it;
+/// a heading covers its (possibly wrapped) lines.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ContentObject {
     pub kind: ObjectKind,
@@ -142,11 +160,18 @@ pub struct PageContent {
 }
 
 impl PageContent {
-    /// The object containing `line`, if any.
+    /// The object containing `line`, if any — a *region*, heading included.
+    /// This is what bounds sentence runs and splits paragraphs.
     pub fn object_at(&self, line: usize) -> Option<&ContentObject> {
         self.objects
             .iter()
             .find(|o| line >= o.start_line && line <= o.end_line)
+    }
+
+    /// The *atomic* object containing `line`, if any — headings excluded.
+    /// This is what motion treats as one stop.
+    pub fn atomic_object_at(&self, line: usize) -> Option<&ContentObject> {
+        self.object_at(line).filter(|o| o.kind.is_atomic())
     }
 }
 
@@ -156,14 +181,30 @@ pub struct ContentOptions {
     /// Run MuPDF's table detection so tables become single navigable units.
     /// Costs a second structured-text pass per page.
     pub detect_tables: bool,
+    /// Detect headings so each is one sentence and one paragraph. Free: the
+    /// type sizes it keys on come from the pass that extracts the text.
+    pub detect_headings: bool,
 }
 
 impl Default for ContentOptions {
     fn default() -> Self {
         Self {
             detect_tables: true,
+            detect_headings: true,
         }
     }
+}
+
+/// The typography of one content line, used only to spot headings.
+///
+/// Not part of [`ContentLine`]: nothing outside detection needs it, and
+/// keeping it out means the public content types stay about geometry.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct LineStyle {
+    /// The type size most of the line's characters are set in.
+    size: f32,
+    /// Whether the line is essentially all bold.
+    bold: bool,
 }
 
 /// An RGBA8 image, tightly packed (`stride == width * 4`).
@@ -323,6 +364,7 @@ impl Document {
         let text_page = mupdf_page.to_text_page(TextPageFlags::PRESERVE_IMAGES)?;
         let mut lines = Vec::new();
         let mut image_lines = Vec::new();
+        let mut styles = Vec::new();
         for block in text_page.blocks() {
             if matches!(block.r#type(), TextBlockType::Image) {
                 let bbox = rect_from_mupdf(block.bounds());
@@ -334,24 +376,52 @@ impl Document {
                         bbox,
                     }],
                 });
+                styles.push(LineStyle {
+                    size: 0.0,
+                    bold: false,
+                });
                 continue;
             }
             for line in block.lines() {
-                let cells: Vec<Cell> = line
-                    .chars()
-                    .filter_map(|ch| {
-                        ch.char().map(|c| Cell {
-                            kind: CellKind::Char(c),
-                            bbox: rect_from_quad(&ch.quad()),
-                        })
-                    })
-                    .collect();
-                if !cells.is_empty() {
-                    lines.push(ContentLine {
-                        bbox: rect_from_mupdf(line.bounds()),
-                        cells,
+                let mut cells = Vec::new();
+                let mut sizes: Vec<(i32, usize)> = Vec::new();
+                let (mut bold, mut inked) = (0usize, 0usize);
+                for ch in line.chars() {
+                    let Some(c) = ch.char() else { continue };
+                    cells.push(Cell {
+                        kind: CellKind::Char(c),
+                        bbox: rect_from_quad(&ch.quad()),
                     });
+                    if c.is_whitespace() {
+                        continue;
+                    }
+                    inked += 1;
+                    // Bucket to 0.1pt so one superscript cannot outvote the
+                    // body of the line.
+                    let bucket = (ch.size() * 10.0).round() as i32;
+                    match sizes.iter_mut().find(|(b, _)| *b == bucket) {
+                        Some((_, n)) => *n += 1,
+                        None => sizes.push((bucket, 1)),
+                    }
+                    if ch.flags().contains(TextCharFlags::BOLD) {
+                        bold += 1;
+                    }
                 }
+                if cells.is_empty() {
+                    continue;
+                }
+                let size = sizes
+                    .iter()
+                    .max_by_key(|(bucket, n)| (*n, *bucket))
+                    .map_or(0.0, |(bucket, _)| *bucket as f32 / 10.0);
+                lines.push(ContentLine {
+                    bbox: rect_from_mupdf(line.bounds()),
+                    cells,
+                });
+                styles.push(LineStyle {
+                    size,
+                    bold: inked > 0 && bold * 5 >= inked * 4,
+                });
             }
         }
 
@@ -361,8 +431,13 @@ impl Document {
         } else {
             Vec::new()
         };
+        let headings = if opts.detect_headings {
+            heading_ranges(&lines, &styles)
+        } else {
+            Vec::new()
+        };
 
-        let objects = content_objects(&lines, &image_lines, &tables);
+        let objects = content_objects(&lines, &image_lines, &tables, &headings);
         Ok(PageContent { lines, objects })
     }
 
@@ -402,6 +477,101 @@ impl Document {
     }
 }
 
+/// How much larger than the body text a line must be set to read as a heading.
+///
+/// 1.15 rather than something tighter because of a real failure: on a page
+/// dominated by 9pt code listings, ordinary 10pt prose is 1.11x the computed
+/// body size and would otherwise be flagged wholesale.
+const HEADING_SIZE_FACTOR: f32 = 1.15;
+
+/// A heading may not be more than this many lines. A heading that wraps three
+/// times is almost certainly a misdetection.
+const HEADING_MAX_LINES: usize = 4;
+
+/// If more than this share of a page's lines look like headings, none of them
+/// do. Set loosely because a title page legitimately is mostly large type.
+const HEADING_MAX_SHARE: f32 = 0.5;
+
+/// Find the headings on a page, as inclusive `(start_line, end_line)` ranges.
+///
+/// Pure so that every threshold below is testable without MuPDF, which matters
+/// because these are heuristics whose failure mode is silent.
+///
+/// A line is a heading when it is set noticeably larger than the page's body
+/// text, or when it is entirely bold at roughly body size *and* does not run
+/// the full width of its column. That last clause is what separates a bold
+/// subsection heading from a bold lead-in sentence inside a paragraph; the
+/// widest line on the page stands in for the column width, which avoids
+/// needing column detection here.
+fn heading_ranges(lines: &[ContentLine], styles: &[LineStyle]) -> Vec<(usize, usize)> {
+    let inked: Vec<usize> = (0..lines.len())
+        .filter(|&i| !lines[i].cells.is_empty() && styles.get(i).is_some_and(|s| s.size > 0.0))
+        .collect();
+    if inked.len() < 2 {
+        return Vec::new();
+    }
+
+    // Body size: the size most of the page's characters are set in. Body text
+    // dominates by character count on essentially every page, including title
+    // pages, which makes this far steadier than an average or a median.
+    let mut weights: Vec<(i32, usize)> = Vec::new();
+    for &i in &inked {
+        let bucket = (styles[i].size * 10.0).round() as i32;
+        let weight = lines[i].cells.len();
+        match weights.iter_mut().find(|(b, _)| *b == bucket) {
+            Some((_, w)) => *w += weight,
+            None => weights.push((bucket, weight)),
+        }
+    }
+    let body = weights
+        .iter()
+        .max_by_key(|(bucket, w)| (*w, *bucket))
+        .map_or(0.0, |(bucket, _)| *bucket as f32 / 10.0);
+    if body <= 0.0 {
+        return Vec::new();
+    }
+    let widest = inked
+        .iter()
+        .map(|&i| lines[i].bbox.x1 - lines[i].bbox.x0)
+        .fold(0.0_f32, f32::max);
+
+    let is_heading = |i: usize| {
+        let style = styles[i];
+        let width = lines[i].bbox.x1 - lines[i].bbox.x0;
+        style.size >= body * HEADING_SIZE_FACTOR
+            || (style.bold && style.size >= body * 0.95 && width < 0.9 * widest)
+    };
+
+    // Merge adjacent heading lines of the same size and weight, so a title
+    // that wraps stays one heading.
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    let mut flagged = 0usize;
+    for &i in &inked {
+        if !is_heading(i) {
+            continue;
+        }
+        flagged += 1;
+        let joins_previous = ranges.last().is_some_and(|&(_, end)| {
+            end + 1 == i
+                && (styles[end].size - styles[i].size).abs() < 0.05
+                && styles[end].bold == styles[i].bold
+        });
+        match ranges.last_mut() {
+            Some(last) if joins_previous => last.1 = i,
+            _ => ranges.push((i, i)),
+        }
+    }
+
+    if flagged as f32 > HEADING_MAX_SHARE * inked.len() as f32 {
+        return Vec::new();
+    }
+    ranges.retain(|&(start, end)| {
+        let lines_covered = end - start + 1;
+        lines_covered <= HEADING_MAX_LINES
+    });
+    ranges
+}
+
 /// Turn detected table boxes and image lines into the page's atomic objects.
 ///
 /// Pure so that every heuristic below is unit-testable without MuPDF — which
@@ -411,6 +581,7 @@ fn content_objects(
     lines: &[ContentLine],
     image_lines: &[usize],
     tables: &[Rect],
+    headings: &[(usize, usize)],
 ) -> Vec<ContentObject> {
     let non_empty = lines.iter().filter(|l| !l.cells.is_empty()).count();
     let content_area = lines
@@ -472,6 +643,30 @@ fn content_objects(
             end_line: line,
         });
     }
+
+    // A bold, short line inside a table is a column header, not a heading, so
+    // headings yield to any object already claimed.
+    for &(start, end) in headings {
+        if end >= lines.len()
+            || kept
+                .iter()
+                .any(|o| start <= o.end_line && end >= o.start_line)
+        {
+            continue;
+        }
+        let bbox = lines[start..=end]
+            .iter()
+            .map(|l| l.bbox)
+            .reduce(|a, b| a.union(b))
+            .unwrap_or(lines[start].bbox);
+        kept.push(ContentObject {
+            kind: ObjectKind::Heading,
+            bbox,
+            start_line: start,
+            end_line: end,
+        });
+    }
+
     kept.sort_by_key(|o| o.start_line);
     kept
 }
@@ -720,7 +915,7 @@ mod tests {
     #[test]
     fn object_ranges_cover_the_lines_inside_a_table_box() {
         let lines = stacked_lines(10);
-        let objects = content_objects(&lines, &[], &[box_over(&lines, 3..=6)]);
+        let objects = content_objects(&lines, &[], &[box_over(&lines, 3..=6)], &[]);
         assert_eq!(objects.len(), 1);
         assert_eq!(objects[0].kind, ObjectKind::Table);
         assert_eq!((objects[0].start_line, objects[0].end_line), (3, 6));
@@ -729,7 +924,7 @@ mod tests {
     #[test]
     fn object_ranges_reject_a_single_line_table() {
         let lines = stacked_lines(10);
-        let objects = content_objects(&lines, &[], &[box_over(&lines, 4..=4)]);
+        let objects = content_objects(&lines, &[], &[box_over(&lines, 4..=4)], &[]);
         assert_eq!(objects, vec![], "a one-line table is just a line");
     }
 
@@ -738,7 +933,7 @@ mod tests {
         // MuPDF's whole-page fallback fires on ordinary prose; this guard is
         // the only thing standing between it and unnavigable pages.
         let lines = stacked_lines(10);
-        let objects = content_objects(&lines, &[], &[box_over(&lines, 0..=9)]);
+        let objects = content_objects(&lines, &[], &[box_over(&lines, 0..=9)], &[]);
         assert_eq!(objects, vec![]);
     }
 
@@ -754,7 +949,7 @@ mod tests {
             x1: 210.0,
             y1: 172.0,
         };
-        let objects = content_objects(&lines, &[], &[table]);
+        let objects = content_objects(&lines, &[], &[table], &[]);
         assert_eq!(objects, vec![], "a gapped table must degrade, not guess");
     }
 
@@ -765,6 +960,7 @@ mod tests {
             &lines,
             &[],
             &[box_over(&lines, 2..=8), box_over(&lines, 4..=6)],
+            &[],
         );
         assert_eq!(objects.len(), 1);
         assert_eq!((objects[0].start_line, objects[0].end_line), (2, 8));
@@ -773,7 +969,7 @@ mod tests {
     #[test]
     fn object_ranges_make_each_image_its_own_object() {
         let lines = stacked_lines(6);
-        let objects = content_objects(&lines, &[1, 4], &[]);
+        let objects = content_objects(&lines, &[1, 4], &[], &[]);
         assert_eq!(objects.len(), 2);
         assert!(objects.iter().all(|o| o.kind == ObjectKind::Image));
         assert_eq!((objects[0].start_line, objects[0].end_line), (1, 1));
@@ -783,7 +979,7 @@ mod tests {
     #[test]
     fn object_ranges_absorb_an_image_inside_a_table() {
         let lines = stacked_lines(10);
-        let objects = content_objects(&lines, &[5], &[box_over(&lines, 3..=6)]);
+        let objects = content_objects(&lines, &[5], &[box_over(&lines, 3..=6)], &[]);
         assert_eq!(objects.len(), 1, "the table is the enclosing unit");
         assert_eq!(objects[0].kind, ObjectKind::Table);
     }
@@ -795,6 +991,7 @@ mod tests {
             &lines,
             &[0, 15],
             &[box_over(&lines, 8..=11), box_over(&lines, 3..=5)],
+            &[(17, 18)],
         );
         for pair in objects.windows(2) {
             assert!(
@@ -802,6 +999,219 @@ mod tests {
                 "objects overlap or are unsorted: {objects:?}"
             );
         }
+    }
+
+    // ---- Headings --------------------------------------------------------
+
+    /// `count` body lines of `width` points at 10pt, non-bold.
+    fn body_lines(count: usize, width: f32) -> (Vec<ContentLine>, Vec<LineStyle>) {
+        let mut lines = Vec::new();
+        let mut styles = Vec::new();
+        for i in 0..count {
+            let y = 100.0 + i as f32 * 12.0;
+            lines.push(ContentLine {
+                bbox: Rect {
+                    x0: 100.0,
+                    y0: y,
+                    x1: 100.0 + width,
+                    y1: y + 10.0,
+                },
+                // Character count is what weights the body-size vote.
+                cells: vec![
+                    Cell {
+                        kind: CellKind::Char('x'),
+                        bbox: Rect {
+                            x0: 100.0,
+                            y0: y,
+                            x1: 106.0,
+                            y1: y + 10.0,
+                        },
+                    };
+                    60
+                ],
+            });
+            styles.push(LineStyle {
+                size: 10.0,
+                bold: false,
+            });
+        }
+        (lines, styles)
+    }
+
+    fn set_style(
+        lines: &mut [ContentLine],
+        styles: &mut [LineStyle],
+        i: usize,
+        size: f32,
+        bold: bool,
+        width: f32,
+    ) {
+        styles[i] = LineStyle { size, bold };
+        lines[i].bbox.x1 = lines[i].bbox.x0 + width;
+    }
+
+    #[test]
+    fn heading_ranges_flags_a_line_set_larger_than_the_body() {
+        let (mut lines, mut styles) = body_lines(10, 400.0);
+        set_style(&mut lines, &mut styles, 3, 18.0, true, 200.0);
+        assert_eq!(heading_ranges(&lines, &styles), vec![(3, 3)]);
+    }
+
+    #[test]
+    fn heading_ranges_ignores_prose_only_slightly_larger_than_the_body() {
+        // The real failure this guards: on a page of 9pt code listings,
+        // ordinary 10pt prose is 1.11x the body size.
+        let (mut lines, mut styles) = body_lines(10, 400.0);
+        for s in styles.iter_mut() {
+            s.size = 9.0;
+        }
+        set_style(&mut lines, &mut styles, 4, 10.0, false, 400.0);
+        assert_eq!(heading_ranges(&lines, &styles), vec![]);
+    }
+
+    #[test]
+    fn heading_ranges_merges_a_heading_that_wraps() {
+        let (mut lines, mut styles) = body_lines(10, 400.0);
+        set_style(&mut lines, &mut styles, 2, 18.0, true, 380.0);
+        set_style(&mut lines, &mut styles, 3, 18.0, true, 150.0);
+        assert_eq!(heading_ranges(&lines, &styles), vec![(2, 3)]);
+    }
+
+    #[test]
+    fn heading_ranges_flags_a_short_bold_line_at_body_size() {
+        let (mut lines, mut styles) = body_lines(10, 400.0);
+        set_style(&mut lines, &mut styles, 5, 10.0, true, 120.0);
+        assert_eq!(heading_ranges(&lines, &styles), vec![(5, 5)]);
+    }
+
+    #[test]
+    fn heading_ranges_ignores_a_bold_line_that_fills_the_column() {
+        // A bold lead-in sentence inside a paragraph, not a heading.
+        let (mut lines, mut styles) = body_lines(10, 400.0);
+        set_style(&mut lines, &mut styles, 5, 10.0, true, 400.0);
+        assert_eq!(heading_ranges(&lines, &styles), vec![]);
+    }
+
+    #[test]
+    fn heading_ranges_finds_nothing_in_uniform_prose() {
+        let (lines, styles) = body_lines(12, 400.0);
+        assert_eq!(heading_ranges(&lines, &styles), vec![]);
+    }
+
+    #[test]
+    fn heading_ranges_reject_a_page_that_is_mostly_headings() {
+        let (mut lines, mut styles) = body_lines(10, 400.0);
+        for i in 0..6 {
+            set_style(&mut lines, &mut styles, i, 18.0, true, 120.0);
+        }
+        assert_eq!(
+            heading_ranges(&lines, &styles),
+            vec![],
+            "over half the page cannot be heading"
+        );
+    }
+
+    #[test]
+    fn heading_ranges_reject_a_run_too_long_to_be_a_heading() {
+        let (mut lines, mut styles) = body_lines(20, 400.0);
+        for i in 2..=6 {
+            set_style(&mut lines, &mut styles, i, 14.0, true, 380.0);
+        }
+        assert_eq!(heading_ranges(&lines, &styles), vec![]);
+    }
+
+    #[test]
+    fn a_heading_is_not_an_atomic_object() {
+        assert!(!ObjectKind::Heading.is_atomic());
+        assert!(ObjectKind::Table.is_atomic());
+        assert!(ObjectKind::Image.is_atomic());
+    }
+
+    #[test]
+    fn object_ranges_drop_a_heading_that_overlaps_a_table() {
+        // A bold, short line inside a table is a column header.
+        let lines = stacked_lines(10);
+        let objects = content_objects(&lines, &[], &[box_over(&lines, 3..=6)], &[(4, 4)]);
+        assert_eq!(objects.len(), 1);
+        assert_eq!(objects[0].kind, ObjectKind::Table);
+    }
+
+    #[test]
+    fn object_ranges_keep_a_heading_outside_every_table() {
+        let lines = stacked_lines(10);
+        let objects = content_objects(&lines, &[], &[box_over(&lines, 5..=8)], &[(1, 2)]);
+        assert_eq!(objects.len(), 2);
+        assert_eq!(objects[0].kind, ObjectKind::Heading);
+        assert_eq!((objects[0].start_line, objects[0].end_line), (1, 2));
+        assert_eq!(objects[1].kind, ObjectKind::Table);
+    }
+
+    #[test]
+    fn page_content_detects_a_heading_and_a_bold_subheading() {
+        let doc = Document::from_bytes(&crate::test_support::pdf_with_heading()).unwrap();
+        let content = doc.page_content(0, ContentOptions::default()).unwrap();
+        let headings: Vec<_> = content
+            .objects
+            .iter()
+            .filter(|o| o.kind == ObjectKind::Heading)
+            .collect();
+        let text_of = |i: usize| -> String {
+            content.lines[i]
+                .cells
+                .iter()
+                .filter_map(|c| match c.kind {
+                    CellKind::Char(ch) => Some(ch),
+                    CellKind::Image => None,
+                })
+                .collect()
+        };
+        assert_eq!(headings.len(), 2, "objects: {:?}", content.objects);
+        assert!(
+            text_of(headings[0].start_line).contains("Directory layout"),
+            "first heading is {:?}",
+            text_of(headings[0].start_line)
+        );
+        assert!(
+            text_of(headings[1].start_line).contains("Ordering"),
+            "second heading is {:?}",
+            text_of(headings[1].start_line)
+        );
+        // Neither may swallow the prose beneath it.
+        for h in &headings {
+            assert_eq!(h.start_line, h.end_line, "heading covers body text");
+        }
+    }
+
+    #[test]
+    fn page_content_reports_no_heading_on_uniform_prose() {
+        let doc = three_page_doc();
+        let content = doc.page_content(0, ContentOptions::default()).unwrap();
+        assert!(
+            !content
+                .objects
+                .iter()
+                .any(|o| o.kind == ObjectKind::Heading),
+            "prose reported as a heading: {:?}",
+            content.objects
+        );
+    }
+
+    #[test]
+    fn page_content_without_heading_detection_reports_none() {
+        let doc = Document::from_bytes(&crate::test_support::pdf_with_heading()).unwrap();
+        let content = doc
+            .page_content(
+                0,
+                ContentOptions {
+                    detect_headings: false,
+                    ..ContentOptions::default()
+                },
+            )
+            .unwrap();
+        assert!(content
+            .objects
+            .iter()
+            .all(|o| o.kind != ObjectKind::Heading));
     }
 
     #[test]
@@ -887,6 +1297,7 @@ mod tests {
                 0,
                 ContentOptions {
                     detect_tables: false,
+                    ..ContentOptions::default()
                 },
             )
             .unwrap();

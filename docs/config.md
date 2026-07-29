@@ -41,6 +41,7 @@ bookmarks, highlights, notes, history. That lives in the SQLite database
 | `visual_color` | string | `"#d3d3d3"` | highlight for the visual-mode selection, `#rrggbb` |
 | `visual_opacity` | float | `0.4` | opacity of the selection highlight, `0.0`-`1.0` |
 | `detect_tables` | bool | `true` | treat each detected table as one stop for focus and selection motions |
+| `detect_headings` | bool | `true` | treat each detected heading as one step at sentence and paragraph scope |
 
 Documents with a saved reading position restore their previous scroll and
 zoom instead of applying `default_zoom`/`fit_width_on_open`.
@@ -52,6 +53,18 @@ table. Char scope (`cc`) still walks through the characters inside, so a single
 figure in a table stays selectable. Detection is a heuristic and costs a second
 text-extraction pass per page; set it to `false` to navigate tables line by line
 as before. Images are unaffected — they are always single stops.
+
+**Heading detection.** With `detect_headings = true` a heading is one step at
+sentence and paragraph scope: `s` lands on it and the next `s` lands on the body
+beneath, and it is never glued to the following text for want of a full stop.
+Numbered headings such as `2.12. Recommended checking order` count as a single
+sentence despite their periods. Unlike a table a heading is *not* atomic — `w`
+still walks its individual words and `j` at line scope still moves line by line
+— because a heading is ordinary prose you may want to select part of. A line
+counts as a heading when it is set noticeably larger than the page's body text,
+or when it is entirely bold at body size and does not fill the column width.
+Detection costs nothing extra to extract; set it to `false` if the heuristic
+misjudges a document.
 
 **Overlay colours.** All five focus modes (caret, line, word, sentence,
 paragraph) share `focus_color`: the highlight tells you that focus is active,

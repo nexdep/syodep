@@ -15,7 +15,9 @@ use std::path::{Path, PathBuf};
 
 use syodep_config::keys::Chord;
 use syodep_config::Config;
-use syodep_pdf::{Bitmap, CellKind, ContentLine, ContentObject, ContentOptions, PageContent, Rect};
+use syodep_pdf::{
+    Bitmap, CellKind, ContentLine, ContentObject, ContentOptions, ObjectKind, PageContent, Rect,
+};
 use syodep_storage::{Position, Storage};
 
 use crate::caret::{
@@ -632,6 +634,7 @@ impl App {
         }
         let opts = ContentOptions {
             detect_tables: self.config.view.detect_tables,
+            detect_headings: self.config.view.detect_headings,
         };
         let content = session.doc.page_content(page, opts).unwrap_or_default();
         let Some(session) = self.session.as_mut() else {
@@ -667,8 +670,13 @@ impl App {
             .unwrap_or(&[])
     }
 
-    /// The object containing `line` on `page`, extracting the page if needed.
-    fn object_at(&mut self, page: usize, line: usize) -> Option<ContentObject> {
+    /// The *region* containing `line` on `page`, extracting the page if
+    /// needed: a table, an image or a heading.
+    ///
+    /// Regions bound sentence runs and split paragraphs. That is all a heading
+    /// needs to be one step at those two scopes, and it is deliberately less
+    /// than being atomic — see [`Self::atomic_object_at`].
+    fn region_at(&mut self, page: usize, line: usize) -> Option<ContentObject> {
         self.ensure_content(page);
         self.objects(page)
             .iter()
@@ -676,9 +684,29 @@ impl App {
             .copied()
     }
 
-    /// Identity of the object a caret sits in, for "did we leave it yet".
-    fn object_id_at(&mut self, at: Caret) -> Option<ObjectId> {
-        self.object_at(at.page, at.line).map(|o| ObjectId {
+    /// The region containing `line`, but only if motion should treat it as a
+    /// single stop — a table or an image, never a heading.
+    ///
+    /// The distinction is the whole reason headings behave differently from
+    /// tables: everything that moves or highlights by a *unit* goes through
+    /// here, so a heading keeps its words individually reachable.
+    fn atomic_object_at(&mut self, page: usize, line: usize) -> Option<ContentObject> {
+        self.region_at(page, line).filter(|o| o.kind.is_atomic())
+    }
+
+    /// Identity of the region a caret sits in, for "are these two positions in
+    /// the same run of content".
+    fn region_id_at(&mut self, at: Caret) -> Option<ObjectId> {
+        self.region_at(at.page, at.line).map(|o| ObjectId {
+            page: at.page,
+            start_line: o.start_line,
+        })
+    }
+
+    /// Identity of the atomic object a caret sits in, for "did we leave it
+    /// yet" while stepping.
+    fn atomic_id_at(&mut self, at: Caret) -> Option<ObjectId> {
+        self.atomic_object_at(at.page, at.line).map(|o| ObjectId {
             page: at.page,
             start_line: o.start_line,
         })
@@ -1139,6 +1167,12 @@ impl App {
     /// group must contain at least one terminator, so a lone closing bracket is
     /// not a boundary. Analogue of [`Self::same_word_run`] for sentences.
     fn sentence_boundary_after(&mut self, c: Caret) -> bool {
+        // A heading is exactly one sentence, whatever punctuation it contains:
+        // `3.1. Methods` would otherwise be three. The run still stops at the
+        // heading's edges, because those are region boundaries.
+        if self.in_heading(c) {
+            return false;
+        }
         let here = match self.char_at(c) {
             Some(ch) if is_sentence_terminator(ch) || is_sentence_trailer(ch) => ch,
             _ => return false,
@@ -1213,7 +1247,13 @@ impl App {
     /// Whether two positions lie in the same atomic region — both outside every
     /// object, or both inside the same one.
     fn same_region(&mut self, a: Caret, b: Caret) -> bool {
-        self.object_id_at(a) == self.object_id_at(b)
+        self.region_id_at(a) == self.region_id_at(b)
+    }
+
+    /// Whether `at` sits inside a heading.
+    fn in_heading(&mut self, at: Caret) -> bool {
+        self.region_at(at.page, at.line)
+            .is_some_and(|o| o.kind == ObjectKind::Heading)
     }
 
     /// [`Self::next_cell_same_page`], additionally stopping at the edge of a
@@ -1459,7 +1499,7 @@ impl App {
         // A table or an image is one unit at every scope above char, so the
         // highlight covers all of it however coarse the scope is.
         if scope != Scope::Char {
-            if let Some(object) = self.object_at(at.page, at.line) {
+            if let Some(object) = self.atomic_object_at(at.page, at.line) {
                 return (
                     self.object_landing(at.page, object, Landing::Start),
                     self.object_landing(at.page, object, Landing::End),
@@ -1506,7 +1546,7 @@ impl App {
         // Guard first: the word arm below skips whitespace forward and would
         // otherwise walk straight out of the object.
         if scope != Scope::Char {
-            if let Some(object) = self.object_at(at.page, at.line) {
+            if let Some(object) = self.atomic_object_at(at.page, at.line) {
                 return self.object_landing(at.page, object, Landing::Start);
             }
         }
@@ -1551,7 +1591,7 @@ impl App {
         if scope == Scope::Char {
             return self.step_scope(caret, scope, dir, goal_x, goal_y);
         }
-        let from = self.object_id_at(*caret);
+        let from = self.atomic_id_at(*caret);
         if !self.step_scope(caret, scope, dir, goal_x, goal_y) {
             self.land_on_object(caret, Landing::Start);
             return false;
@@ -1560,7 +1600,7 @@ impl App {
         // so the whole object costs one step rather than one step per line.
         if from.is_some() {
             let mut guard = 0;
-            while self.object_id_at(*caret) == from {
+            while self.atomic_id_at(*caret) == from {
                 guard += 1;
                 // `step_scope` returning true does not guarantee document-order
                 // progress (line scope's column jumps move sideways), so the
@@ -1577,14 +1617,14 @@ impl App {
 
     /// `e`, counting a whole table or image as one word.
     fn step_word_end_atomic(&mut self, caret: &mut Caret) -> bool {
-        let from = self.object_id_at(*caret);
+        let from = self.atomic_id_at(*caret);
         if !self.step_word_end(caret) {
             self.land_on_object(caret, Landing::End);
             return false;
         }
         if from.is_some() {
             let mut guard = 0;
-            while self.object_id_at(*caret) == from {
+            while self.atomic_id_at(*caret) == from {
                 guard += 1;
                 if guard > MAX_ATOMIC_STEPS || !self.step_word_end(caret) {
                     self.land_on_object(caret, Landing::End);
@@ -1601,7 +1641,7 @@ impl App {
     /// If `caret` sits inside an object, move it to that object's canonical
     /// position, so a caret never rests part-way through one.
     fn land_on_object(&mut self, caret: &mut Caret, land: Landing) {
-        if let Some(object) = self.object_at(caret.page, caret.line) {
+        if let Some(object) = self.atomic_object_at(caret.page, caret.line) {
             *caret = self.object_landing(caret.page, object, land);
         }
     }
@@ -1702,7 +1742,7 @@ impl App {
         // A whole table scrolls into view by its own bounds, so its ruling
         // lines and empty cells come along with the text.
         if start.page == end.page {
-            if let Some(object) = self.object_at(start.page, start.line) {
+            if let Some(object) = self.atomic_object_at(start.page, start.line) {
                 if start.line == object.start_line && end.line == object.end_line {
                     return Some(object.bbox);
                 }
@@ -1768,7 +1808,7 @@ impl App {
                 // A fully covered table or image draws as one rectangle over
                 // its own bounds: per-line boxes would leave its rules and
                 // empty cells unpainted, which reads as a broken highlight.
-                if let Some(object) = content.object_at(line_idx) {
+                if let Some(object) = content.atomic_object_at(line_idx) {
                     let whole = object.start_line == line_idx
                         && object.end_line <= last_line
                         && !(page == start.page && start.line == line_idx && start.cell > 0)
@@ -3037,6 +3077,193 @@ mod tests {
             press(app, key);
         }
         panic!("{key} never reached the table");
+    }
+
+    /// A page whose lines are evenly spaced, so the vertical-gap heuristic
+    /// alone would merge the whole page into one paragraph: line 2 is a
+    /// numbered heading and lines 5-6 are a heading that wraps.
+    fn heading_page_content() -> PageContent {
+        let texts = [
+            "Alpha beta.",
+            "Gamma delta.",
+            "2.10. Storing the type",
+            "Body text here. More text.",
+            "Second body line.",
+            "A very long heading that",
+            "wraps onto two lines",
+            "Final prose line.",
+        ];
+        let lines: Vec<ContentLine> = texts
+            .iter()
+            .enumerate()
+            .map(|(i, t)| text_line(100.0 + i as f32 * 12.0, t))
+            .collect();
+        let heading = |start: usize, end: usize| ContentObject {
+            kind: ObjectKind::Heading,
+            bbox: lines[start].bbox.union(lines[end].bbox),
+            start_line: start,
+            end_line: end,
+        };
+        let objects = vec![heading(2, 2), heading(5, 6)];
+        PageContent { lines, objects }
+    }
+
+    fn app_with_heading_page(dir: &Path) -> App {
+        let mut app = app_with_text_pages(dir, &["placeholder page"]);
+        app.set_page_content(0, heading_page_content());
+        app
+    }
+
+    /// Repeat `key` until the caret reaches `line`, panicking if it never does.
+    fn press_until_line(app: &mut App, key: &str, line: usize) {
+        for _ in 0..12 {
+            if app.caret().unwrap().line == line {
+                return;
+            }
+            press(app, key);
+        }
+        panic!("{key} never reached line {line}");
+    }
+
+    #[test]
+    fn sentence_motion_treats_a_heading_as_one_step() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_heading_page(dir.path());
+        press(&mut app, "cs");
+        press(&mut app, "ss"); // past both prose sentences
+        assert_caret(&app, 0, 2, 0);
+        let (start, end) = app.focus_span().unwrap();
+        assert_eq!(
+            (start.line, end.line),
+            (2, 2),
+            "the heading is one sentence"
+        );
+        press(&mut app, "s");
+        assert_eq!(
+            app.caret().unwrap().line,
+            3,
+            "next s must leave the heading"
+        );
+    }
+
+    #[test]
+    fn a_numbered_heading_is_still_one_sentence() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_heading_page(dir.path());
+        press(&mut app, "cs");
+        press(&mut app, "ss");
+        // "2.10. Storing the type" would otherwise be three sentences.
+        let (start, end) = app.focus_span().unwrap();
+        let last = heading_page_content().lines[2].cells.len() - 1;
+        assert_eq!((start.line, start.cell), (2, 0));
+        assert_eq!((end.line, end.cell), (2, last));
+    }
+
+    #[test]
+    fn a_sentence_above_a_heading_does_not_run_into_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_heading_page(dir.path());
+        press(&mut app, "cs");
+        press(&mut app, "s");
+        let (_, end) = app.focus_span().unwrap();
+        assert_eq!(end.line, 1, "sentence leaked into the heading");
+    }
+
+    #[test]
+    fn a_wrapped_heading_is_one_sentence_across_both_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_heading_page(dir.path());
+        press(&mut app, "cs");
+        press_until_line(&mut app, "s", 5);
+        let (start, end) = app.focus_span().unwrap();
+        assert_eq!((start.line, end.line), (5, 6));
+    }
+
+    #[test]
+    fn paragraph_motion_treats_a_heading_as_one_paragraph() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_heading_page(dir.path());
+        press(&mut app, "cp");
+        // The lines are evenly spaced, so the gap heuristic alone would make
+        // the whole page one paragraph: the heading edges are doing the work.
+        let (start, end) = app.focus_span().unwrap();
+        assert_eq!((start.line, end.line), (0, 1));
+        press(&mut app, "p");
+        assert_caret(&app, 0, 2, 0);
+        assert_eq!(
+            {
+                let (s, e) = app.focus_span().unwrap();
+                (s.line, e.line)
+            },
+            (2, 2)
+        );
+        press(&mut app, "p");
+        assert_caret(&app, 0, 3, 0);
+    }
+
+    #[test]
+    fn the_paragraph_below_a_heading_excludes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_heading_page(dir.path());
+        press(&mut app, "cp");
+        press(&mut app, "pp"); // heading, then the prose under it
+        let (start, end) = app.focus_span().unwrap();
+        assert_eq!((start.line, end.line), (3, 4));
+    }
+
+    #[test]
+    fn word_motion_still_walks_through_a_heading() {
+        // The guard on the whole design: a heading is not atomic, so its
+        // words stay individually reachable.
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_heading_page(dir.path());
+        press(&mut app, "cw");
+        press_until_line(&mut app, "w", 2);
+        let mut stops = vec![app.caret().unwrap().cell];
+        for _ in 0..3 {
+            press(&mut app, "w");
+            let caret = app.caret().unwrap();
+            if caret.line != 2 {
+                break;
+            }
+            stops.push(caret.cell);
+        }
+        assert!(
+            stops.len() > 1,
+            "the heading was one stop, not several words: {stops:?}"
+        );
+        let (start, end) = app.focus_span().unwrap();
+        assert_eq!(start.line, 2);
+        assert!(
+            end.cell < heading_page_content().lines[2].cells.len() - 1,
+            "word scope highlighted the whole heading"
+        );
+    }
+
+    #[test]
+    fn line_motion_still_steps_through_a_wrapped_heading_line_by_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_heading_page(dir.path());
+        press(&mut app, "ce");
+        press_until_line(&mut app, "j", 4);
+        press(&mut app, "j");
+        assert_caret(&app, 0, 5, 0);
+        press(&mut app, "j");
+        assert_caret(&app, 0, 6, 0);
+    }
+
+    #[test]
+    fn a_wrapped_heading_draws_one_rectangle_per_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_heading_page(dir.path());
+        press(&mut app, "cs");
+        press_until_line(&mut app, "s", 5);
+        let rects = app.focus_screen_rects().unwrap();
+        assert_eq!(
+            rects.len(),
+            2,
+            "a heading is not drawn as one block: {rects:?}"
+        );
     }
 
     #[test]

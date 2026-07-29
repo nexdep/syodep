@@ -113,6 +113,21 @@ selectable. Switching back to any coarser scope snaps to the whole table again.
 Images are always single stops. Tables are found by a detection pass that can
 be turned off with `view.detect_tables` — see `docs/config.md`.
 
+## Headings
+
+A heading is one step at **sentence and paragraph scope**: `s` lands on it, the
+next `s` lands on the body beneath. Without this a heading would be swallowed by
+the paragraph that follows it, because headings rarely end in a full stop. A
+numbered heading like `2.12. Recommended checking order` is still one sentence,
+not three, and a heading that wraps onto two lines is one step across both.
+
+A heading is **not** atomic the way a table is: `w` still walks its individual
+words and `j` at line scope still moves through it line by line. It is ordinary
+prose you may want to select a phrase of — only the two scopes that group text
+into runs treat it as a unit.
+
+Turn detection off with `view.detect_headings` — see `docs/config.md`.
+
 ## Inherited view commands
 
 Every normal-mode command stays available in focus mode with its normal

@@ -7,6 +7,81 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-07-29 — Headings are single sentence and paragraph steps
+
+Headings rarely end in a full stop, so the sentence walker ran straight through
+them and glued a section heading to the paragraph below it; paragraph scope had
+the same problem whenever a heading sat close to its body text. Now a heading is
+one step for `s` and `p`: `s` lands on it, the next `s` lands on the body
+beneath. A numbered heading such as `2.12. Recommended checking order` counts as
+one sentence rather than three, and a heading that wraps is one step across both
+lines.
+
+### Why a heading is not a table
+
+Deliberately **not** atomic. `w` still walks a heading's individual words and
+`j` at line scope still moves line by line, because a heading is ordinary prose
+you may want to select a phrase of — unlike a table, which has nothing useful
+inside it to traverse.
+
+That distinction is the whole change in the core. `ObjectKind` gained
+`is_atomic()`, false only for `Heading`, and the accessors that were serving two
+purposes at once split in two: `atomic_object_at`/`atomic_id_at` (motion,
+highlighting, snapping) exclude headings, while `region_at`/`region_id_at`
+(sentence-run bounds, paragraph splitting) include them. Being a region is
+already enough to be one sentence and one paragraph — `split_segments_at_objects`
+and `next_cell_in_region` needed no new logic — so `step_scope_atomic` was not
+touched at all. Had the new variant simply been added, every object-consuming
+site was kind-agnostic and headings would have become atomic everywhere.
+
+One extra rule: `sentence_boundary_after` ignores punctuation inside a heading,
+so `2.12.` cannot split one. Tables never needed this because their atomicity
+masked it.
+
+### Detection
+
+From typography, not structure. Body size is the character-count mode of the
+page — body text dominates by volume on every page, including title pages, which
+makes it far steadier than a mean or median. A line is a heading when it is
+`>= 1.15x` body size, or entirely bold at body size *and* narrower than 90% of
+the widest line on the page (that last clause separates a bold subsection
+heading from a bold lead-in sentence). Adjacent flagged lines of equal size and
+weight merge, so a wrapped title is one heading.
+
+Both signals come free from the existing extraction pass — `TextChar::size()` is
+always populated and `TextCharFlags::BOLD` is set from the font's own bold flag —
+so unlike table detection there is **no second pass and no runtime cost**.
+
+Thresholds were set against a real document rather than guessed. 1.15 rather
+than 1.10 because of an observed failure: on pages dominated by 9pt code
+listings, ordinary 10pt prose is 1.11x the computed body size and was being
+flagged wholesale. The runaway guard is 50% rather than the tables' stricter
+shape because a title page legitimately is mostly large type. On the
+shared-mime-info spec the result is 27 headings — the title, the author block
+and every numbered section plus `References` — with no body text flagged.
+
+MuPDF has its own heading detection (`FZ_STEXT_PARAGRAPH_BREAK`) and it is a
+dead end: it wraps headings in structure nodes whose children the Rust bindings
+cannot walk, the same wall the table work hit, and it keys on bold alone.
+
+### Headings yield to tables
+
+Bold table column headers (`Attribute`, `Required?`, `Value`) look exactly like
+bold subheadings, and on the sample document they were flagged on precisely the
+six pages where tables are detected. A heading range overlapping any existing
+object is dropped, which removes all of them.
+
+### Tests
+
+19 new tests, 268 total. Detection is a pure function tested directly against
+each threshold, and the behavioural tests inject a hand-built `PageContent` with
+evenly-spaced lines — spacing at which the paragraph gap heuristic alone would
+merge the whole page, so the tests prove the heading edges are doing the work.
+`word_motion_still_walks_through_a_heading` is the guard on the accessor split.
+New fixture: `pdf_with_heading`.
+
+---
+
 ## 2026-07-29 — Tables and images are single navigation units
 
 Moving through a paper used to mean crawling through its tables: a table was
