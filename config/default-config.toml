@@ -119,6 +119,8 @@ timeout_ms = 500
 "j" = "focus_down"
 "k" = "focus_up"
 "l" = "focus_right"
+"p" = "focus_next_paragraph"
+"s" = "focus_next_sentence"
 "w" = "focus_next_word"
 
 # Visual-mode keybindings (active after pressing "v"). hjkl/arrows grow the
@@ -144,6 +146,8 @@ timeout_ms = 500
 "op" = "visual_other_paragraph"
 "os" = "visual_other_sentence"
 "ow" = "visual_other_word"
+"p" = "visual_next_paragraph"
+"s" = "visual_next_sentence"
 "v" = "visual_exit"
 "vc" = "visual_scope_char"
 "ve" = "visual_scope_line"

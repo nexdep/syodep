@@ -72,13 +72,6 @@ pub struct VisiblePage {
     pub rect: ScreenRect,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WordMotion {
-    NextStart,
-    End,
-    PrevStart,
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
     #[error(transparent)]
@@ -431,9 +424,19 @@ impl App {
             Command::FocusRight => return self.focus_move(Dir::Right, count),
             Command::FocusUp => return self.focus_move(Dir::Up, count),
             Command::FocusDown => return self.focus_move(Dir::Down, count),
-            Command::FocusNextWord => return self.focus_word_move(WordMotion::NextStart, count),
-            Command::FocusEndWord => return self.focus_word_move(WordMotion::End, count),
-            Command::FocusPrevWord => return self.focus_word_move(WordMotion::PrevStart, count),
+            Command::FocusNextWord => {
+                return self.focus_scope_motion(Scope::Word, Dir::Right, count)
+            }
+            Command::FocusPrevWord => {
+                return self.focus_scope_motion(Scope::Word, Dir::Left, count)
+            }
+            Command::FocusEndWord => return self.focus_word_end(count),
+            Command::FocusNextSentence => {
+                return self.focus_scope_motion(Scope::Sentence, Dir::Right, count)
+            }
+            Command::FocusNextParagraph => {
+                return self.focus_scope_motion(Scope::Paragraph, Dir::Right, count)
+            }
             Command::VisualEnter => return self.enter_visual(None),
             Command::VisualEnterChar => return self.enter_visual(Some(Scope::Char)),
             Command::VisualEnterWord => return self.enter_visual(Some(Scope::Word)),
@@ -445,9 +448,19 @@ impl App {
             Command::VisualRight => return self.visual_move(Dir::Right, count),
             Command::VisualUp => return self.visual_move(Dir::Up, count),
             Command::VisualDown => return self.visual_move(Dir::Down, count),
-            Command::VisualNextWord => return self.visual_word_move(WordMotion::NextStart, count),
-            Command::VisualEndWord => return self.visual_word_move(WordMotion::End, count),
-            Command::VisualPrevWord => return self.visual_word_move(WordMotion::PrevStart, count),
+            Command::VisualNextWord => {
+                return self.visual_scope_motion(Scope::Word, Dir::Right, count)
+            }
+            Command::VisualPrevWord => {
+                return self.visual_scope_motion(Scope::Word, Dir::Left, count)
+            }
+            Command::VisualEndWord => return self.visual_word_end(count),
+            Command::VisualNextSentence => {
+                return self.visual_scope_motion(Scope::Sentence, Dir::Right, count)
+            }
+            Command::VisualNextParagraph => {
+                return self.visual_scope_motion(Scope::Paragraph, Dir::Right, count)
+            }
             Command::VisualSwapEnds => return self.visual_swap_ends(),
             Command::VisualScopeChar => return self.set_head_scope(Scope::Char, false),
             Command::VisualScopeWord => return self.set_head_scope(Scope::Word, false),
@@ -508,6 +521,8 @@ impl App {
             | Command::FocusNextWord
             | Command::FocusPrevWord
             | Command::FocusEndWord
+            | Command::FocusNextSentence
+            | Command::FocusNextParagraph
             | Command::VisualEnter
             | Command::VisualEnterChar
             | Command::VisualEnterWord
@@ -522,6 +537,8 @@ impl App {
             | Command::VisualNextWord
             | Command::VisualPrevWord
             | Command::VisualEndWord
+            | Command::VisualNextSentence
+            | Command::VisualNextParagraph
             | Command::VisualSwapEnds
             | Command::VisualScopeChar
             | Command::VisualScopeWord
@@ -1699,7 +1716,41 @@ impl App {
 
     /// `w`/`b`/`e` move a word at a time in *every* scope: they are word-named
     /// motions, and the highlight still snaps to the active scope.
-    fn focus_word_move(&mut self, motion: WordMotion, count: Option<u32>) -> Effects {
+    /// Move by `count` units of `scope`, *whatever the active scope is*.
+    ///
+    /// This is what `w`/`b`/`s`/`p` are: a motion names its own unit, and the
+    /// highlight still snaps back out to the active scope afterwards. It is
+    /// the same [`Self::step_scope`] table `hjkl` use — the only difference is
+    /// that the scope comes from the command rather than from the mode.
+    fn focus_scope_motion(&mut self, scope: Scope, dir: Dir, count: Option<u32>) -> Effects {
+        if self.session.is_none() {
+            return Effects::default();
+        }
+        let Some(mut at) = self.focus else {
+            return self.enter_focus(self.focus_scope);
+        };
+        let steps = count.unwrap_or(1).max(1);
+        let goal_x = self.focus_goal_x;
+        let goal_y = self.focus_goal_y;
+        for _ in 0..steps {
+            if !self.step_scope(&mut at, scope, dir, goal_x, goal_y) {
+                break; // reached a document edge
+            }
+        }
+        self.focus = Some(at);
+        // These are horizontal motions, so they redefine the column `j`/`k`
+        // aim at.
+        self.update_focus_goal_x(at);
+        self.refresh_focus_span();
+        self.ensure_focus_visible();
+        self.save_position();
+        Effects::redraw()
+    }
+
+    /// `e`: the end of the current word run, or the next run's end if already
+    /// there. The one motion no scope expresses — every scope motion lands on a
+    /// unit *start*.
+    fn focus_word_end(&mut self, count: Option<u32>) -> Effects {
         if self.session.is_none() {
             return Effects::default();
         }
@@ -1708,12 +1759,7 @@ impl App {
         };
         let steps = count.unwrap_or(1).max(1);
         for _ in 0..steps {
-            let moved = match motion {
-                WordMotion::NextStart => self.step_next_word_start(&mut at),
-                WordMotion::End => self.step_word_end(&mut at),
-                WordMotion::PrevStart => self.step_prev_word_start(&mut at),
-            };
-            if !moved {
+            if !self.step_word_end(&mut at) {
                 break;
             }
         }
@@ -1965,18 +2011,34 @@ impl App {
 
     /// `w`/`b`/`e` move the head a word at a time in *every* scope: they are
     /// word-named motions, and the edge still snaps to the active scope.
-    fn visual_word_move(&mut self, motion: WordMotion, count: Option<u32>) -> Effects {
+    fn visual_scope_motion(&mut self, scope: Scope, dir: Dir, count: Option<u32>) -> Effects {
+        let (Some(_), Some(mut head)) = (self.visual, self.focus) else {
+            return Effects::default();
+        };
+        let steps = count.unwrap_or(1).max(1);
+        let goal_x = self.focus_goal_x;
+        let goal_y = self.focus_goal_y;
+        for _ in 0..steps {
+            if !self.step_scope(&mut head, scope, dir, goal_x, goal_y) {
+                break;
+            }
+        }
+        self.focus = Some(head);
+        self.update_focus_goal_x(head);
+        self.refresh_visual_span();
+        self.ensure_visual_head_visible();
+        self.save_position();
+        Effects::redraw()
+    }
+
+    /// `e` in visual mode: see [`Self::focus_word_end`].
+    fn visual_word_end(&mut self, count: Option<u32>) -> Effects {
         let (Some(_), Some(mut head)) = (self.visual, self.focus) else {
             return Effects::default();
         };
         let steps = count.unwrap_or(1).max(1);
         for _ in 0..steps {
-            let moved = match motion {
-                WordMotion::NextStart => self.step_next_word_start(&mut head),
-                WordMotion::End => self.step_word_end(&mut head),
-                WordMotion::PrevStart => self.step_prev_word_start(&mut head),
-            };
-            if !moved {
+            if !self.step_word_end(&mut head) {
                 break;
             }
         }
@@ -3121,6 +3183,110 @@ mod tests {
         );
         assert!(app.focus_screen_rects().is_some());
         assert!(app.status_text().contains("-- FOCUS (sentence) --"));
+    }
+
+    /// `s` and `p` are *motions*, not scope changes: they move by their own
+    /// unit whatever the active scope is, and the highlight stays the size the
+    /// active scope makes it. That distinction is the whole point of the
+    /// feature — `cs` would change both.
+    #[test]
+    fn sentence_and_paragraph_motions_work_at_every_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        for (enter, scope) in [
+            ("cc", Scope::Char),
+            ("cw", Scope::Word),
+            ("ce", Scope::Line),
+        ] {
+            let mut app = app_with_text_pages(dir.path(), &["Alpha beta. Gamma delta."]);
+            press(&mut app, enter);
+            let (before_start, before_end) = app.focus_span().unwrap();
+            let before_width = before_end.cell - before_start.cell;
+
+            press(&mut app, "s");
+            assert_eq!(
+                (app.mode(), app.focus_scope()),
+                (Mode::Focus, scope),
+                "`s` must not change the scope"
+            );
+            // "Gamma delta." starts at cell 12.
+            assert_eq!(app.focus_caret().unwrap().cell, 12, "from {enter}");
+            // The highlight is still the active scope's size, not a sentence.
+            let (start, end) = app.focus_span().unwrap();
+            assert_eq!(
+                end.cell - start.cell,
+                before_width,
+                "`s` from {enter} resized the highlight"
+            );
+        }
+    }
+
+    #[test]
+    fn paragraph_motion_moves_without_changing_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        // A two-column page has more than one paragraph (split at the gap).
+        let mut app = app_with_two_column_page(dir.path());
+        press(&mut app, "cw");
+        let before = app.focus_caret().unwrap();
+        press(&mut app, "p");
+        assert_eq!((app.mode(), app.focus_scope()), (Mode::Focus, Scope::Word));
+        assert_ne!(app.focus_caret().unwrap(), before, "`p` did not move");
+    }
+
+    #[test]
+    fn scope_motions_take_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["Alpha beta. Gamma delta. Epsilon zeta."]);
+        press(&mut app, "cw");
+        press(&mut app, "2s");
+        // Third sentence: "Epsilon zeta." begins at cell 25.
+        assert_eq!(app.focus_caret().unwrap().cell, 25);
+    }
+
+    #[test]
+    fn scope_motions_clamp_at_the_document_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["Alpha beta. Gamma delta."]);
+        press(&mut app, "cw");
+        press(&mut app, "s");
+        let last = app.focus_caret().unwrap();
+        // Already on the final sentence: further motion is a no-op, not a wrap
+        // and not a crash.
+        press(&mut app, "9s");
+        assert_eq!(app.focus_caret().unwrap(), last);
+    }
+
+    #[test]
+    fn sentence_motion_grows_a_selection_in_visual_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["Alpha beta. Gamma delta."]);
+        press(&mut app, "cw");
+        press(&mut app, "vk");
+        let anchor = app.visual_selection().unwrap().anchor;
+        press(&mut app, "s");
+        let sel = app.visual_selection().unwrap();
+        assert_eq!(sel.anchor, anchor, "the anchor must stay put");
+        assert_eq!(sel.head.cell, 12, "the head moved a sentence");
+        assert_eq!(sel.head_scope, Scope::Word, "the scope is unchanged");
+        let (start, end) = app.visual_span().unwrap();
+        assert!(end.cell > start.cell, "the selection grew");
+    }
+
+    /// A bare `s` and the `cs` chord live on different trie paths, so adding
+    /// the motion must not shadow the scope chord.
+    #[test]
+    fn motion_keys_do_not_shadow_the_scope_chords() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["Alpha beta. Gamma delta."]);
+        press(&mut app, "cw");
+        let at = app.focus_caret().unwrap();
+        // `cs` switches scope in place...
+        press(&mut app, "cs");
+        assert_eq!(app.focus_scope(), Scope::Sentence);
+        assert_eq!(app.focus_caret().unwrap(), at, "`cs` must not move");
+        // ...while `s` moves without touching the scope.
+        press(&mut app, "s");
+        assert_eq!(app.focus_scope(), Scope::Sentence);
+        assert_eq!(app.focus_caret().unwrap().cell, 12);
     }
 
     #[test]

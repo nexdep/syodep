@@ -55,6 +55,8 @@ granularity.)
 | `focus_next_word` | move to the start of the next word run | repeats N times |
 | `focus_prev_word` | move to the start of the current word run, or the previous run if already at a start | repeats N times |
 | `focus_end_word` | move to the end of the current word run, or the next run if already at an end | repeats N times |
+| `focus_next_sentence` | move to the start of the next sentence | repeats N times |
+| `focus_next_paragraph` | move to the start of the next paragraph | repeats N times |
 
 `hjkl` and the arrow keys move by the active scope. What that means per scope:
 
@@ -71,9 +73,22 @@ between columns on a multi-column page rather than moving within the line, and
 `j`/`k` set the row those jumps aim at. **Sentence and paragraph have no second
 axis**, so all four directions collapse to previous/next.
 
-`w`, `b` and `e` always move by a word, whatever the scope is — they are
-word-named motions, and the highlight still snaps out to the active scope
-afterwards. This mirrors visual mode exactly.
+`w`, `b`, `e`, `s` and `p` always move by their own unit, whatever the active
+scope is — they are *motions*, and the highlight still snaps out to the active
+scope afterwards. This mirrors visual mode exactly.
+
+| Key | Moves by |
+|---|---|
+| `w` / `b` | next / previous word start |
+| `e` | end of the current word run |
+| `s` | next sentence |
+| `p` | next paragraph |
+
+**A motion is not a scope change.** In word focus, `s` jumps to the first word
+of the next sentence and the highlight stays *word*-sized; `cs` stays where you
+are and makes the highlight a whole sentence. Sentence and paragraph have no
+backward motion — press `cs` or `cp` and use `h`, which walks backwards a unit
+at a time.
 
 Word motions use Vim-like lowercase boundaries: letters/digits/underscore form
 word runs, punctuation/symbols form separate runs, whitespace is skipped, and

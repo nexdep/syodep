@@ -132,6 +132,8 @@ move it:
 | `j`, `<Down>` | `focus_down` — down a line, or the next unit |
 | `w` | `focus_next_word` — next word start |
 | `e` | `focus_end_word` — current/next word end |
+| `s` | `focus_next_sentence` — next sentence start |
+| `p` | `focus_next_paragraph` — next paragraph start |
 | `b` | `focus_prev_word` — current/previous word start |
 | `<Esc>` | `focus_exit` — back to normal mode |
 
@@ -152,7 +154,12 @@ Line scope is `ce`, not `cl`: `l` is the forward motion in every mode.
 
 `w`/`e`/`b` move by Vim-like word runs in *every* scope: letters/digits/
 underscore together, punctuation/symbols separately, whitespace skipped. Each
-image is a single stop.
+image is a single stop. `s` and `p` do the same for sentences and paragraphs.
+
+**These are motions, not scope changes.** In word focus, `s` jumps to the first
+word of the next sentence and the highlight stays word-sized; `cs` stays put and
+makes the highlight a whole sentence. There is no backward sentence or
+paragraph key — use `cs`/`cp` and then `h`.
 
 **The entry chords also change the scope, in place.** Pressing `ce` while
 already focused on a word highlights the line you are on — it does not move
@@ -189,6 +196,8 @@ anchored:
 | `w` | `visual_next_word` — next word, whatever the scope |
 | `b` | `visual_prev_word` — previous word, whatever the scope |
 | `e` | `visual_end_word` — end of the current word, whatever the scope |
+| `s` | `visual_next_sentence` — next sentence start, whatever the scope |
+| `p` | `visual_next_paragraph` — next paragraph start, whatever the scope |
 | `<Esc>` | `visual_exit` — back to the mode visual mode was entered from |
 
 Each end has its own scope. `v` acts on the end that is moving, `o` on the

@@ -7,6 +7,81 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-07-29 — `s` and `p` move by sentence and paragraph
+
+### Implemented
+
+Focus and visual mode gain two motions: `s` to the next sentence, `p` to the
+next paragraph. Like `w`/`b`/`e` they work at *every* scope and leave the scope
+alone — the highlight stays whatever size the active scope makes it.
+
+Forward only, by choice: going back a sentence is `cs` then `h`. Not bound in
+normal mode, matching `w`/`e`/`b` — a motion moves the highlight, and normal
+mode has none.
+
+New commands: `focus_next_sentence`, `focus_next_paragraph`,
+`visual_next_sentence`, `visual_next_paragraph`.
+
+### Why it was mostly a deletion
+
+`step_scope(caret, scope, dir, …)` already maps a scope and a direction onto a
+motion, and its `Scope::Word` arm calls exactly the functions the word commands
+called:
+
+```rust
+Scope::Word => match dir {
+    Dir::Left  => self.step_prev_word_start(caret),   // == focus_prev_word
+    Dir::Right => self.step_next_word_start(caret),   // == focus_next_word
+```
+
+So "move one unit of a *named* scope, ignoring the active one" already existed
+— `w` and `b` were the word instance of it, written out longhand. The feature
+is the sentence and paragraph instances of the same idea.
+
+The change was therefore a generalisation: one `focus_scope_motion(scope, dir,
+count)` (and its visual twin) now backs `w`, `b`, `s` and `p`. `e` is the only
+leftover — it targets a word run's *end* rather than a unit's start, which no
+scope motion expresses — so `WordMotion` collapsed from three variants to one
+and was deleted in favour of `focus_word_end` / `visual_word_end`.
+
+### Test strategy
+
+The refactor half was verified by the **absence** of test changes: routing
+`w`/`b` through `step_scope` left all 211 existing tests passing untouched,
+which is the proof it was behaviour-preserving. Only then were the new
+commands added.
+
+Six new tests cover motion-at-every-scope (char, word and line, asserting the
+highlight keeps the *active* scope's width rather than the motion's), counts,
+clamping at the document end, growing a visual selection, and that a bare `s`
+does not shadow the `cs` chord.
+
+The distinguishing property — motion versus scope change — is a rendering
+question no unit test answers, so it was checked under Xvfb on a
+two-sentence fixture:
+
+| Keys | Result |
+|---|---|
+| `cw` | "First" highlighted, word-sized |
+| `s` | "Second" highlighted — next sentence, **still word-sized** |
+| `cs` | same place, now "Second sentence here." — whole sentence |
+
+The plan predicted no FFI or Qt change (commands and keymaps only);
+`git diff --stat crates/syodep-ffi ui-qt` came back empty, checked rather than
+assumed.
+
+### Notes / remaining
+
+- `s`/`p` are bare keys while `cs`/`cp` and `vs`/`vp` are two-chord sequences
+  on a different trie path, so all of them keep working. `s` *moves* by a
+  sentence; `cs` *focuses by* sentence.
+- No backward sentence/paragraph keys. `S` and `P` are still free if that
+  changes.
+- Bare scope letters are dropped as an idea; this covers the motion half of
+  what it was for.
+
+---
+
 ## 2026-07-28 — A pause commits a key sequence; `o` frees up; the scope resets
 
 Three items from the post-0.7.0 review, shipped as three commits.
