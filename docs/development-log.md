@@ -7,6 +7,328 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-07-29 — Display equations are navigation units
+
+A formula used to be a short line of odd characters: `s` walked into it, it was
+glued to the sentence before it (equations rarely end in a full stop), and a stop
+inside one split it. Now a display equation is **one step at sentence and
+paragraph scope** while `w` and `h`/`l` still walk through it — the behaviour a
+heading already had, asked for by name.
+
+### Almost no new mechanism
+
+`docs/architecture.md` claimed that adding a kind means answering the region
+predicates rather than threading anything through the motion code. This feature
+tested that claim, and it held: `ObjectKind::Equation`, added to `is_atomic()`'s
+exception list, and a third predicate `is_one_sentence()` (`Heading | Equation`)
+replacing the hard-coded `ObjectKind::Heading` test in `App::in_heading`, renamed
+`in_single_sentence_region`. **No motion code changed.** The rest of the work is
+the detector, its config toggle, and tests.
+
+The third predicate earns its place: without it a two-line equation whose first
+line ends in `.` is two sentences. Pinned by removing `Equation` from it and
+watching `a_stop_inside_an_equation_does_not_split_it` and
+`sentence_motion_treats_an_equation_as_one_step` fail — which is how the first
+version of that fixture was found to be worthless, since its only unprotected
+stop sat at the region's end where a boundary changes nothing.
+
+### Two math signals, and the guard that matters
+
+`LineStyle` gained `math`, the share of a line's glyphs set in a math font, read
+from `ch.font()` in the pass that already extracts the text (with the last font
+name and verdict cached, since glyphs come in font runs). `is_math_font` is a
+case-insensitive substring test — `cmmi`, `cmsy`, `cmex`, `msam`, `msbm`, `stix`,
+`xits`, `symbol`, `math` — which covers TeX's families, the Unicode math fonts
+and the `ABCDEF+` subset prefixes in one rule. MuPDF's source says this is
+reliable: every load path passes the PDF's own font name to
+`fz_new_font_from_memory`.
+
+The characters are the second signal, for PDFs whose fonts say nothing:
+operators, relations and Greek. Either signal is enough — and both were verified
+*independently* against the fixture, by disabling one at a time and watching
+detection still succeed.
+
+A line is an equation when **all four** hold: it does not fill the column, it
+reads as mathematics by fonts or characters, it carries an operator or relation,
+and it carries at most two ordinary words (a word being three or more letters, so
+adjacent variables do not count). Each condition kills a specific
+counter-example: a prose sentence with inline maths (full width), a centred
+caption (no operator), a citation line (words), the last short line of a
+paragraph (words, no operator).
+
+**Inline maths is deliberately out of scope**, decided with the user: for a
+formula inside a sentence to be one stop it would have to be a region, and a
+region splits the sentence around it — the cure would be worse than the disease.
+The set-apart test is what enforces that, and it is the guard most worth keeping
+honest.
+
+Runaway guards mirror the heading ones: at most 12 lines to an equation, and if
+more than 60% of a page's lines read as maths, none of them do. The share guard
+is loose because an appendix page legitimately is mostly display math; when it
+fires, the page just navigates line by line.
+
+### The fixture trick
+
+Testing a font-based heuristic without embedding a font: the new
+`pdf_with_equation` sets its formula in base-14 **`Symbol`**, so MuPDF reports
+the font name `Symbol` *and* the encoding turns `a + b = g` into `α + β = γ`.
+One tiny handcrafted PDF exercises both signals and the whole pipeline. The
+6-object assembly is now shared with `pdf_with_heading` as `two_font_page_pdf`.
+
+13 detection tests (10 pure on `equation_ranges`, 3 on real MuPDF) plus 6
+behavioural tests in the core against a hand-built `PageContent`, so a future
+change to the heuristic can only fail the detection tests.
+
+---
+
+## 2026-07-29 — A table stops at its last row, not at MuPDF's rule
+
+Reported from real use: at sentence scope the highlight on a table reached over
+the prose line below it, and `s` **skipped** that line instead of landing on it.
+The skip is the diagnostic — it means the line was inside the table's line
+range, part of the atomic unit, rather than merely painted over. Everything
+downstream reads that range, so the caret, the sentence run and the overlay were
+all wrong together.
+
+Cause: `content_objects` decided membership with one rule — a line belongs to
+the table if its **centre** falls inside MuPDF's box. That box is the *ruled
+region*, which reaches past the last row of text; when it reaches past the next
+line's centre, prose joins the table. Measured on the fixture at a 4pt caption
+gap: box `y 141.65..282.35`, caption line `y 275.25..288.99`, centre `282.1`,
+inside the box by a quarter of a point. That is all it takes.
+
+Two things had to change, and only the first fixes the skip.
+
+**The range is trimmed at its edges.** Two tests, applied only at the first and
+last member — a box cannot clip an interior line, and an interior gap is a real
+part of the grid:
+
+- a line lying inside the box by less than 70% of its own height
+  (`TABLE_MEMBER_OVERLAP`) is one the box merely cuts through;
+- with three or more members, an edge line whose adjoining gap exceeds 1.8×
+  (`TABLE_GAP_FACTOR`) the **median** gap of the members is set apart from the
+  grid — a caption, or the prose after it.
+
+The normalisation is the interesting part. The gap is compared against the
+table's own rhythm, not against line height: `pdf_with_table` sets 10pt text on
+28pt rows, so a line-height comparison would have eaten its first and last row.
+The shape of the test, and its constant, mirror the list walker's
+`LIST_GAP_FACTOR` — "a wide gap means the block below merely follows the list".
+
+Trimming can only shrink a table, and one shrunk below two lines falls to the
+existing discard guard, degrading to line-by-line navigation — always the safe
+direction here.
+
+**The stored box is derived from the lines.** Tables were the only object kind
+whose `bbox` was foreign geometry (`bbox: *table`); headings use the union of
+their line boxes and images the line box. The box is now extended to cover the
+rows' text and then held back from the nearest non-empty line above and below,
+so it cannot reach a line the caret can visit. The neighbour deliberately wins
+over the table's own text extent: line boxes include ascenders and descenders
+and overlap each other by up to a point, and stopping a point short of a
+descender is invisible where tinting the line below was the whole complaint.
+Without this second half the skip would have been fixed and the tint would have
+remained — measured, at that same 4pt gap, as 3pt of overhang into the caption's
+box.
+
+### Tests
+
+Five pure cases on `content_objects` (each edge trimmed, the gap test with a box
+that covers the caption *entirely* so the overlap test says nothing, a
+generously spaced table keeping every row, and a table trimmed below two lines
+being discarded), plus one against real MuPDF on a new fixture:
+`pdf_with_table_gap(cols, rows, caption_gap)`, with `pdf_with_table` now a
+wrapper at the old 40pt. The gap for the fixture test was chosen by measurement,
+not guessed: at 8pt MuPDF's box overhangs the caption's *box* but not its centre
+(the tint bug alone), and at 4pt it takes the caption into the range (the skip
+bug too). The test was watched failing on both assertions with the fix bypassed.
+
+No core change. `same_region` / `next_cell_in_region` were already stopping
+sentence runs at region edges correctly — the edge was in the wrong place.
+
+---
+
+## 2026-07-29 — A link is one word
+
+`https://example.com/a?x=1` was a dozen stops for `w`, and worse, every dot in
+it ended a sentence. It is now a single word, and a stop inside it is inert.
+
+Token-level, like the abbreviation rule, and it reuses that rule's shape
+exactly: `link_span` recognises the address inside a whitespace-delimited token
+and returns its span; the span is a hard edge in both directions for
+`same_word_run`, and `sentence_boundary_after` treats a terminator inside it as
+part of the address. `abbreviation_at` and the new `link_at` now share
+`App::token_span`, which is the only thing that knows where a token begins and
+ends.
+
+The recognised forms are a scheme (`://` with a plausible scheme in front, or
+`mailto:`/`doi:`/`tel:`/`urn:`/`arxiv:`), a `www.` host, a dotted host followed
+by a path, and a plain email address.
+
+**What is deliberately not recognised is the interesting part.** A bare
+`example.com` with no path and no `www.` is rejected, because extraction that
+drops a space leaves `sentence.Next` looking exactly like it — and accepting
+that would both glue two words together and swallow a real sentence boundary.
+Requiring a path or a `www.` prefix costs almost nothing (a bare host in a paper
+is rare) and removes the whole class of false positives. The host test also
+wants an alphabetic top-level domain, which keeps `Fig.2/3`, `10.1000/182` and
+`1,234.56` out, and the missing dot keeps `and/or`, `km/h` and `src/lib.rs` out.
+
+Trailing punctuation is trimmed before recognition, with one refinement: a
+closing bracket is trimmed only when the link did not open one itself, so
+`…/Glob_(pattern)` keeps its `)` while `(https://example.com),` gives up both.
+Sentence-ending punctuation after a link is therefore outside its span and still
+ends the sentence, which is what `a_stop_after_a_url_is_its_own_word_and_ends_
+the_sentence` pins.
+
+The cell mapping goes through the characters actually present in the token, so an
+image sitting inside one cannot shift the span — the same trap `abbreviation_at`
+avoids by trimming on cells rather than on the string.
+
+Nine motion tests, two unit tests on `link_span` (one of them entirely about what
+must *not* match).
+
+---
+
+## 2026-07-29 — Scientific notation and percentages are one word
+
+Two more shapes a figure takes in a paper, both extensions of the existing
+number rule rather than new machinery.
+
+**The exponent sign.** `1.5e-10` was already one word — but only by accident of
+the hyphen rule landing first, since `e` and `-10` are word characters either
+side of a hyphen. `2.3E+5` was three stops, because `+` had nothing joining it.
+`is_number_interior` now also accepts an exponent sign, tested by
+`is_inside_scientific_exponent(before2, before, sign, after)`: an `e`/`E` behind
+the sign, a **digit** behind that, and a digit after. The digit is the whole
+point — without it `cache+1` would collapse into one word. `+`, `-` and the
+Unicode minus all count, since a typesetter may have set either.
+
+**The proportion sign.** `45.5%` was a number and a symbol. A `%` (or `‰`, `‱`)
+with a digit immediately before it now joins backwards. Only the right-hand cell
+of the pair is ever asked, which is what keeps the join one-directional: the sign
+attaches to its figure and never reaches forward into what follows. `the % sign`
+and `45.5 %` are untouched, both for want of a digit in front.
+
+Units are deliberately excluded. `°` looks like the same shape, but it is
+followed by a letter (`37°C`), and joining the sign but not the letter gives
+`37°` + `C`, which is worse than leaving it alone — while joining the letter too
+opens the whole question of unit tokens. The set is proportion signs only, and
+`is_number_suffix` says so.
+
+Nothing changed on the sentence side: neither construct contains a terminator,
+so `It grew 45.5%. Then more.` splits on the stop after the sign, as it always
+did. Seven motion tests plus two on the predicates.
+
+---
+
+## 2026-07-29 — An abbreviation is recognised inside the punctuation around it
+
+`(e.g.,` — the commonest form the construct takes in a paper — was not being
+recognised at all. `abbreviation_at` matched the whole whitespace-delimited
+token, and `(e.g.,` is not in any list and is not a run of dotted initials, so
+every rule keyed on it was off: the stops split the sentence, and `w` stopped
+four times inside it.
+
+The token is now trimmed to the construct before it is recognised: leading
+characters that are not word characters go, and trailing ones go too *except* a
+full stop, which may be the abbreviation's own. `(e.g.,`, `[etc.]`, `"i.e."` and
+`etc.)` all reduce to the abbreviation itself, and the span returned is that
+core rather than the token.
+
+Trimming alone gave the sentence rule what it needed but left `w` wrong in the
+other direction: the closing stop of `e.g.` and the comma after it are both
+punctuation, so `continues_word_run` merged them into one run — `e.g.,` as a
+single stop. The span is now a hard edge in **both** directions: when either
+side of an adjacent pair is inside it, they belong to the same run only if both
+are. `(e.g.,` is three stops, which is what it looks like.
+
+Two consequences worth recording:
+
+- The span no longer contains every cell of the token, so `is_abbreviation_stop`
+  must check that the stop it was handed is actually inside it. Without that
+  check the `)` in `…magic (etc.)` would inherit the construct's inertness and
+  swallow a real sentence boundary — pinned by
+  `a_bracket_after_an_abbreviation_can_still_close_a_sentence`.
+- The capitalisation test now has a veto: a comma, semicolon or colon reached
+  before the capital means the text runs on. This is what a citation needs —
+  `(e.g., Smith 2020)` would otherwise split at the abbreviation, since `Smith`
+  is capitalised. Continuing punctuation is a stronger signal than a capital,
+  and only where an abbreviation is already suspected.
+
+Six new tests, four of them written first against the reported behaviour:
+`a_bracketed_abbreviation_is_one_word_between_its_brackets`,
+`a_bracketed_abbreviation_does_not_break_a_sentence`,
+`an_abbreviation_before_a_comma_keeps_the_sentence_even_before_a_capital`,
+`a_quoted_abbreviation_is_still_one_word`, plus the bracket-closing case and a
+unit test on `opens_a_sentence`.
+
+---
+
+## 2026-07-29 — A hyphenated compound is one word
+
+`well-known` was three stops for `w`: the two halves and the hyphen between
+them. It is now one, in the same shape as the number and abbreviation rules —
+a pure predicate, `is_inside_hyphenated_word(before, hyphen, after)`, consulted
+from `same_word_run` through `App::is_hyphen_interior`, exactly as
+`is_inside_number` is.
+
+The test is word characters (alphanumeric or `_`) on **both** sides, which is
+what separates a hyphen from a dash without needing to know anything about the
+words themselves. It composes, so `state-of-the-art` holds together throughout,
+and it covers `COVID-19` and `3-D` for free. Everything that is not doing that
+job keeps the stop it always had: `one - two`, a trailing `well- known`, and
+`one--two` (neither hyphen has a word character on both sides).
+
+Which characters count as a hyphen is the whole judgement call. `-` plus the
+typographic hyphens `‐` (U+2010) and `‑` (U+2011), plus the soft hyphen
+(U+00AD), which a PDF can carry where a word was set to break. The en and em
+dashes are deliberately excluded: `one—two` is a clause boundary, not a compound,
+and joining it would swallow two words into one stop. Pinned by
+`an_em_dash_between_words_does_not_join_them`.
+
+Sentence and paragraph logic is untouched — a hyphen was never a terminator, so
+there was nothing to make inert, unlike the stops inside `3.14` and `e.g.`.
+
+The one case left alone is a word hyphenated across a line break. Word runs stop
+at a line boundary by construction (`same_line`), and the same-line guard here
+mirrors the number rule's; rejoining such a word would mean reaching into the
+next line and deciding whether the hyphen was the author's or the typesetter's.
+
+`word_right_and_left_step_between_words` used `beta-gamma` as its example of a
+punctuation stop between two word runs, which this rule dissolves; it now uses
+`beta:gamma` and asserts the same cell indices. Nine new tests cover the motions
+(`a_hyphenated_compound_is_one_word` and neighbours) plus two unit tests on the
+predicate itself.
+
+---
+
+## 2026-07-29 — Darker, less transparent default overlays
+
+The shipped highlights were too faint to find on a page: light blue `#add8e6`
+and light grey `#d3d3d3`, both at `0.4` opacity, blend over a white page to
+`#dceff5` and `#ededed` — a few percent off white. The defaults are now the
+mid-tone `#5b9bd5` (focus) and `#8a8a8a` (selection) at `0.55` opacity, which
+blend to about `#a5c8e8` and `#bfbfbf`.
+
+Chosen by computing the blend rather than by eye this time, against two
+constraints: visible from a normal reading distance, and black body text still
+comfortably legible on top (the focus blend keeps ~12:1 contrast with black, far
+above the 4.5:1 floor). Opacity moved from `0.4` to `0.55` for both, so focus
+and selection stay symmetric; the hues are unchanged in character — a blue for
+focus, a neutral grey for the selection — so an existing config that only sets
+one of them still reads as the same pair.
+
+Nothing structural changed: the values live in `ViewConfig::default()`, the
+fallbacks used when a user colour fails to parse were moved in step
+(`syodep-ffi`, where the warning text quotes the default), and
+`config/default-config.toml` was regenerated from `syodep --defaults`. Covered
+by `overlay_colors_default_and_user_override`,
+`default_config_doc_round_trips_to_defaults` and
+`invalid_color_falls_back_and_warns`.
+
+---
+
 ## 2026-07-29 — An abbreviation is one word and does not end a sentence
 
 `e.g.` was four word stops and two sentences. Now abbreviations are single words

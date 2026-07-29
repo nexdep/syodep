@@ -27,13 +27,13 @@ background = "#1e1e1e"
 # Highlight for focus mode. Every scope shares one colour, so the
 # highlight tells you that focus is active rather than which
 # granularity you are in.
-focus_color = "#add8e6"
+focus_color = "#5b9bd5"
 # Opacity of the focus highlight, 0.0 to 1.0.
-focus_opacity = 0.4
+focus_opacity = 0.55
 # Highlight for the visual-mode selection (#rrggbb).
-visual_color = "#d3d3d3"
+visual_color = "#8a8a8a"
 # Opacity of the selection highlight, 0.0 to 1.0.
-visual_opacity = 0.4
+visual_opacity = 0.55
 # Treat each detected table as one stop for focus and selection
 # motions (char scope still steps through a table's characters).
 # Images are always single stops; this only controls table detection,
@@ -43,6 +43,11 @@ detect_tables = true
 # so it is not glued to the text below it for want of a full stop.
 # Word and line scope still move through a heading normally.
 detect_headings = true
+# Treat each display equation as one step at sentence and paragraph
+# scope, so a formula is not glued to the sentence before it and a stop
+# inside it does not split it. Word and char scope still walk through
+# one. Maths written inline in a sentence is left alone.
+detect_equations = true
 # Skip page furniture when moving: running headers, page numbers, and
 # text that does not run in the page's reading direction, such as a
 # sideways margin stamp or an inclined watermark. Headers and footers

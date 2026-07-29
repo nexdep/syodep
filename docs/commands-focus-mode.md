@@ -119,17 +119,57 @@ common abbreviations that no rule can infer is also known — `etc.`, `cf.`,
 `vs.`, `et al.`, `Fig.`, `Eq.`, `Sec.`, `vol.`, `Dr.`, month and day names and
 others.
 
+Punctuation set around one is not part of it. `(e.g.,` is three stops — `(`,
+`e.g.`, `,` — and the abbreviation is recognised inside its brackets, so a
+parenthetical aside does not break the sentence carrying it. The construct is a
+hard edge for `w` in both directions: neither the bracket before it nor the
+comma after it is swallowed into it.
+
 Their *closing* stop still ends a sentence when a new one visibly follows it, so
 `…apples, oranges, etc. The next one` splits correctly while `…etc. and then
 more` does not. That capitalisation test is used only where an abbreviation is
 already suspected — applied to prose generally it merges real sentences, since
-technical writing constantly starts one with a lower-case identifier.
+technical writing constantly starts one with a lower-case identifier. A comma,
+semicolon or colon reached before the capital vetoes it, which is what keeps a
+citation like `(e.g., Smith 2020)` in one piece. A closing bracket after the
+stop is unaffected: `…and magic (etc.) Then more` still splits.
 
 A number is always one word, however it is punctuated: `3.14` and `1,234.56` are
 each a single stop, because a separator with digits on both sides belongs to the
 figure. The same rule keeps a decimal point from ending a sentence — `pi is 3.14
 exactly.` is one sentence, not two. A full stop that merely follows a number
 still ends both, since nothing follows it: `it costs 3.` behaves as before.
+
+Scientific notation and percentages come with it. `1.5e-10` and `2.3E+5` are one
+word each: the sign of an exponent joins when an `e`/`E` with a digit behind it
+sits in front of it, so `cache+1` is still three stops. A proportion sign
+written tight against a figure joins backwards to it, making `45.5%` one word,
+while `the % sign` and `45.5 %` keep the separate stops they should have. Units
+(`37°C`, `5kg`) are not covered — the letters after them are a question of their
+own.
+
+A hyphenated compound is likewise one word: `well-known`, `state-of-the-art` and
+`COVID-19` are each a single stop for `w`, `e` and `b`, because a hyphen with
+word characters on both sides joins them. A dash that is not doing that keeps
+the stop of its own it has always had — `one - two`, `well- known`, `one--two`,
+and the en and em dashes (`–`, `—`), which punctuate a sentence rather than
+build a word. A word broken across a line break stays two stops: word runs never
+cross lines, and that hyphen belongs to the typesetting rather than to the word.
+
+**Links.** A URL or an email address is one word, and the stops inside it never
+end a sentence — `See https://example.com/a.html for it.` is one sentence with
+one stop in it. Recognised forms: anything with a scheme (`https://…`,
+`mailto:…`, `doi:…`), a `www.` host, a host with a path (`doi.org/10.1000/182`),
+and a plain email address. The punctuation around a link is not part of it, so
+`(https://example.com),` is three stops and the full stop in `…example.com.`
+still ends the sentence — while a bracket the address itself opened stays in,
+as in `…/Glob_(pattern)`.
+
+A bare host with no path and no `www.` is deliberately *not* treated as a link:
+extraction that drops a space leaves `sentence.Next` looking exactly like one,
+and swallowing that would glue two words together and lose a sentence boundary.
+`and/or`, `km/h` and `src/lib.rs` are unaffected for the same reason — nothing
+before the slash is a host.
 
 The view auto-scrolls to keep the highlight on screen as it moves.
 
@@ -144,6 +184,12 @@ either, so `p` on the prose above a figure highlights just that prose.
 Char scope is the escape hatch. Press `cc` while on a table and `h`/`l` step
 through its individual characters as usual, so a single number in a cell stays
 selectable. Switching back to any coarser scope snaps to the whole table again.
+
+A caption or a paragraph set close under a table stays outside it: its own
+sentence, its own stop, and no tint over it. Detection reports the table's
+*ruled* area, which reaches past the last row, so the edges of what it claims
+are trimmed back to the rows themselves and the highlight is held back from the
+lines above and below.
 
 Images are always single stops. Tables are found by a detection pass that can
 be turned off with `view.detect_tables` — see `docs/config.md`.
@@ -162,6 +208,26 @@ prose you may want to select a phrase of — only the two scopes that group text
 into runs treat it as a unit.
 
 Turn detection off with `view.detect_headings` — see `docs/config.md`.
+
+## Equations
+
+A display equation behaves exactly as a heading does: **one step at sentence and
+paragraph scope**, and walkable by word and character inside. `s` lands on the
+whole formula and the next `s` lands on the prose after it, however many lines
+the equation runs to — an aligned system is one unit, and an equation number set
+on a line of its own (`(3.4)`) comes with it. A stop inside a formula — `f(x) =
+0.` — does not split it, the same way `2.12.` does not split a heading.
+
+Not atomic, on purpose: `w` steps through its terms and `cc` then `h`/`l` walks
+its characters, so a single variable or coefficient stays selectable. Only the
+scopes that group text into runs treat the equation as one thing.
+
+A line reads as a display equation when it is set apart from the prose (it does
+not fill the column), reads as mathematics by its fonts or its characters,
+carries an operator or relation, and carries almost no ordinary words. **Maths
+inline in a sentence is left alone** — making it a unit would mean making it a
+region, and that would split the sentence around it. Turn detection off with
+`view.detect_equations` — see `docs/config.md`.
 
 ## Page furniture
 

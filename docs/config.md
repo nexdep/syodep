@@ -36,12 +36,13 @@ bookmarks, highlights, notes, history. That lives in the SQLite database
 | `fit_width_on_open` | bool | `true` | fit page width to window when opening a document without a saved position |
 | `zoom_step` | float | `1.1` | multiplicative step for `zoom_in`/`zoom_out` |
 | `background` | string | `"#1e1e1e"` | canvas background color, `#rrggbb` |
-| `focus_color` | string | `"#add8e6"` | highlight for every focus mode, `#rrggbb` |
-| `focus_opacity` | float | `0.4` | opacity of the focus highlight, `0.0`-`1.0` |
-| `visual_color` | string | `"#d3d3d3"` | highlight for the visual-mode selection, `#rrggbb` |
-| `visual_opacity` | float | `0.4` | opacity of the selection highlight, `0.0`-`1.0` |
+| `focus_color` | string | `"#5b9bd5"` | highlight for every focus mode, `#rrggbb` |
+| `focus_opacity` | float | `0.55` | opacity of the focus highlight, `0.0`-`1.0` |
+| `visual_color` | string | `"#8a8a8a"` | highlight for the visual-mode selection, `#rrggbb` |
+| `visual_opacity` | float | `0.55` | opacity of the selection highlight, `0.0`-`1.0` |
 | `detect_tables` | bool | `true` | treat each detected table as one stop for focus and selection motions |
 | `detect_headings` | bool | `true` | treat each detected heading as one step at sentence and paragraph scope |
+| `detect_equations` | bool | `true` | treat each detected display equation as one step at sentence and paragraph scope |
 | `skip_page_furniture` | bool | `true` | keep running headers, page numbers and sideways text out of the caret's path |
 
 Documents with a saved reading position restore their previous scroll and
@@ -65,6 +66,24 @@ still walks its individual words and `j` at line scope still moves line by line
 counts as a heading when it is set noticeably larger than the page's body text,
 or when it is entirely bold at body size and does not fill the column width.
 Detection costs nothing extra to extract; set it to `false` if the heuristic
+misjudges a document.
+
+**Equation detection.** With `detect_equations = true` a display equation is one
+step at sentence and paragraph scope, like a heading and for the same reason: a
+formula rarely ends in a full stop, so it would otherwise be glued to the
+sentence before it — and a stop *inside* one (`f(x) = 0.`) would split it. It is
+not atomic, so `w` and `h`/`l` still walk through it, which is what keeps a
+single variable selectable.
+
+A line counts as a display equation when it is set apart from the prose (it does
+not fill the column width), reads as mathematics either by its fonts or by its
+characters, carries an operator or relation, and carries almost no ordinary
+words. An aligned system of several lines is one equation, and an equation number
+set on a line of its own (`(3.4)`) belongs to the equation beside it.
+
+**Maths written inline in a sentence is deliberately left alone**: to become one
+step it would have to be a region, and a region would split the sentence around
+it. Detection costs nothing extra to extract; set it to `false` if the heuristic
 misjudges a document.
 
 **Page furniture.** With `skip_page_furniture = true` the caret never traverses
@@ -93,6 +112,11 @@ not which scope you are in. The selection uses `visual_color`. Overlays are
 drawn as plain filled boxes with no border, and overlapping boxes are merged
 before filling, so a multi-line highlight is one flat block rather than a
 ladder of edges with darker seams.
+
+The defaults are mid-tone colours at `0.55` opacity, which over a white page
+blend to about `#a5c8e8` (focus) and `#bfbfbf` (selection) — clearly visible at
+a glance while leaving the text under them fully legible. Lower the opacity for
+a fainter tint, or raise it towards `1.0` for a solid block.
 
 An unparseable colour falls back to its default and reports the problem in the
 status line rather than leaving the overlay invisible. Only `#rrggbb` is

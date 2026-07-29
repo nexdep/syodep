@@ -249,12 +249,22 @@ pub fn pdf_with_image() -> Vec<u8> {
 }
 
 /// Build a single A4 page with a heading, a `cols` x `rows` ruled table, and a
-/// caption below it. Used to exercise table detection.
+/// caption 40pt below it. Used to exercise table detection.
+pub fn pdf_with_table(cols: usize, rows: usize) -> Vec<u8> {
+    pdf_with_table_gap(cols, rows, 40.0)
+}
+
+/// [`pdf_with_table`] with the caption set `caption_gap` points under the last
+/// rule.
+///
+/// A small gap is the interesting case: MuPDF's table box is the ruled region
+/// and reaches past the last row, so a caption set tight under the grid is what
+/// tempts detection into swallowing it.
 ///
 /// The rules are drawn as stroked rectangles because MuPDF's table hunt looks
 /// for ruled regions among a page's vector rectangles; a table of text alone,
 /// with no rules, is far less reliably recognised.
-pub fn pdf_with_table(cols: usize, rows: usize) -> Vec<u8> {
+pub fn pdf_with_table_gap(cols: usize, rows: usize, caption_gap: f32) -> Vec<u8> {
     const LEFT: f32 = 100.0;
     const TOP: f32 = 700.0;
     const COL_W: f32 = 90.0;
@@ -292,7 +302,7 @@ pub fn pdf_with_table(cols: usize, rows: usize) -> Vec<u8> {
         }
     }
 
-    let caption_y = TOP - table_h - 40.0;
+    let caption_y = TOP - table_h - caption_gap;
     content.push_str(&format!(
         "BT /F1 10 Tf 100 {caption_y} Td (Caption for the table) Tj ET\n"
     ));
@@ -359,6 +369,35 @@ pub fn pdf_with_table(cols: usize, rows: usize) -> Vec<u8> {
     buf
 }
 
+/// Build a single A4 page with body prose, a display equation set apart on its
+/// own line, and more prose. Used to exercise equation detection.
+///
+/// The equation is set in base-14 `Symbol`, which needs no embedded font and
+/// gives detection both of its signals at once: MuPDF reports the font name
+/// (`Symbol`) and the encoding turns `a + b = g` into `α + β = γ`, so the
+/// characters read as mathematics too.
+pub fn pdf_with_equation() -> Vec<u8> {
+    let mut content = String::new();
+    // Prose. Long lines, so these set the column width the equation is measured
+    // against.
+    let body = [
+        "The database is a set of directories that each contain a copy of the",
+        "same layout, so that applications may add to it without touching any",
+        "of the files that another application installed there previously.",
+    ];
+    for (i, text) in body.iter().enumerate() {
+        let y = 740.0 - i as f32 * 14.0;
+        content.push_str(&format!("BT /F1 10 Tf 100 {y} Td ({text}) Tj ET\n"));
+    }
+    // The equation: indented, short, and in a maths font.
+    content.push_str("BT /F2 11 Tf 250 680 Td (a + b = g) Tj ET\n");
+    for (i, text) in body.iter().enumerate() {
+        let y = 650.0 - i as f32 * 14.0;
+        content.push_str(&format!("BT /F1 10 Tf 100 {y} Td ({text}) Tj ET\n"));
+    }
+    two_font_page_pdf(&content, b"/Symbol")
+}
+
 /// Build a single A4 page with a large bold heading, several lines of body
 /// prose, a short bold subheading at body size, and more prose. Used to
 /// exercise heading detection.
@@ -383,8 +422,14 @@ pub fn pdf_with_heading() -> Vec<u8> {
         content.push_str(&format!("BT /F1 10 Tf 100 {y} Td ({text}) Tj ET\n"));
     }
 
+    two_font_page_pdf(&content, b"/Helvetica-Bold")
+}
+
+/// Assemble a one-page A4 PDF around `content`, with `/F1` Helvetica and `/F2`
+/// the given base font.
+fn two_font_page_pdf(content: &str, second_font: &[u8]) -> Vec<u8> {
     let mut buf: Vec<u8> = b"%PDF-1.4\n".to_vec();
-    let total_objects = 6; // catalog, pages, regular font, bold font, page, content
+    let total_objects = 6; // catalog, pages, text font, second font, page, content
     let mut offsets: Vec<usize> = vec![0; total_objects + 1];
     let write_obj = |buf: &mut Vec<u8>, offsets: &mut Vec<usize>, num: usize, body: &[u8]| {
         offsets[num] = buf.len();
@@ -411,12 +456,10 @@ pub fn pdf_with_heading() -> Vec<u8> {
         3,
         b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
     );
-    write_obj(
-        &mut buf,
-        &mut offsets,
-        4,
-        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>",
-    );
+    let mut font2: Vec<u8> = b"<< /Type /Font /Subtype /Type1 /BaseFont ".to_vec();
+    font2.extend_from_slice(second_font);
+    font2.extend_from_slice(b" >>");
+    write_obj(&mut buf, &mut offsets, 4, &font2);
     write_obj(
         &mut buf,
         &mut offsets,

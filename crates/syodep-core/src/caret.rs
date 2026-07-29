@@ -294,6 +294,29 @@ pub fn is_numeric_separator(c: char) -> bool {
     matches!(c, '.' | ',')
 }
 
+/// Whether `c` is a hyphen — a character that *joins* the words it sits
+/// between rather than separating them.
+///
+/// Hyphens only. The en and em dashes (`–`, `—`) punctuate a sentence, so they
+/// are deliberately absent: `one—two` is two words. The soft hyphen is here
+/// because a PDF can carry one where a word was set to break and did not.
+pub fn is_word_hyphen(c: char) -> bool {
+    matches!(c, '-' | '\u{2010}' | '\u{2011}' | '\u{00ad}')
+}
+
+/// Whether `hyphen`, with `before` and `after` beside it, joins a compound
+/// word rather than punctuating the text.
+///
+/// Same shape as [`is_inside_number`]: word characters on *both* sides. That
+/// makes `well-known`, `state-of-the-art` and `COVID-19` each one word, while a
+/// dash used as punctuation (`one - two`, `well- known`, `one--two`) keeps the
+/// stop of its own it has always had. It composes, so a chain of hyphens holds
+/// together throughout.
+pub fn is_inside_hyphenated_word(before: Option<char>, hyphen: char, after: Option<char>) -> bool {
+    let joinable = |c: char| c.is_alphanumeric() || c == '_';
+    is_word_hyphen(hyphen) && before.is_some_and(joinable) && after.is_some_and(joinable)
+}
+
 /// Abbreviations whose closing full stop is usually not the end of a sentence.
 ///
 /// Lower-case and without the stop. Dotted initials (`e.g.`, `U.S.`, `Ph.D.`)
@@ -346,16 +369,27 @@ pub fn is_abbreviation(token: &str) -> bool {
     is_dotted_initials(token) || is_known_abbreviation(token)
 }
 
+/// Punctuation that continues the sentence it is in and so can never stand
+/// between one sentence and the next.
+pub fn is_sentence_continuation(c: char) -> bool {
+    matches!(c, ',' | ';' | ':')
+}
+
 /// Whether text starting with `next` reads as a new sentence — the first
-/// letter or digit after any opening punctuation is a capital.
+/// letter or digit after any opening punctuation is a capital, and no
+/// continuing punctuation comes first.
+///
+/// The second half is what carries `(e.g., Smith 2020)`: the capital would
+/// otherwise say "new sentence" while the comma in front of it says the text
+/// runs on, and the comma is the stronger signal.
 ///
 /// Only consulted where an abbreviation is already suspected. Applied to prose
 /// at large it merges real sentences: a technical document routinely starts one
 /// with a lower-case identifier.
 pub fn opens_a_sentence(next: &str) -> bool {
     next.chars()
-        .find(|c| c.is_alphanumeric())
-        .is_some_and(char::is_uppercase)
+        .find(|c| c.is_alphanumeric() || is_sentence_continuation(*c))
+        .is_some_and(|c| c.is_uppercase())
 }
 
 /// Whether `separator`, with `before` and `after` beside it, is punctuation
@@ -368,6 +402,156 @@ pub fn is_inside_number(before: Option<char>, separator: char, after: Option<cha
     is_numeric_separator(separator)
         && before.is_some_and(|c| c.is_numeric())
         && after.is_some_and(|c| c.is_numeric())
+}
+
+/// Whether `c` can sign the exponent of a number in scientific notation.
+///
+/// The Unicode minus is included: a typesetter may well have used it where the
+/// author wrote a hyphen.
+pub fn is_exponent_sign(c: char) -> bool {
+    matches!(c, '+' | '-' | '\u{2212}')
+}
+
+/// Whether `sign` is the sign of an exponent in scientific notation — the
+/// `+` in `2.3E+5` — given the two characters before it and the one after.
+///
+/// `before` is the exponent marker (`e`/`E`) and `before2` the digit in front
+/// of it. That digit is what separates a number from an identifier: without it
+/// `cache+1` would join into one word.
+pub fn is_inside_scientific_exponent(
+    before2: Option<char>,
+    before: Option<char>,
+    sign: char,
+    after: Option<char>,
+) -> bool {
+    is_exponent_sign(sign)
+        && before.is_some_and(|c| c == 'e' || c == 'E')
+        && before2.is_some_and(|c| c.is_numeric())
+        && after.is_some_and(|c| c.is_numeric())
+}
+
+/// Whether `c` is a sign that belongs to the figure it *follows*, as the `%` in
+/// `45.5%` does.
+///
+/// Only the proportion signs, which are always written tight against the
+/// figure and carry nothing after them. A unit (`°C`, `kg`) is deliberately not
+/// here: the letters following it raise a question of their own, and `45.5 %`
+/// or a bare `%` must stay untouched — hence the digit required immediately
+/// before.
+pub fn is_number_suffix(c: char) -> bool {
+    matches!(c, '%' | '‰' | '‱')
+}
+
+/// Whether `c`, with `before` beside it, is a suffix attached to a number
+/// rather than a symbol standing on its own.
+pub fn is_attached_number_suffix(before: Option<char>, c: char) -> bool {
+    is_number_suffix(c) && before.is_some_and(|b| b.is_numeric())
+}
+
+/// Brackets and quotes a link may be wrapped in.
+fn is_link_opener(c: char) -> bool {
+    matches!(c, '(' | '[' | '{' | '<' | '"' | '\'' | '«' | '“' | '‘')
+}
+
+/// Punctuation that follows a link in prose without belonging to it. Closing
+/// brackets are handled separately, since a link may contain a matched pair.
+fn is_link_trailer(c: char) -> bool {
+    matches!(
+        c,
+        '.' | ',' | ';' | ':' | '!' | '?' | '"' | '\'' | '>' | '»' | '”' | '’'
+    )
+}
+
+/// The opening bracket `c` closes, if it is a closing bracket.
+fn matching_opener(c: char) -> Option<char> {
+    match c {
+        ')' => Some('('),
+        ']' => Some('['),
+        '}' => Some('{'),
+        _ => None,
+    }
+}
+
+/// Schemes that are followed by `:` alone rather than `://`.
+const SCHEMES_WITHOUT_AUTHORITY: &[&str] = &["mailto", "doi", "tel", "urn", "arxiv"];
+
+/// Whether `s` is shaped like a URL scheme (`https`, `ftp`, `git+ssh`).
+fn is_url_scheme(s: &str) -> bool {
+    (1..=16).contains(&s.chars().count())
+        && s.starts_with(char::is_alphabetic)
+        && s.chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '+' | '-' | '.'))
+}
+
+/// Whether `host` is a dotted host name: labels of word characters, with a
+/// plausible alphabetic top-level domain last.
+fn is_dotted_host(host: &str) -> bool {
+    let labels: Vec<&str> = host.split('.').collect();
+    labels.len() >= 2
+        && labels.iter().all(|l| {
+            !l.is_empty()
+                && l.chars()
+                    .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_'))
+        })
+        && labels.last().is_some_and(|tld| {
+            (2..=24).contains(&tld.chars().count()) && tld.chars().all(char::is_alphabetic)
+        })
+}
+
+/// Whether `token` is a link: a URL, or an email address.
+///
+/// Deliberately conservative about the form with no scheme. A bare
+/// `example.com` is *not* recognised, because extraction that drops a space
+/// leaves `sentence.Next` looking exactly like it, and treating that as a link
+/// would both glue two words together and swallow a sentence boundary. A path
+/// (`doi.org/10.1000/182`) or a `www.` prefix is required instead — the forms
+/// that cannot be an accident of a missing space.
+fn is_link(token: &str) -> bool {
+    let lower = token.to_lowercase();
+    if let Some(i) = lower.find("://") {
+        return is_url_scheme(&lower[..i]) && i + 3 < lower.len();
+    }
+    if let Some((scheme, rest)) = lower.split_once(':') {
+        if SCHEMES_WITHOUT_AUTHORITY.contains(&scheme) {
+            return !rest.is_empty();
+        }
+    }
+    if let Some((local, host)) = lower.split_once('@') {
+        if !local.is_empty() && !local.contains('/') && is_dotted_host(host) {
+            return true;
+        }
+    }
+    match lower.split_once('/') {
+        Some((host, _)) => is_dotted_host(host),
+        None => lower.starts_with("www.") && is_dotted_host(&lower),
+    }
+}
+
+/// The inclusive char-index range of the link inside `token`, if it holds one.
+///
+/// The punctuation prose wraps a link in is trimmed off first, so
+/// `(https://example.com/a),` yields just the address. A closing bracket the
+/// link itself opened is kept: `…/Glob_(pattern)` ends with its own `)`.
+pub fn link_span(token: &str) -> Option<(usize, usize)> {
+    let chars: Vec<char> = token.chars().collect();
+    let mut lo = 0;
+    let mut hi = chars.len().checked_sub(1)?;
+    while lo < hi && is_link_opener(chars[lo]) {
+        lo += 1;
+    }
+    while hi > lo {
+        let here = chars[hi];
+        if is_link_trailer(here) {
+            hi -= 1;
+            continue;
+        }
+        match matching_opener(here) {
+            Some(open) if !chars[lo..hi].contains(&open) => hi -= 1,
+            _ => break,
+        }
+    }
+    let core: String = chars[lo..=hi].iter().collect();
+    is_link(&core).then_some((lo, hi))
 }
 
 /// Whether `c` is a closing character that stays attached to the end of a
@@ -801,6 +985,18 @@ mod tests {
     }
 
     #[test]
+    fn continuing_punctuation_before_the_capital_does_not() {
+        // "(e.g., Smith 2020)" — the comma says the text runs on, whatever the
+        // capital after it suggests.
+        assert!(!opens_a_sentence(", Smith 2020)"));
+        assert!(!opens_a_sentence("; Then again"));
+        assert!(!opens_a_sentence(": Then again"));
+        // It has to come first: a capital reached before any such mark still
+        // opens a sentence.
+        assert!(opens_a_sentence(" Then again, more"));
+    }
+
+    #[test]
     fn a_separator_between_digits_is_inside_a_number() {
         assert!(is_inside_number(Some('3'), '.', Some('1')));
         assert!(is_inside_number(Some('1'), ',', Some('2')));
@@ -816,6 +1012,152 @@ mod tests {
         // Only a decimal point or a grouping comma joins digits.
         assert!(!is_inside_number(Some('3'), '-', Some('1')));
         assert!(!is_inside_number(Some('3'), '!', Some('1')));
+    }
+
+    /// The link `link_span` finds in `token`, for readable assertions.
+    fn link_of(token: &str) -> Option<String> {
+        let chars: Vec<char> = token.chars().collect();
+        link_span(token).map(|(lo, hi)| chars[lo..=hi].iter().collect())
+    }
+
+    #[test]
+    fn link_span_finds_a_url_inside_the_prose_around_it() {
+        assert_eq!(
+            link_of("https://example.com/a?x=1").as_deref(),
+            Some("https://example.com/a?x=1")
+        );
+        // Trailing sentence punctuation is not part of the address.
+        assert_eq!(
+            link_of("https://example.com.").as_deref(),
+            Some("https://example.com")
+        );
+        assert_eq!(
+            link_of("(https://example.com/a),").as_deref(),
+            Some("https://example.com/a")
+        );
+        // ...but a bracket the link itself opened is.
+        assert_eq!(
+            link_of("https://x.org/wiki/Glob_(pattern)").as_deref(),
+            Some("https://x.org/wiki/Glob_(pattern)")
+        );
+        // Scheme-only and host forms.
+        assert_eq!(
+            link_of("mailto:jane@example.com").as_deref(),
+            Some("mailto:jane@example.com")
+        );
+        assert_eq!(
+            link_of("www.example.com").as_deref(),
+            Some("www.example.com")
+        );
+        assert_eq!(
+            link_of("doi.org/10.1000/182").as_deref(),
+            Some("doi.org/10.1000/182")
+        );
+        assert_eq!(
+            link_of("jane.doe@example.com").as_deref(),
+            Some("jane.doe@example.com")
+        );
+    }
+
+    #[test]
+    fn link_span_leaves_ordinary_tokens_alone() {
+        // A slash between two words is not a path.
+        assert_eq!(link_of("and/or"), None);
+        assert_eq!(link_of("km/h"), None);
+        assert_eq!(link_of("TCP/IP"), None);
+        // A bare host is not recognised: extraction that drops a space makes
+        // ordinary prose look exactly like one.
+        assert_eq!(link_of("sentence.Next"), None);
+        assert_eq!(link_of("example.com"), None);
+        // Abbreviations and figures keep out of it.
+        assert_eq!(link_of("e.g."), None);
+        assert_eq!(link_of("1,234.56"), None);
+        assert_eq!(link_of("10.1000/182"), None);
+        // Nothing left after trimming.
+        assert_eq!(link_of("(),"), None);
+        assert_eq!(link_of(""), None);
+    }
+
+    #[test]
+    fn a_signed_exponent_needs_a_marker_and_a_digit_behind_it() {
+        // "2.3E+5" and "1.5e-10".
+        assert!(is_inside_scientific_exponent(
+            Some('3'),
+            Some('E'),
+            '+',
+            Some('5')
+        ));
+        assert!(is_inside_scientific_exponent(
+            Some('5'),
+            Some('e'),
+            '-',
+            Some('1')
+        ));
+        // The Unicode minus a typesetter may have used instead.
+        assert!(is_inside_scientific_exponent(
+            Some('5'),
+            Some('e'),
+            '\u{2212}',
+            Some('1')
+        ));
+        // "cache+1": an identifier that merely ends in `e`.
+        assert!(!is_inside_scientific_exponent(
+            Some('h'),
+            Some('e'),
+            '+',
+            Some('1')
+        ));
+        // "3.5+1": no exponent marker at all.
+        assert!(!is_inside_scientific_exponent(
+            Some('.'),
+            Some('5'),
+            '+',
+            Some('1')
+        ));
+        // "2.3E+x": the exponent has to be a figure.
+        assert!(!is_inside_scientific_exponent(
+            Some('3'),
+            Some('E'),
+            '+',
+            Some('x')
+        ));
+    }
+
+    #[test]
+    fn a_proportion_sign_after_a_digit_belongs_to_the_number() {
+        assert!(is_attached_number_suffix(Some('5'), '%'));
+        assert!(is_attached_number_suffix(Some('0'), '‰'));
+        // "the % sign" and "45.5 %": nothing to attach to.
+        assert!(!is_attached_number_suffix(Some(' '), '%'));
+        assert!(!is_attached_number_suffix(None, '%'));
+        // A unit is not a suffix of this kind.
+        assert!(!is_attached_number_suffix(Some('5'), '°'));
+    }
+
+    #[test]
+    fn a_hyphen_between_word_characters_is_inside_a_compound() {
+        assert!(is_inside_hyphenated_word(Some('l'), '-', Some('k')));
+        // Letters and digits both count: "COVID-19", "3-D".
+        assert!(is_inside_hyphenated_word(Some('D'), '-', Some('1')));
+        assert!(is_inside_hyphenated_word(Some('3'), '-', Some('D')));
+        // The typographic hyphens join too, including the soft one a PDF can
+        // carry where a word was set to break.
+        assert!(is_inside_hyphenated_word(Some('l'), '\u{2010}', Some('k')));
+        assert!(is_inside_hyphenated_word(Some('l'), '\u{2011}', Some('k')));
+        assert!(is_inside_hyphenated_word(Some('l'), '\u{00ad}', Some('k')));
+    }
+
+    #[test]
+    fn a_hyphen_without_word_characters_on_both_sides_is_not() {
+        // "one - two" and "well- known": a dash standing on its own.
+        assert!(!is_inside_hyphenated_word(Some(' '), '-', Some('t')));
+        assert!(!is_inside_hyphenated_word(Some('l'), '-', Some(' ')));
+        assert!(!is_inside_hyphenated_word(Some('l'), '-', None));
+        // "one--two": neither hyphen has a word character on both sides.
+        assert!(!is_inside_hyphenated_word(Some('e'), '-', Some('-')));
+        // Dashes punctuate rather than join, however tightly they are set.
+        assert!(!is_inside_hyphenated_word(Some('e'), '\u{2013}', Some('t')));
+        assert!(!is_inside_hyphenated_word(Some('e'), '\u{2014}', Some('t')));
     }
 
     #[test]

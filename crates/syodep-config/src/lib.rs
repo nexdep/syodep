@@ -115,6 +115,10 @@ pub struct ViewConfig {
     /// Detect headings so each is a single step at sentence and paragraph
     /// scope. Costs nothing extra to extract, but relies on a heuristic.
     pub detect_headings: bool,
+    /// Detect display equations so each is a single step at sentence and
+    /// paragraph scope, while staying walkable by word and character. Costs
+    /// nothing extra to extract, but relies on a heuristic.
+    pub detect_equations: bool,
     /// Drop running headers, page numbers and text that does not run in the
     /// page's reading direction, so the caret never traverses them.
     pub skip_page_furniture: bool,
@@ -130,12 +134,17 @@ impl Default for ViewConfig {
             fit_width_on_open: true,
             zoom_step: 1.1,
             background: "#1e1e1e".to_owned(),
-            focus_color: "#add8e6".to_owned(),
-            focus_opacity: 0.4,
-            visual_color: "#d3d3d3".to_owned(),
-            visual_opacity: 0.4,
+            // Mid-tone colours at a little over half opacity: over a white
+            // page these blend to roughly #a5c8e8 and #bfbfbf, which read as a
+            // highlight across the room without washing out the black text
+            // sitting on them.
+            focus_color: "#5b9bd5".to_owned(),
+            focus_opacity: 0.55,
+            visual_color: "#8a8a8a".to_owned(),
+            visual_opacity: 0.55,
             detect_tables: true,
             detect_headings: true,
+            detect_equations: true,
             skip_page_furniture: true,
         }
     }
@@ -474,6 +483,13 @@ pub fn default_config_doc() -> String {
     );
     let _ = writeln!(out, "detect_headings = {}", view.detect_headings);
     out.push_str(
+        "# Treat each display equation as one step at sentence and paragraph\n\
+         # scope, so a formula is not glued to the sentence before it and a stop\n\
+         # inside it does not split it. Word and char scope still walk through\n\
+         # one. Maths written inline in a sentence is left alone.\n",
+    );
+    let _ = writeln!(out, "detect_equations = {}", view.detect_equations);
+    out.push_str(
         "# Skip page furniture when moving: running headers, page numbers, and\n\
          # text that does not run in the page's reading direction, such as a\n\
          # sideways margin stamp or an inclined watermark. Headers and footers\n\
@@ -597,8 +613,8 @@ mod tests {
         assert_eq!(config.view.focus_color, "#112233");
         assert_eq!(config.view.visual_opacity, 0.75);
         // Untouched colour options keep their defaults.
-        assert_eq!(config.view.visual_color, "#d3d3d3");
-        assert_eq!(config.view.focus_opacity, 0.4);
+        assert_eq!(config.view.visual_color, "#8a8a8a");
+        assert_eq!(config.view.focus_opacity, 0.55);
         assert_eq!(config.view.background, "#1e1e1e");
     }
 

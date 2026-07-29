@@ -268,14 +268,14 @@ pub unsafe extern "C" fn syo_app_new(
             "focus_color",
             &config.view.focus_color,
             config.view.focus_opacity,
-            "#add8e6",
+            "#5b9bd5",
         );
         warnings.extend(w);
         let (visual_color, w) = resolve_color(
             "visual_color",
             &config.view.visual_color,
             config.view.visual_opacity,
-            "#d3d3d3",
+            "#8a8a8a",
         );
         warnings.extend(w);
         let key_timeout_ms = config.input.timeout_ms;
@@ -1047,10 +1047,10 @@ mod tests {
         unsafe {
             let app = syo_app_new(c_config.as_ptr(), std::ptr::null());
             assert!(!app.is_null());
-            // Falls back to the built-in light blue rather than rendering
-            // nothing, and says so.
+            // Falls back to the built-in blue rather than rendering nothing,
+            // and says so.
             let focus = syo_app_focus_color(app);
-            assert_eq!((focus.r, focus.g, focus.b), (0xad, 0xd8, 0xe6));
+            assert_eq!((focus.r, focus.g, focus.b), (0x5b, 0x9b, 0xd5));
             // The fallback surfaces in the status line, like the open_dir
             // warning -- report_error feeds status_text, not startup_warnings
             // (which carries keymap errors).

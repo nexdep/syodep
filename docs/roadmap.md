@@ -53,12 +53,15 @@ them, and is the seam highlighting builds on. See the development log.
   treated as one stop by every scope above char, in focus and visual mode
 - ✅ Headings as sentence/paragraph units: detected from type size and weight,
   so a heading is one step for `s` and `p` while `w` still walks its words
+- ✅ Display equations as sentence/paragraph units: detected from math fonts and
+  math characters on a line set apart from the prose, so a formula is one step
+  for `s` and `p` while `w` and `h`/`l` still walk through it
 - ✅ Page furniture kept out of the caret's path: running heads and folios by
   cross-page repetition, sideways stamps and watermarks by baseline direction
 - ⬜ Text-object selection, highlighting, annotation (`viw`-style
   composability on top of the existing command/count system)
-- ⬜ Smart jump to references, figures, tables, equations (the table/image
-  primitive now exists in the content layer; the jump motion does not)
+- ⬜ Smart jump to references, figures, tables, equations (the table, image and
+  equation primitives now exist in the content layer; the jump motion does not)
 - ⬜ Overview popup for jump targets; candidate navigation for ambiguous
   targets
 - ⬜ Bibliography/reference detection

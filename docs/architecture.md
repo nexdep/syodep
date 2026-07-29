@@ -138,7 +138,14 @@ table. Trade-off: detection is a heuristic and costs a second pass (~2ms per
 page, cached), so `view.detect_tables` can switch it off. Boxes that claim
 every line on a page, or that map to a non-contiguous set of lines, are
 discarded rather than guessed at — degrading to line-by-line navigation is
-always safe, whereas a wrong atomic unit is a very visible navigation bug.
+always safe, whereas a wrong atomic unit is a very visible navigation bug. A
+box's *edges* are trimmed rather than trusted, because MuPDF reports the ruled
+region and it reaches past the last row: an edge line the box only clips, or one
+set apart from the table's own row rhythm, is the prose beside the table and not
+part of it. The stored box is then held back from the lines above and below, so
+a table's highlight can never tint a line the caret can reach — like a heading's
+box (the union of its lines) and an image's, it is bounded by the page's own
+content.
 
 **Decision — page furniture is removed from the content layer, not skipped by
 motion:** running heads, folios and text that does not run in the page's
@@ -165,18 +172,22 @@ content need, so `Document` keeps no interior mutability and merely reading a
 document never pays for it.
 
 **Decision — regions form a chain of decreasing coarseness:** every
-`ContentObject` bounds a sentence, which is what being a region means; the two
+`ContentObject` bounds a sentence, which is what being a region means; three
 predicates on `ObjectKind` say how much further each kind goes. A table or an
-image `is_atomic()` — one stop at every scope above char. A heading is not
-atomic but `splits_paragraphs()`, so it is one step for `s` and `p` while `w`
-walks its words. A list item is neither: one step for `s` only, because a list
-is a single paragraph made of many items. Adding a kind means answering those
-two questions rather than threading a new mechanism through the motion code —
-which is exactly what list items did before they became regions, and what
-removing that mechanism bought back.
+image `is_atomic()` — one stop at every scope above char. A heading and an
+equation are not atomic but `splits_paragraphs()`, so each is one step for `s`
+and `p` while `w` walks inside it, and both `is_one_sentence()` — every
+terminator inside them is inert, which is what keeps `2.12.` and `f(x) = 0.`
+from splitting. A list item is none of the three: one step for `s` only, because
+a list is a single paragraph made of many items, and its sentences are worth
+walking. Adding a kind means answering those three questions rather than
+threading a new mechanism through the motion code — which is exactly what list
+items did before they became regions, and what removing that mechanism bought
+back. `Equation` is the proof: a whole feature that added a detector and
+answered the three questions, with no motion code touched.
 
 **Decision — a heading is a *region*, not an atomic object:** `ObjectKind`
-carries `is_atomic()`, false only for `Heading`. Motion and highlighting go
+carries `is_atomic()`, false for the prose kinds. Motion and highlighting go
 through the atomic accessors, so a heading keeps its words individually
 reachable; sentence runs and paragraph splitting go through the region
 accessors, which include headings, and that alone makes a heading one step at
@@ -188,6 +199,18 @@ pass that extracts the text. MuPDF's own heading detection
 (`FZ_STEXT_PARAGRAPH_BREAK`) is unusable here for the same reason as its table
 grids — it hides the text inside structure nodes the bindings cannot walk — and
 it keys on bold alone, missing size, the stronger signal.
+
+**Decision — display equations are found from fonts *and* characters, and only
+when set apart:** a line is an equation when it does not fill the column, reads
+as mathematics, carries an operator, and carries almost no words. Two math
+signals, because either can be missing: TeX gives its fonts away by name
+(`CMMI10`, `MSBM10`, `XITSMath-Regular`, and MuPDF passes the PDF's own font name
+through every load path), while a PDF whose fonts are unrecognisable still gives
+away its operators and Greek in the characters. The set-apart test is what keeps
+inline maths out, and inline maths must stay out: a region splits the sentence
+around it, so making a formula inside a sentence a unit would break the sentence
+carrying it. Cost is nothing extra — both signals come from the extraction pass,
+as headings' do.
 
 **Decision — use `mupdf-rs` instead of hand-rolled bindgen FFI:** building
 MuPDF from vendored source via cargo gives reproducible Linux+Windows

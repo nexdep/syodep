@@ -120,17 +120,28 @@ pub enum ObjectKind {
     Table,
     Heading,
     ListItem,
+    Equation,
 }
 
 impl ObjectKind {
     /// Whether this is a single stop at *every* scope above char.
     ///
     /// Tables and images are: there is nothing useful inside them to move
-    /// through word by word. A heading or a list item is not — both are
-    /// ordinary prose you may well want to select a word of, so they are units
+    /// through word by word. A heading, a list item or an equation is not —
+    /// each is text you may well want to select a part of, so they are units
     /// only for the scopes that group text into runs.
     pub fn is_atomic(self) -> bool {
-        !matches!(self, Self::Heading | Self::ListItem)
+        !matches!(self, Self::Heading | Self::ListItem | Self::Equation)
+    }
+
+    /// Whether every sentence terminator inside this is inert, making the whole
+    /// of it one sentence.
+    ///
+    /// A heading needs it because `3.1. Methods` is not three sentences, and an
+    /// equation because `f(x) = 0.` is not two. Prose kinds do not: a list item
+    /// is walked sentence by sentence on purpose.
+    pub fn is_one_sentence(self) -> bool {
+        matches!(self, Self::Heading | Self::Equation)
     }
 
     /// Whether this stands alone as a paragraph.
@@ -197,6 +208,10 @@ pub struct ContentOptions {
     /// Detect headings so each is one sentence and one paragraph. Free: the
     /// type sizes it keys on come from the pass that extracts the text.
     pub detect_headings: bool,
+    /// Detect display equations so each is one sentence and one paragraph, while
+    /// staying walkable by word and character. Free, like headings: the fonts
+    /// and characters it keys on come from the extraction pass.
+    pub detect_equations: bool,
     /// Drop running heads, folios and text that does not run in the page's
     /// reading direction, so the caret never traverses them.
     pub skip_page_furniture: bool,
@@ -207,6 +222,7 @@ impl Default for ContentOptions {
         Self {
             detect_tables: true,
             detect_headings: true,
+            detect_equations: true,
             skip_page_furniture: true,
         }
     }
@@ -222,6 +238,8 @@ struct LineStyle {
     size: f32,
     /// Whether the line is essentially all bold.
     bold: bool,
+    /// Share of the line's inked characters set in a math font, 0.0 to 1.0.
+    math: f32,
     /// Angle of the line's baseline in degrees, or `None` when its characters
     /// disagree or carry no usable direction.
     angle: Option<f32>,
@@ -489,6 +507,7 @@ impl Document {
                 styles.push(LineStyle {
                     size: 0.0,
                     bold: false,
+                    math: 0.0,
                     // An image has no direction and no text, so it can never be
                     // furniture: a logo inside a running header survives as an
                     // image stop. Deliberately conservative.
@@ -502,7 +521,10 @@ impl Document {
                 let mut sizes: Vec<(i32, usize)> = Vec::new();
                 let mut dirs: Vec<(f32, f32)> = Vec::new();
                 let mut origins: Vec<f32> = Vec::new();
-                let (mut bold, mut inked) = (0usize, 0usize);
+                let (mut bold, mut inked, mut math) = (0usize, 0usize, 0usize);
+                // Glyphs come in font runs, so remembering the last verdict
+                // turns the name test into one string compare per character.
+                let mut last_font: Option<(String, bool)> = None;
                 for ch in line.chars() {
                     let Some(c) = ch.char() else { continue };
                     let quad = ch.quad();
@@ -538,6 +560,20 @@ impl Document {
                     if ch.flags().contains(TextCharFlags::BOLD) {
                         bold += 1;
                     }
+                    if let Some(font) = ch.font() {
+                        let name = font.name();
+                        let is_math = match &last_font {
+                            Some((seen, verdict)) if seen == name => *verdict,
+                            _ => {
+                                let verdict = is_math_font(name);
+                                last_font = Some((name.to_owned(), verdict));
+                                verdict
+                            }
+                        };
+                        if is_math {
+                            math += 1;
+                        }
+                    }
                 }
                 if cells.is_empty() {
                     continue;
@@ -556,6 +592,11 @@ impl Document {
                 styles.push(LineStyle {
                     size,
                     bold: inked > 0 && bold * 5 >= inked * 4,
+                    math: if inked > 0 {
+                        math as f32 / inked as f32
+                    } else {
+                        0.0
+                    },
                     angle: line_angle(&dirs),
                     baseline,
                 });
@@ -600,8 +641,20 @@ impl Document {
         } else {
             Vec::new()
         };
+        let equations = if opts.detect_equations {
+            equation_ranges(&lines, &styles)
+        } else {
+            Vec::new()
+        };
 
-        let objects = content_objects(&lines, &image_lines, &tables, &headings, &furniture);
+        let objects = content_objects(
+            &lines,
+            &image_lines,
+            &tables,
+            &headings,
+            &equations,
+            &furniture,
+        );
         Ok(PageContent {
             lines,
             objects,
@@ -1254,6 +1307,360 @@ fn heading_ranges(lines: &[ContentLine], styles: &[LineStyle]) -> Vec<(usize, us
     ranges
 }
 
+/// Fonts whose names say "this is mathematics". Matched as lower-case
+/// substrings, which covers TeX's families (`CMMI10`, `CMSY7`, `CMEX10`,
+/// `MSBM10`), the Unicode math fonts (`XITSMath-Regular`, `CambriaMath`,
+/// `LMMath-Italic10`, `Asana-Math`), base-14 `Symbol`, and the subset prefixes
+/// PDFs carry (`ABCDEF+CMMI10`) all in one rule.
+const MATH_FONT_MARKS: &[&str] = &[
+    "cmmi", "cmsy", "cmex", "cmmib", "msam", "msbm", "rsfs", "eufm", "stix", "xits", "symbol",
+    "math",
+];
+
+/// Whether a font name reads as a math font.
+fn is_math_font(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    MATH_FONT_MARKS.iter().any(|mark| lower.contains(mark))
+}
+
+/// Whether `c` is a mathematical operator or relation — the mark that makes a
+/// line a *statement* rather than a label.
+fn is_math_operator(c: char) -> bool {
+    matches!(
+        c,
+        '=' | '+'
+            | '<'
+            | '>'
+            | '±'
+            | '∓'
+            | '×'
+            | '÷'
+            | '−'
+            | '≠'
+            | '≈'
+            | '≃'
+            | '≅'
+            | '≡'
+            | '≤'
+            | '≥'
+            | '≪'
+            | '≫'
+            | '∝'
+            | '∑'
+            | '∏'
+            | '∫'
+            | '∮'
+            | '√'
+            | '∂'
+            | '∇'
+            | '∈'
+            | '∉'
+            | '⊂'
+            | '⊆'
+            | '⊃'
+            | '⊇'
+            | '∪'
+            | '∩'
+            | '∀'
+            | '∃'
+            | '∧'
+            | '∨'
+            | '¬'
+            | '→'
+            | '←'
+            | '↔'
+            | '↦'
+            | '⇒'
+            | '⇔'
+            | '∞'
+    )
+}
+
+/// Whether `c` is a character that belongs to mathematics rather than to prose:
+/// an operator, or a Greek letter.
+///
+/// Greek counts but does not stand alone — see [`is_math_operator`] — so a
+/// centred Greek word is not mistaken for an equation.
+fn is_math_symbol(c: char) -> bool {
+    is_math_operator(c)
+        || matches!(c, '\u{0370}'..='\u{03ff}' | '\u{1d400}'..='\u{1d7ff}' | '·' | '⋅' | '∼')
+}
+
+/// Share of a line's inked characters that must be math symbols for the line to
+/// read as mathematics on its characters alone. Low, because an equation is
+/// mostly variables and digits with a sprinkling of operators between them.
+const EQUATION_SYMBOL_SHARE: f32 = 0.15;
+
+/// Share of a line's inked characters that must be set in a math font for the
+/// line to read as mathematics on its fonts alone.
+const EQUATION_MATH_FONT_SHARE: f32 = 0.4;
+
+/// How many ordinary words a display equation may carry. Display math routinely
+/// includes `where` or `for all`; a sentence carries many more.
+const EQUATION_MAX_WORDS: usize = 2;
+
+/// A line must be narrower than this share of the widest line on the page to
+/// count as set apart from the prose. This is what keeps a sentence containing
+/// inline math out: a prose line fills its measure, a display equation does not.
+const EQUATION_MAX_WIDTH_SHARE: f32 = 0.9;
+
+/// An equation may not run to more than this many lines. An aligned system is
+/// several lines; a dozen is a misdetection.
+const EQUATION_MAX_LINES: usize = 12;
+
+/// If more than this share of a page's lines read as equations, none of them do.
+/// Loose, because an appendix page legitimately is mostly display math — and the
+/// cost of the guard firing is only that the page navigates line by line.
+const EQUATION_MAX_SHARE: f32 = 0.6;
+
+/// Whether `text` is nothing but an equation number: `(12)`, `(3.4)`, `(A.1)`.
+///
+/// Journals set these against the right margin, where MuPDF sometimes reports
+/// them as a line of their own; absorbing one keeps it from becoming a stop
+/// between an equation and the prose after it.
+fn is_equation_number(text: &str) -> bool {
+    let body = text.trim();
+    let Some(inner) = body.strip_prefix('(').and_then(|b| b.strip_suffix(')')) else {
+        return false;
+    };
+    !inner.is_empty()
+        && inner
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '.' || c == '-')
+        && inner.chars().any(|c| c.is_numeric())
+}
+
+/// Find the display equations on a page, as inclusive `(start_line, end_line)`
+/// ranges.
+///
+/// Pure, like [`heading_ranges`], so every threshold is testable without MuPDF.
+///
+/// A line is a display equation when it is **set apart** from the prose (it does
+/// not fill the column), reads as mathematics — either by its fonts or by its
+/// characters — carries an operator or relation, and carries almost no ordinary
+/// words. All four together, because each alone has a common counter-example:
+/// prose sentences contain inline math, a centred label is set apart, and a
+/// citation line is full of punctuation.
+///
+/// Inline math is deliberately out of reach here: a formula inside a sentence
+/// would have to become a region to be found, and a region splits the sentence
+/// around it.
+fn equation_ranges(lines: &[ContentLine], styles: &[LineStyle]) -> Vec<(usize, usize)> {
+    let inked: Vec<usize> = (0..lines.len())
+        .filter(|&i| !lines[i].cells.is_empty() && styles.get(i).is_some_and(|s| s.size > 0.0))
+        .collect();
+    if inked.is_empty() {
+        return Vec::new();
+    }
+    let widest = inked
+        .iter()
+        .map(|&i| lines[i].bbox.x1 - lines[i].bbox.x0)
+        .fold(0.0_f32, f32::max);
+
+    let text_of = |i: usize| -> String {
+        lines[i]
+            .cells
+            .iter()
+            .filter_map(|cell| match cell.kind {
+                CellKind::Char(c) => Some(c),
+                CellKind::Image => None,
+            })
+            .collect()
+    };
+    let is_equation = |i: usize| {
+        let width = lines[i].bbox.x1 - lines[i].bbox.x0;
+        if width >= EQUATION_MAX_WIDTH_SHARE * widest {
+            return false;
+        }
+        let text = text_of(i);
+        let counted = text.chars().filter(|c| !c.is_whitespace()).count();
+        if counted == 0 {
+            return false;
+        }
+        let symbols = text.chars().filter(|&c| is_math_symbol(c)).count();
+        let math_by_font = styles[i].math >= EQUATION_MATH_FONT_SHARE;
+        let math_by_chars = symbols as f32 >= EQUATION_SYMBOL_SHARE * counted as f32;
+        if !(math_by_font || math_by_chars) {
+            return false;
+        }
+        if !text.chars().any(is_math_operator) {
+            return false;
+        }
+        // Words, as runs of three or more letters. Two letters would count `if`
+        // and every pair of adjacent variables.
+        let mut words = 0usize;
+        let mut run = 0usize;
+        for c in text.chars().chain(std::iter::once(' ')) {
+            if c.is_alphabetic() && !is_math_symbol(c) {
+                run += 1;
+            } else {
+                if run >= 3 {
+                    words += 1;
+                }
+                run = 0;
+            }
+        }
+        words <= EQUATION_MAX_WORDS
+    };
+
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    let mut flagged = 0usize;
+    for &i in &inked {
+        if !is_equation(i) {
+            continue;
+        }
+        flagged += 1;
+        match ranges.last_mut() {
+            // An aligned system is several lines of one equation.
+            Some(last) if last.1 + 1 == i => last.1 = i,
+            _ => ranges.push((i, i)),
+        }
+    }
+    if flagged == 0 {
+        return Vec::new();
+    }
+    // A number set on its own line belongs to the equation it sits against.
+    for range in &mut ranges {
+        if range.0 > 0 && is_equation_number(&text_of(range.0 - 1)) {
+            range.0 -= 1;
+        }
+        if range.1 + 1 < lines.len() && is_equation_number(&text_of(range.1 + 1)) {
+            range.1 += 1;
+        }
+    }
+
+    if flagged as f32 > EQUATION_MAX_SHARE * inked.len() as f32 {
+        return Vec::new();
+    }
+    ranges.retain(|&(start, end)| {
+        let lines_covered = end - start + 1;
+        lines_covered <= EQUATION_MAX_LINES
+    });
+    ranges
+}
+
+/// How much of a line's own height must fall inside a table box for the line to
+/// be one of that table's rows. A row's ascenders and descenders can poke a
+/// point or two past the outer rule; a line the box merely cuts through
+/// half-way is the prose beside the table.
+const TABLE_MEMBER_OVERLAP: f32 = 0.7;
+
+/// How much wider than the table's own median row gap a gap must be for the
+/// line beyond it to be set apart from the grid — a caption, or the prose after
+/// it. Measured against the table's own rhythm rather than against line height,
+/// so a table with generously padded rows keeps all of them.
+const TABLE_GAP_FACTOR: f32 = 1.8;
+
+/// Drop the lines at the edges of `members` that belong to the prose around the
+/// table rather than to the table itself.
+///
+/// MuPDF's box is the *ruled region* it found, which reaches past the last row
+/// of text; when it reaches past the centre of the next line, centre
+/// containment hands that line to the table. Both tests below are applied at
+/// the edges only: a box cannot clip an interior line, and an interior gap is a
+/// real part of the grid.
+///
+/// Trimming can only shrink a table, and one shrunk below two lines falls to
+/// the caller's existing guard — degrading to line-by-line navigation, which is
+/// always the safe direction.
+fn trim_table_edges(lines: &[ContentLine], table: Rect, mut members: Vec<usize>) -> Vec<usize> {
+    let inside_fraction = |i: usize| {
+        let b = lines[i].bbox;
+        let height = b.y1 - b.y0;
+        if height <= 0.0 {
+            return 1.0;
+        }
+        (b.y1.min(table.y1) - b.y0.max(table.y0)).max(0.0) / height
+    };
+    while members
+        .first()
+        .is_some_and(|&i| inside_fraction(i) < TABLE_MEMBER_OVERLAP)
+    {
+        members.remove(0);
+    }
+    while members
+        .last()
+        .is_some_and(|&i| inside_fraction(i) < TABLE_MEMBER_OVERLAP)
+    {
+        members.pop();
+    }
+    // A line the box covers entirely can still be a caption: what marks it as
+    // separate is the gap above it, wider than the table's own rhythm. Needs
+    // three members to have a rhythm to compare against.
+    while members.len() >= 3 {
+        let gaps: Vec<f32> = members
+            .windows(2)
+            .map(|w| (lines[w[1]].bbox.y0 - lines[w[0]].bbox.y1).max(0.0))
+            .collect();
+        let mut sorted = gaps.clone();
+        sorted.sort_by(f32::total_cmp);
+        let median = sorted[sorted.len() / 2];
+        if median <= 0.0 {
+            break;
+        }
+        let threshold = TABLE_GAP_FACTOR * median;
+        if gaps[gaps.len() - 1] > threshold {
+            members.pop();
+        } else if gaps[0] > threshold {
+            members.remove(0);
+        } else {
+            break;
+        }
+    }
+    members
+}
+
+/// The box to paint for a table: MuPDF's rectangle, extended to the rows it
+/// contains and then held back so it never reaches a line outside the table.
+///
+/// The rectangle is worth keeping — painting a table row by row leaves its
+/// rules and empty cells unpainted, which reads as a broken highlight — but on
+/// its own it is the one object geometry not derived from the page's own lines,
+/// and an overhang tints the prose next to the table. Clamping is vertical
+/// because that is where the neighbours are; a box too wide is already covered
+/// by the caller's "claims the page" guard.
+fn table_bbox(lines: &[ContentLine], table: Rect, first: usize, last: usize) -> Rect {
+    let text = (first..=last)
+        .map(|i| lines[i].bbox)
+        .reduce(|a, b| a.union(b))
+        .unwrap_or(table);
+    let above = lines[..first]
+        .iter()
+        .rev()
+        .find(|l| !l.cells.is_empty())
+        .map(|l| l.bbox.y1);
+    let below = lines
+        .iter()
+        .skip(last + 1)
+        .find(|l| !l.cells.is_empty())
+        .map(|l| l.bbox.y0);
+    // Cover the rectangle and the rows' text, then let the neighbours cut it
+    // back. The neighbour wins on purpose: line boxes include ascenders and
+    // descenders and so can overlap each other by a point, and stopping a
+    // point short of a descender is invisible where tinting the line below is
+    // exactly the reported bug.
+    let mut y0 = table.y0.min(text.y0);
+    let mut y1 = table.y1.max(text.y1);
+    if let Some(above) = above {
+        y0 = y0.max(above);
+    }
+    if let Some(below) = below {
+        y1 = y1.min(below);
+    }
+    // A page whose lines overlap their neighbours outright can invert the pair,
+    // and no box satisfies both edges there; fall back to the rows' own extent.
+    if y0 >= y1 {
+        y0 = text.y0;
+        y1 = text.y1;
+    }
+    Rect {
+        x0: table.x0.min(text.x0),
+        y0,
+        x1: table.x1.max(text.x1),
+        y1,
+    }
+}
+
 /// Turn detected table boxes and image lines into the page's atomic objects.
 ///
 /// Pure so that every heuristic below is unit-testable without MuPDF — which
@@ -1264,6 +1671,7 @@ fn content_objects(
     image_lines: &[usize],
     tables: &[Rect],
     headings: &[(usize, usize)],
+    equations: &[(usize, usize)],
     furniture: &[ContentLine],
 ) -> Vec<ContentObject> {
     // The "claims the whole page" guards below must be judged against the
@@ -1286,6 +1694,7 @@ fn content_objects(
             .filter(|(_, l)| table.contains_center_of(l.bbox))
             .map(|(i, _)| i)
             .collect();
+        let members = trim_table_edges(lines, *table, members);
         let (Some(&first), Some(&last)) = (members.first(), members.last()) else {
             continue;
         };
@@ -1300,7 +1709,7 @@ fn content_objects(
         }
         objects.push(ContentObject {
             kind: ObjectKind::Table,
-            bbox: *table,
+            bbox: table_bbox(lines, *table, first, last),
             start_line: first,
             end_line: last,
         });
@@ -1349,6 +1758,30 @@ fn content_objects(
             .unwrap_or(lines[start].bbox);
         kept.push(ContentObject {
             kind: ObjectKind::Heading,
+            bbox,
+            start_line: start,
+            end_line: end,
+        });
+    }
+
+    // Equations yield in turn: a formula inside a table cell is a table row, and
+    // a line both detectors like stays whichever came first — harmless, because
+    // a heading and an equation navigate identically.
+    for &(start, end) in equations {
+        if end >= lines.len()
+            || kept
+                .iter()
+                .any(|o| start <= o.end_line && end >= o.start_line)
+        {
+            continue;
+        }
+        let bbox = lines[start..=end]
+            .iter()
+            .map(|l| l.bbox)
+            .reduce(|a, b| a.union(b))
+            .unwrap_or(lines[start].bbox);
+        kept.push(ContentObject {
+            kind: ObjectKind::Equation,
             bbox,
             start_line: start,
             end_line: end,
@@ -1629,16 +2062,134 @@ mod tests {
     #[test]
     fn object_ranges_cover_the_lines_inside_a_table_box() {
         let lines = stacked_lines(10);
-        let objects = content_objects(&lines, &[], &[box_over(&lines, 3..=6)], &[], &[]);
+        let objects = content_objects(&lines, &[], &[box_over(&lines, 3..=6)], &[], &[], &[]);
         assert_eq!(objects.len(), 1);
         assert_eq!(objects[0].kind, ObjectKind::Table);
         assert_eq!((objects[0].start_line, objects[0].end_line), (3, 6));
     }
 
     #[test]
+    fn object_ranges_stop_at_a_line_the_box_only_clips() {
+        // MuPDF's box is the ruled region, which reaches past the last row. A
+        // box overhanging the next line's centre must not claim that line: it
+        // is the prose under the table, and claiming it makes the caret skip
+        // over it.
+        let lines = stacked_lines(10);
+        let mut table = box_over(&lines, 3..=6);
+        // Line 7 is 10pt tall; reach just past its centre, which is what makes
+        // centre containment hand it over.
+        table.y1 = lines[7].bbox.y0 + 6.0;
+        let objects = content_objects(&lines, &[], &[table], &[], &[], &[]);
+        assert_eq!(objects.len(), 1, "objects: {objects:?}");
+        assert_eq!((objects[0].start_line, objects[0].end_line), (3, 6));
+        assert!(
+            objects[0].bbox.y1 <= lines[7].bbox.y0,
+            "the box still reaches line 7: {:?}",
+            objects[0].bbox
+        );
+    }
+
+    #[test]
+    fn object_ranges_stop_at_a_line_set_apart_from_the_grid() {
+        // Here the box covers the caption completely, so the overlap test says
+        // nothing: what marks it as separate is the gap, wider than the
+        // table's own rhythm.
+        let mut lines = stacked_lines(8);
+        // Push line 7 down, as a caption set below the last rule.
+        let shift = 30.0;
+        lines[7].bbox.y0 += shift;
+        lines[7].bbox.y1 += shift;
+        lines[7].cells[0].bbox = lines[7].bbox;
+        let table = box_over(&lines, 3..=7);
+        let objects = content_objects(&lines, &[], &[table], &[], &[], &[]);
+        assert_eq!(objects.len(), 1, "objects: {objects:?}");
+        assert_eq!((objects[0].start_line, objects[0].end_line), (3, 6));
+        assert!(
+            objects[0].bbox.y1 <= lines[7].bbox.y0,
+            "the box still reaches the caption: {:?}",
+            objects[0].bbox
+        );
+    }
+
+    #[test]
+    fn object_ranges_keep_every_row_of_a_generously_spaced_table() {
+        // The rhythm test compares against the table's *own* median gap, not
+        // against line height: `pdf_with_table` sets 10pt text on 28pt rows, and
+        // a line-height comparison would eat the first and last row of it.
+        let lines: Vec<ContentLine> = (0..5)
+            .map(|i| {
+                let y = 100.0 + i as f32 * 28.0;
+                let bbox = Rect {
+                    x0: 100.0,
+                    y0: y,
+                    x1: 200.0,
+                    y1: y + 10.0,
+                };
+                ContentLine {
+                    bbox,
+                    cells: vec![Cell {
+                        kind: CellKind::Char('x'),
+                        bbox,
+                    }],
+                }
+            })
+            .collect();
+        let objects = content_objects(&lines, &[], &[box_over(&lines, 0..=4)], &[], &[], &[]);
+        // The page is only the table here, so the "claims everything" guard
+        // would fire; give it a sixth line of prose well clear of the box.
+        assert_eq!(objects, vec![], "sanity: the page-claiming guard fires");
+
+        let mut with_prose = lines.clone();
+        let y = 100.0 + 6.0 * 28.0;
+        let bbox = Rect {
+            x0: 100.0,
+            y0: y,
+            x1: 200.0,
+            y1: y + 10.0,
+        };
+        with_prose.push(ContentLine {
+            bbox,
+            cells: vec![Cell {
+                kind: CellKind::Char('x'),
+                bbox,
+            }],
+        });
+        let objects = content_objects(&with_prose, &[], &[box_over(&lines, 0..=4)], &[], &[], &[]);
+        assert_eq!(objects.len(), 1, "objects: {objects:?}");
+        assert_eq!((objects[0].start_line, objects[0].end_line), (0, 4));
+    }
+
+    #[test]
+    fn object_ranges_trim_a_clipped_first_line_too() {
+        let lines = stacked_lines(10);
+        let mut table = box_over(&lines, 3..=6);
+        // Reach back over line 2, just past its centre.
+        table.y0 = lines[2].bbox.y1 - 6.0;
+        let objects = content_objects(&lines, &[], &[table], &[], &[], &[]);
+        assert_eq!(objects.len(), 1, "objects: {objects:?}");
+        assert_eq!((objects[0].start_line, objects[0].end_line), (3, 6));
+        assert!(
+            objects[0].bbox.y0 >= lines[2].bbox.y1,
+            "the box still reaches line 2: {:?}",
+            objects[0].bbox
+        );
+    }
+
+    #[test]
+    fn object_ranges_discard_a_table_trimmed_below_two_lines() {
+        // Trimming can only shrink a table, and a shrunken one falls to the
+        // existing guard rather than being reported as a one-line table.
+        let lines = stacked_lines(10);
+        let mut table = box_over(&lines, 4..=5);
+        table.y0 = lines[4].bbox.y0 + 7.0;
+        let objects = content_objects(&lines, &[], &[table], &[], &[], &[]);
+        assert_eq!(objects, vec![]);
+    }
+
+    #[test]
     fn object_ranges_reject_a_single_line_table() {
         let lines = stacked_lines(10);
-        let objects = content_objects(&lines, &[], &[box_over(&lines, 4..=4)], &[], &[]);
+        let objects = content_objects(&lines, &[], &[box_over(&lines, 4..=4)], &[], &[], &[]);
         assert_eq!(objects, vec![], "a one-line table is just a line");
     }
 
@@ -1647,7 +2198,7 @@ mod tests {
         // MuPDF's whole-page fallback fires on ordinary prose; this guard is
         // the only thing standing between it and unnavigable pages.
         let lines = stacked_lines(10);
-        let objects = content_objects(&lines, &[], &[box_over(&lines, 0..=9)], &[], &[]);
+        let objects = content_objects(&lines, &[], &[box_over(&lines, 0..=9)], &[], &[], &[]);
         assert_eq!(objects, vec![]);
     }
 
@@ -1663,7 +2214,7 @@ mod tests {
             x1: 210.0,
             y1: 172.0,
         };
-        let objects = content_objects(&lines, &[], &[table], &[], &[]);
+        let objects = content_objects(&lines, &[], &[table], &[], &[], &[]);
         assert_eq!(objects, vec![], "a gapped table must degrade, not guess");
     }
 
@@ -1676,6 +2227,7 @@ mod tests {
             &[box_over(&lines, 2..=8), box_over(&lines, 4..=6)],
             &[],
             &[],
+            &[],
         );
         assert_eq!(objects.len(), 1);
         assert_eq!((objects[0].start_line, objects[0].end_line), (2, 8));
@@ -1684,7 +2236,7 @@ mod tests {
     #[test]
     fn object_ranges_make_each_image_its_own_object() {
         let lines = stacked_lines(6);
-        let objects = content_objects(&lines, &[1, 4], &[], &[], &[]);
+        let objects = content_objects(&lines, &[1, 4], &[], &[], &[], &[]);
         assert_eq!(objects.len(), 2);
         assert!(objects.iter().all(|o| o.kind == ObjectKind::Image));
         assert_eq!((objects[0].start_line, objects[0].end_line), (1, 1));
@@ -1694,7 +2246,7 @@ mod tests {
     #[test]
     fn object_ranges_absorb_an_image_inside_a_table() {
         let lines = stacked_lines(10);
-        let objects = content_objects(&lines, &[5], &[box_over(&lines, 3..=6)], &[], &[]);
+        let objects = content_objects(&lines, &[5], &[box_over(&lines, 3..=6)], &[], &[], &[]);
         assert_eq!(objects.len(), 1, "the table is the enclosing unit");
         assert_eq!(objects[0].kind, ObjectKind::Table);
     }
@@ -1707,6 +2259,7 @@ mod tests {
             &[0, 15],
             &[box_over(&lines, 8..=11), box_over(&lines, 3..=5)],
             &[(17, 18)],
+            &[],
             &[],
         );
         for pair in objects.windows(2) {
@@ -1749,6 +2302,7 @@ mod tests {
             styles.push(LineStyle {
                 size: 10.0,
                 bold: false,
+                math: 0.0,
                 angle: Some(0.0),
                 baseline: y + 8.0,
             });
@@ -1770,6 +2324,170 @@ mod tests {
             ..styles[i]
         };
         lines[i].bbox.x1 = lines[i].bbox.x0 + width;
+    }
+
+    /// Give line `i` real text at `width` points, with `math` of its glyphs set
+    /// in a math font. `body_lines` alone cannot express either.
+    fn set_text(
+        lines: &mut [ContentLine],
+        styles: &mut [LineStyle],
+        i: usize,
+        text: &str,
+        width: f32,
+        math: f32,
+    ) {
+        let y = lines[i].bbox.y0;
+        let step = width / text.chars().count().max(1) as f32;
+        let mut x = lines[i].bbox.x0;
+        lines[i].cells = text
+            .chars()
+            .map(|c| {
+                let cell = Cell {
+                    kind: CellKind::Char(c),
+                    bbox: Rect {
+                        x0: x,
+                        y0: y,
+                        x1: x + step,
+                        y1: y + 10.0,
+                    },
+                };
+                x += step;
+                cell
+            })
+            .collect();
+        lines[i].bbox.x1 = lines[i].bbox.x0 + width;
+        styles[i] = LineStyle { math, ..styles[i] };
+    }
+
+    #[test]
+    fn equation_ranges_flags_a_set_apart_formula() {
+        let (mut lines, mut styles) = body_lines(10, 400.0);
+        set_text(&mut lines, &mut styles, 4, "α + β = γ", 120.0, 0.0);
+        assert_eq!(equation_ranges(&lines, &styles), vec![(4, 4)]);
+    }
+
+    #[test]
+    fn equation_ranges_ignore_prose_carrying_inline_maths() {
+        // The guard that matters most: a sentence with a formula in it fills its
+        // measure, and making it a region would split the sentence around it.
+        let (mut lines, mut styles) = body_lines(10, 400.0);
+        set_text(
+            &mut lines,
+            &mut styles,
+            4,
+            "we set x = 1 and obtain the bound α + β for every sample in the set",
+            400.0,
+            0.2,
+        );
+        assert_eq!(equation_ranges(&lines, &styles), vec![]);
+    }
+
+    #[test]
+    fn equation_ranges_ignore_a_short_last_line_of_a_paragraph() {
+        // Short, so the width test passes — but it is prose, with words and no
+        // operator.
+        let (mut lines, mut styles) = body_lines(10, 400.0);
+        set_text(&mut lines, &mut styles, 4, "installed there.", 110.0, 0.0);
+        assert_eq!(equation_ranges(&lines, &styles), vec![]);
+    }
+
+    #[test]
+    fn equation_ranges_ignore_a_centred_label() {
+        // Greek is a math symbol, but with no operator this is a caption.
+        let (mut lines, mut styles) = body_lines(10, 400.0);
+        set_text(&mut lines, &mut styles, 4, "Table 3: σ values", 130.0, 0.0);
+        assert_eq!(equation_ranges(&lines, &styles), vec![]);
+    }
+
+    #[test]
+    fn equation_ranges_read_the_fonts_when_the_characters_are_plain() {
+        // "x1 + a2b3c4d5e6" is barely 1/15 operators, under the character
+        // threshold, so only the font share can carry it.
+        let (mut lines, mut styles) = body_lines(10, 400.0);
+        set_text(&mut lines, &mut styles, 4, "x1 + a2b3c4d5e6", 140.0, 1.0);
+        assert_eq!(equation_ranges(&lines, &styles), vec![(4, 4)]);
+
+        set_text(&mut lines, &mut styles, 4, "x1 + a2b3c4d5e6", 140.0, 0.0);
+        assert_eq!(
+            equation_ranges(&lines, &styles),
+            vec![],
+            "without the fonts there is nothing to go on"
+        );
+    }
+
+    #[test]
+    fn equation_ranges_merge_an_aligned_system() {
+        let (mut lines, mut styles) = body_lines(10, 400.0);
+        set_text(&mut lines, &mut styles, 3, "α + β = γ", 120.0, 0.0);
+        set_text(&mut lines, &mut styles, 4, "γ − δ ≤ ε", 120.0, 0.0);
+        assert_eq!(equation_ranges(&lines, &styles), vec![(3, 4)]);
+    }
+
+    #[test]
+    fn equation_ranges_absorb_an_equation_number_set_on_its_own_line() {
+        let (mut lines, mut styles) = body_lines(10, 400.0);
+        set_text(&mut lines, &mut styles, 4, "α + β = γ", 120.0, 0.0);
+        set_text(&mut lines, &mut styles, 5, "(3.4)", 40.0, 0.0);
+        assert_eq!(equation_ranges(&lines, &styles), vec![(4, 5)]);
+    }
+
+    #[test]
+    fn an_equation_number_is_a_bracketed_figure_and_nothing_else() {
+        assert!(is_equation_number("(12)"));
+        assert!(is_equation_number("(3.4)"));
+        assert!(is_equation_number(" (A.1) "));
+        assert!(!is_equation_number("(see below)"));
+        assert!(!is_equation_number("(a)"), "a list marker, not a number");
+        assert!(!is_equation_number("12"));
+        assert!(!is_equation_number("()"));
+    }
+
+    #[test]
+    fn equation_ranges_reject_a_page_that_is_mostly_equations() {
+        // Most lines reading as maths means the signal is wrong, not that the
+        // page is one long formula. Three full-width prose lines stay, so the
+        // width test still has a column to compare against and it is the share
+        // guard that fires.
+        let (mut lines, mut styles) = body_lines(10, 400.0);
+        for i in 0..7 {
+            set_text(&mut lines, &mut styles, i, "α + β = γ", 120.0, 0.0);
+        }
+        assert_eq!(equation_ranges(&lines, &styles), vec![]);
+
+        // One fewer, and the same page detects them.
+        let (mut lines, mut styles) = body_lines(10, 400.0);
+        for i in 0..6 {
+            set_text(&mut lines, &mut styles, i, "α + β = γ", 120.0, 0.0);
+        }
+        assert_eq!(equation_ranges(&lines, &styles), vec![(0, 5)]);
+    }
+
+    #[test]
+    fn equation_ranges_reject_a_run_too_long_to_be_a_system() {
+        let (mut lines, mut styles) = body_lines(30, 400.0);
+        for i in 5..=17 {
+            set_text(&mut lines, &mut styles, i, "α + β = γ", 120.0, 0.0);
+        }
+        assert_eq!(equation_ranges(&lines, &styles), vec![]);
+    }
+
+    #[test]
+    fn a_math_font_is_recognised_by_its_name() {
+        // The names real PDFs carry, subset prefixes included.
+        for name in [
+            "CMMI10",
+            "ABCDEF+CMSY7",
+            "CMEX10",
+            "MSBM10",
+            "XITSMath-Regular",
+            "CambriaMath",
+            "Symbol",
+        ] {
+            assert!(is_math_font(name), "{name}");
+        }
+        for name in ["Helvetica", "NimbusRomNo9L-Regu", "CMR10", "Times-Italic"] {
+            assert!(!is_math_font(name), "{name}");
+        }
     }
 
     #[test]
@@ -1853,7 +2571,7 @@ mod tests {
     fn object_ranges_drop_a_heading_that_overlaps_a_table() {
         // A bold, short line inside a table is a column header.
         let lines = stacked_lines(10);
-        let objects = content_objects(&lines, &[], &[box_over(&lines, 3..=6)], &[(4, 4)], &[]);
+        let objects = content_objects(&lines, &[], &[box_over(&lines, 3..=6)], &[(4, 4)], &[], &[]);
         assert_eq!(objects.len(), 1);
         assert_eq!(objects[0].kind, ObjectKind::Table);
     }
@@ -1861,7 +2579,7 @@ mod tests {
     #[test]
     fn object_ranges_keep_a_heading_outside_every_table() {
         let lines = stacked_lines(10);
-        let objects = content_objects(&lines, &[], &[box_over(&lines, 5..=8)], &[(1, 2)], &[]);
+        let objects = content_objects(&lines, &[], &[box_over(&lines, 5..=8)], &[(1, 2)], &[], &[]);
         assert_eq!(objects.len(), 2);
         assert_eq!(objects[0].kind, ObjectKind::Heading);
         assert_eq!((objects[0].start_line, objects[0].end_line), (1, 2));
@@ -1920,6 +2638,85 @@ mod tests {
             "prose reported as a heading: {:?}",
             content.objects
         );
+    }
+
+    #[test]
+    fn page_content_detects_a_display_equation() {
+        let doc = Document::from_bytes(&crate::test_support::pdf_with_equation()).unwrap();
+        let content = doc
+            .page_content(0, ContentOptions::default(), None)
+            .unwrap();
+        let text_of = |i: usize| -> String {
+            content.lines[i]
+                .cells
+                .iter()
+                .filter_map(|c| match c.kind {
+                    CellKind::Char(ch) => Some(ch),
+                    CellKind::Image => None,
+                })
+                .collect()
+        };
+        let equations: Vec<_> = content
+            .objects
+            .iter()
+            .filter(|o| o.kind == ObjectKind::Equation)
+            .collect();
+        assert_eq!(equations.len(), 1, "objects: {:?}", content.objects);
+        let equation = equations[0];
+        // The formula, and only the formula: `Symbol` encodes `a + b = g` as
+        // Greek, so this is what the caret sees.
+        assert_eq!(equation.start_line, equation.end_line, "prose swallowed");
+        let text = text_of(equation.start_line);
+        assert!(
+            text.contains('\u{3b1}') && text.contains('='),
+            "equation line reads {text:?}"
+        );
+        // The prose around it stays outside.
+        for i in 0..content.lines.len() {
+            if i == equation.start_line {
+                continue;
+            }
+            assert!(
+                !text_of(i).contains('\u{3b1}'),
+                "line {i} reads {:?}",
+                text_of(i)
+            );
+        }
+    }
+
+    #[test]
+    fn page_content_reports_no_equation_on_uniform_prose() {
+        let doc = three_page_doc();
+        let content = doc
+            .page_content(0, ContentOptions::default(), None)
+            .unwrap();
+        assert!(
+            !content
+                .objects
+                .iter()
+                .any(|o| o.kind == ObjectKind::Equation),
+            "prose reported as an equation: {:?}",
+            content.objects
+        );
+    }
+
+    #[test]
+    fn page_content_without_equation_detection_reports_none() {
+        let doc = Document::from_bytes(&crate::test_support::pdf_with_equation()).unwrap();
+        let content = doc
+            .page_content(
+                0,
+                ContentOptions {
+                    detect_equations: false,
+                    ..ContentOptions::default()
+                },
+                None,
+            )
+            .unwrap();
+        assert!(content
+            .objects
+            .iter()
+            .all(|o| o.kind != ObjectKind::Equation));
     }
 
     #[test]
@@ -2366,6 +3163,7 @@ mod tests {
             styles.push(LineStyle {
                 size: 10.0,
                 bold: false,
+                math: 0.0,
                 angle: Some(0.0),
                 baseline: y,
             });
@@ -2526,12 +3324,14 @@ mod tests {
             LineStyle {
                 size: 9.0,
                 bold: false,
+                math: 0.0,
                 angle: Some(0.0),
                 baseline: 42.0,
             },
             LineStyle {
                 size: 9.0,
                 bold: false,
+                math: 0.0,
                 angle: Some(0.0),
                 baseline: 800.0,
             },
@@ -2553,7 +3353,7 @@ mod tests {
         ];
         // Pretend line 0 was furniture: the image at old index 2 must land at 1.
         let kept: Vec<ContentLine> = lines[1..].to_vec();
-        let objects = content_objects(&kept, &[1], &[], &[], &lines[..1]);
+        let objects = content_objects(&kept, &[1], &[], &[], &[], &lines[..1]);
         let image = objects
             .iter()
             .find(|o| o.kind == ObjectKind::Image)
@@ -2569,7 +3369,7 @@ mod tests {
         let body: Vec<ContentLine> = all[..10].to_vec();
         let furniture: Vec<ContentLine> = all[10..].to_vec();
         let table = box_over(&body, 0..=9);
-        let objects = content_objects(&body, &[], &[table], &[], &furniture);
+        let objects = content_objects(&body, &[], &[table], &[], &[], &furniture);
         assert_eq!(
             objects
                 .iter()
@@ -2786,6 +3586,50 @@ mod tests {
         assert!(
             (0..content.lines.len()).any(|i| text_of(i).contains("Caption") && i > table.end_line),
             "caption swallowed by the table"
+        );
+    }
+
+    #[test]
+    fn page_content_leaves_a_caption_set_tight_under_a_table_outside_it() {
+        // The reported bug, reproduced against real MuPDF: at this gap its box
+        // reaches past the caption's centre, so centre containment handed the
+        // caption to the table — `s` skipped it and the highlight covered it.
+        // Measured before the fix: box y 141.65..282.35, caption y
+        // 275.25..288.99, and the table's range ran to the caption's line.
+        let doc =
+            Document::from_bytes(&crate::test_support::pdf_with_table_gap(4, 5, 4.0)).unwrap();
+        let content = doc
+            .page_content(0, ContentOptions::default(), None)
+            .unwrap();
+        let text_of = |i: usize| -> String {
+            content.lines[i]
+                .cells
+                .iter()
+                .filter_map(|c| match c.kind {
+                    CellKind::Char(ch) => Some(ch),
+                    CellKind::Image => None,
+                })
+                .collect()
+        };
+        let caption = (0..content.lines.len())
+            .find(|&i| text_of(i).contains("Caption"))
+            .expect("caption line");
+        let tables: Vec<_> = content
+            .objects
+            .iter()
+            .filter(|o| o.kind == ObjectKind::Table)
+            .collect();
+        assert_eq!(tables.len(), 1, "objects: {:?}", content.objects);
+        let table = tables[0];
+        assert!(
+            caption > table.end_line,
+            "caption (line {caption}) swallowed by the table {table:?}"
+        );
+        assert!(
+            table.bbox.y1 <= content.lines[caption].bbox.y0,
+            "the table's box reaches the caption: {:?} vs {:?}",
+            table.bbox,
+            content.lines[caption].bbox
         );
     }
 

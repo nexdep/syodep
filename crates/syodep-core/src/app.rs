@@ -22,11 +22,13 @@ use syodep_pdf::{
 use syodep_storage::{Position, Storage};
 
 use crate::caret::{
-    column_index_of, column_ranges, continues_word_run, is_abbreviation, is_inside_number,
-    is_numeric_separator, is_sentence_terminator, is_sentence_trailer, is_word_target,
-    nearest_cell_in_line, nearest_line_in_column, opens_a_sentence, paragraph_segments,
-    split_segments_at_objects, word_class, Caret, Dir, Landing, LineMark, Mode, ObjectId,
-    ParagraphMark, Scope, SentenceMark, VisualAnchor, VisualSelection, WordClass, WordMark,
+    column_index_of, column_ranges, continues_word_run, is_abbreviation, is_attached_number_suffix,
+    is_exponent_sign, is_inside_hyphenated_word, is_inside_number, is_inside_scientific_exponent,
+    is_number_suffix, is_numeric_separator, is_sentence_terminator, is_sentence_trailer,
+    is_word_hyphen, is_word_target, link_span, nearest_cell_in_line, nearest_line_in_column,
+    opens_a_sentence, paragraph_segments, split_segments_at_objects, word_class, Caret, Dir,
+    Landing, LineMark, Mode, ObjectId, ParagraphMark, Scope, SentenceMark, VisualAnchor,
+    VisualSelection, WordClass, WordMark,
 };
 use crate::command::Command;
 use crate::input::{InputState, KeyOutcome, Keymap, KeymapError};
@@ -649,6 +651,7 @@ impl App {
         let opts = ContentOptions {
             detect_tables: self.config.view.detect_tables,
             detect_headings: self.config.view.detect_headings,
+            detect_equations: self.config.view.detect_equations,
             skip_page_furniture: self.config.view.skip_page_furniture,
         };
         let content = session
@@ -909,19 +912,46 @@ impl App {
 
     fn same_word_run(&mut self, left: Caret, right: Caret) -> bool {
         let same_line = left.page == right.page && left.line == right.line;
+        // A link is one word: `https://example.com/a?x=1` is a single stop, not
+        // a dozen. Checked first because it is the most specific rule, and its
+        // span is a hard edge in both directions, so the bracket before it and
+        // the stop after it keep their own stops.
+        if same_line {
+            if let Some(span) = self.link_at(left) {
+                let within = |c: Caret| c.cell >= span.0 && c.cell <= span.1;
+                if within(left) || within(right) {
+                    return within(left) && within(right);
+                }
+            }
+        }
         // A number is one word however it is punctuated: the separator in
         // `3.14` joins to the digits on either side of it, so `w` steps over
         // the whole figure instead of stopping three times inside it.
         if same_line && (self.is_number_interior(left) || self.is_number_interior(right)) {
             return true;
         }
+        // A sign written tight against a figure belongs to it: `45.5%` is one
+        // word. Only the right-hand side is asked, so the sign joins backwards
+        // to its number and never forwards into what follows it.
+        if same_line && self.is_number_suffix_at(right) {
+            return true;
+        }
+        // A hyphenated compound is one word: the hyphen in `well-known` joins
+        // the words on either side of it, so `w` steps over the compound
+        // instead of stopping at each half and at the hyphen.
+        if same_line && (self.is_hyphen_interior(left) || self.is_hyphen_interior(right)) {
+            return true;
+        }
         // An abbreviation is one word, stops included: `e.g.` is a single stop
-        // for `w`, not four.
+        // for `w`, not four. Its span is also a hard edge in both directions,
+        // so the comma in `(e.g.,` is a stop of its own rather than being
+        // swallowed by the punctuation run the closing stop would otherwise
+        // start.
         if same_line {
             if let Some(span) = self.abbreviation_at(left) {
                 let within = |c: Caret| c.cell >= span.0 && c.cell <= span.1;
-                if within(left) && within(right) {
-                    return true;
+                if within(left) || within(right) {
+                    return within(left) && within(right);
                 }
             }
         }
@@ -934,7 +964,8 @@ impl App {
         continues_word_run(left_class, right_class, same_line)
     }
 
-    /// Whether the character at `c` is a separator sitting inside a number.
+    /// Whether the character at `c` is punctuation sitting inside a number: a
+    /// decimal point, a grouping separator, or the sign of an exponent.
     ///
     /// Only the same line counts: a figure is not carried across a line break,
     /// and treating one as though it were would join text that merely happens
@@ -943,21 +974,60 @@ impl App {
         let Some(here) = self.char_at(c) else {
             return false;
         };
-        if !is_numeric_separator(here) {
+        if !(is_numeric_separator(here) || is_exponent_sign(here)) {
+            return false;
+        }
+        let prev = self.prev_cell_on_line(c);
+        let before = prev.and_then(|p| self.char_at(p));
+        let after = self.next_cell_on_line(c).and_then(|n| self.char_at(n));
+        if is_inside_number(before, here, after) {
+            return true;
+        }
+        // `2.3E+5`: the sign needs the exponent marker behind it and a digit
+        // behind that, which is what tells a number from `cache+1`.
+        let before2 = prev
+            .and_then(|p| self.prev_cell_on_line(p))
+            .and_then(|p| self.char_at(p));
+        is_inside_scientific_exponent(before2, before, here, after)
+    }
+
+    /// Whether the character at `c` is a sign attached to the figure in front
+    /// of it, as in `45.5%`.
+    fn is_number_suffix_at(&mut self, c: Caret) -> bool {
+        let Some(here) = self.char_at(c) else {
+            return false;
+        };
+        if !is_number_suffix(here) {
+            return false;
+        }
+        let before = self.prev_cell_on_line(c).and_then(|p| self.char_at(p));
+        is_attached_number_suffix(before, here)
+    }
+
+    /// Whether the character at `c` is a hyphen joining a compound word.
+    ///
+    /// Same-line only, for the same reason as [`Self::is_number_interior`]: a
+    /// word broken across a line break is still two stops, since the hyphen
+    /// that broke it belongs to the typesetting, not to the word.
+    fn is_hyphen_interior(&mut self, c: Caret) -> bool {
+        let Some(here) = self.char_at(c) else {
+            return false;
+        };
+        if !is_word_hyphen(here) {
             return false;
         }
         let before = self.prev_cell_on_line(c).and_then(|p| self.char_at(p));
         let after = self.next_cell_on_line(c).and_then(|n| self.char_at(n));
-        is_inside_number(before, here, after)
+        is_inside_hyphenated_word(before, here, after)
     }
 
     /// The inclusive cell range of the whitespace-delimited token containing
-    /// `c`, when that token is an abbreviation.
+    /// `c`, or `None` when `c` is itself whitespace.
     ///
-    /// This is what makes `e.g.` one word and one sentence: the same span
-    /// answers both questions, so word runs and sentence runs cannot disagree
-    /// about where the construct begins and ends.
-    fn abbreviation_at(&mut self, c: Caret) -> Option<(usize, usize)> {
+    /// The unit both token-level rules work from: an abbreviation and a link
+    /// are each recognised by looking at a whole token rather than at the
+    /// characters beside one cell.
+    fn token_span(&mut self, c: Caret) -> Option<(usize, usize)> {
         self.ensure_content(c.page);
         let cells = self.content(c.page).get(c.line)?.cells.as_slice();
         if c.cell >= cells.len() {
@@ -976,22 +1046,87 @@ impl App {
             .iter()
             .position(is_space)
             .map_or(cells.len() - 1, |n| c.cell + n - 1);
-        let token: String = cells[start..=end]
-            .iter()
-            .filter_map(|cell| match cell.kind {
-                CellKind::Char(ch) => Some(ch),
+        Some((start, end))
+    }
+
+    /// The inclusive cell range of the link inside the token containing `c`, if
+    /// there is one.
+    ///
+    /// Like [`Self::abbreviation_at`] this is a span the caller must test `c`
+    /// against: the brackets and the sentence-ending stop around a link are not
+    /// part of it. [`link_span`] does the recognising; the mapping back to cells
+    /// goes through the characters actually present, so an image inside a token
+    /// cannot shift the result.
+    fn link_at(&mut self, c: Caret) -> Option<(usize, usize)> {
+        let (start, end) = self.token_span(c)?;
+        self.ensure_content(c.page);
+        let cells = self.content(c.page).get(c.line)?.cells.as_slice();
+        let indexed: Vec<(usize, char)> = (start..=end)
+            .filter_map(|i| match cells[i].kind {
+                CellKind::Char(ch) => Some((i, ch)),
                 CellKind::Image => None,
             })
             .collect();
+        let token: String = indexed.iter().map(|(_, ch)| ch).collect();
+        let (lo, hi) = link_span(&token)?;
+        Some((indexed[lo].0, indexed[hi].0))
+    }
+
+    /// Whether `c` sits inside a link, where a stop is part of the address
+    /// rather than the end of a sentence.
+    fn is_inside_link(&mut self, c: Caret) -> bool {
+        self.link_at(c)
+            .is_some_and(|(start, end)| c.cell >= start && c.cell <= end)
+    }
+
+    /// The inclusive cell range of the abbreviation inside the
+    /// whitespace-delimited token containing `c`, if there is one.
+    ///
+    /// This is what makes `e.g.` one word and one sentence: the same span
+    /// answers both questions, so word runs and sentence runs cannot disagree
+    /// about where the construct begins and ends.
+    ///
+    /// The span is the abbreviation itself, not the whole token: the brackets
+    /// and commas around `(e.g.,` are punctuation the writer put *beside* the
+    /// construct, so they are trimmed off before the token is recognised and
+    /// they keep their own word stops afterwards. Note that `c` may sit outside
+    /// the returned span — every caller checks.
+    fn abbreviation_at(&mut self, c: Caret) -> Option<(usize, usize)> {
+        let (mut start, mut end) = self.token_span(c)?;
+        self.ensure_content(c.page);
+        let cells = self.content(c.page).get(c.line)?.cells.as_slice();
+        let char_of = |cell: &syodep_pdf::Cell| match cell.kind {
+            CellKind::Char(ch) => Some(ch),
+            CellKind::Image => None,
+        };
+        // Trim the punctuation wrapped around the construct. Leading: anything
+        // that is not a word character, so `(`, `[` and quotes go. Trailing:
+        // the same, except a full stop, which may be the abbreviation's own.
+        let wrapper = |ch: char| !(ch.is_alphanumeric() || ch == '_');
+        while start <= end && matches!(char_of(&cells[start]), Some(ch) if wrapper(ch)) {
+            start += 1;
+        }
+        while end > start && matches!(char_of(&cells[end]), Some(ch) if wrapper(ch) && ch != '.') {
+            end -= 1;
+        }
+        if start > end {
+            return None;
+        }
+        let token: String = cells[start..=end].iter().filter_map(char_of).collect();
         is_abbreviation(&token).then_some((start, end))
     }
 
     /// Whether the stop at `c` closes an abbreviation without ending the
     /// sentence it sits in.
     fn is_abbreviation_stop(&mut self, c: Caret) -> bool {
-        let Some((_, end)) = self.abbreviation_at(c) else {
+        let Some((start, end)) = self.abbreviation_at(c) else {
             return false;
         };
+        // Punctuation beside the construct is not part of it: the `)` closing
+        // `(etc.)` ends the sentence exactly as it would anywhere else.
+        if c.cell < start || c.cell > end {
+            return false;
+        }
         // A stop *inside* the construct never ends anything.
         if c.cell < end {
             return true;
@@ -1288,10 +1423,11 @@ impl App {
     /// group must contain at least one terminator, so a lone closing bracket is
     /// not a boundary. Analogue of [`Self::same_word_run`] for sentences.
     fn sentence_boundary_after(&mut self, c: Caret) -> bool {
-        // A heading is exactly one sentence, whatever punctuation it contains:
-        // `3.1. Methods` would otherwise be three. The run still stops at the
-        // heading's edges, because those are region boundaries.
-        if self.in_heading(c) {
+        // A heading or an equation is exactly one sentence, whatever punctuation
+        // it contains: `3.1. Methods` would otherwise be three and `f(x) = 0.`
+        // two. The run still stops at their edges, because those are region
+        // boundaries.
+        if self.in_single_sentence_region(c) {
             return false;
         }
         // Nor inside a list item's own marker: `1. First point` is one
@@ -1313,6 +1449,12 @@ impl App {
         // such a construct are inert; the one closing it ends a sentence only
         // when a new one visibly follows.
         if self.is_abbreviation_stop(c) {
+            return false;
+        }
+        // Nor one inside a link, where it is part of the address:
+        // `example.com/a.html` is not two sentences. The stop *after* a link is
+        // outside its span and still ends one.
+        if self.is_inside_link(c) {
             return false;
         }
         // The group must end at `c`: the next cell cannot continue it.
@@ -1388,10 +1530,11 @@ impl App {
         self.region_id_at(a) == self.region_id_at(b)
     }
 
-    /// Whether `at` sits inside a heading.
-    fn in_heading(&mut self, at: Caret) -> bool {
+    /// Whether `at` sits inside a region that is one sentence whatever
+    /// punctuation it contains — a heading or an equation.
+    fn in_single_sentence_region(&mut self, at: Caret) -> bool {
         self.region_at(at.page, at.line)
-            .is_some_and(|o| o.kind == ObjectKind::Heading)
+            .is_some_and(|o| o.kind.is_one_sentence())
     }
 
     /// Whether `at` falls within the marker that opens a list item.
@@ -3415,6 +3558,69 @@ mod tests {
     }
 
     #[test]
+    fn a_bracketed_abbreviation_is_one_word_between_its_brackets() {
+        // `(e.g.,` is three stops: the bracket, the abbreviation, the comma.
+        // The punctuation around it is not part of the construct, and the
+        // construct does not dissolve into it either.
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_line(dir.path(), "Many globs (e.g., the star form) work.");
+        press(&mut app, "cw");
+        press(&mut app, "w");
+        assert_eq!(span_text(&app), "globs");
+        press(&mut app, "w");
+        assert_eq!(span_text(&app), "(");
+        press(&mut app, "w");
+        assert_eq!(span_text(&app), "e.g.");
+        press(&mut app, "w");
+        assert_eq!(span_text(&app), ",");
+        press(&mut app, "w");
+        assert_eq!(span_text(&app), "the");
+    }
+
+    #[test]
+    fn a_bracketed_abbreviation_does_not_break_a_sentence() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_line(dir.path(), "Many globs (e.g., the star) work. Then stop.");
+        press(&mut app, "cs");
+        assert_eq!(span_text(&app), "Many globs (e.g., the star) work.");
+    }
+
+    #[test]
+    fn an_abbreviation_before_a_comma_keeps_the_sentence_even_before_a_capital() {
+        // The citation form of the same construct: a comma cannot open a
+        // sentence, so the capitalised author name is not a new one.
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_line(dir.path(), "Recent work (e.g., Smith 2020) shows it. Next.");
+        press(&mut app, "cs");
+        assert_eq!(span_text(&app), "Recent work (e.g., Smith 2020) shows it.");
+    }
+
+    #[test]
+    fn a_bracket_after_an_abbreviation_can_still_close_a_sentence() {
+        // The `)` is beside the construct, not inside it, so it behaves as it
+        // would anywhere else: a closing bracket after a stop ends the group.
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_line(dir.path(), "Globs and magic (etc.) Then more.");
+        press(&mut app, "cs");
+        assert_eq!(span_text(&app), "Globs and magic (etc.)");
+        press(&mut app, "s");
+        assert_eq!(span_text(&app), "Then more.");
+    }
+
+    #[test]
+    fn a_quoted_abbreviation_is_still_one_word() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_line(dir.path(), "Globs, magic, [etc.] and more.");
+        press(&mut app, "cw");
+        press(&mut app, "wwww"); // comma, magic, comma, then the bracket
+        assert_eq!(span_text(&app), "[");
+        press(&mut app, "w");
+        assert_eq!(span_text(&app), "etc.");
+        press(&mut app, "w");
+        assert_eq!(span_text(&app), "]");
+    }
+
+    #[test]
     fn an_ordinary_word_before_a_lower_case_word_still_ends_the_sentence() {
         // The capital test is consulted only where an abbreviation is already
         // suspected. Applied to prose at large it would merge these two, which
@@ -3487,6 +3693,271 @@ mod tests {
         press(&mut app, "cs");
         press(&mut app, "s");
         assert_eq!(span_text(&app), "Then more.");
+    }
+
+    #[test]
+    fn a_percentage_is_one_word() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_line(dir.path(), "about 45.5% of them");
+        press(&mut app, "cw");
+        press(&mut app, "w");
+        assert_eq!(span_text(&app), "45.5%");
+        press(&mut app, "w");
+        assert_eq!(span_text(&app), "of");
+    }
+
+    #[test]
+    fn a_percent_sign_without_a_figure_is_still_its_own_word() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_line(dir.path(), "the % sign here");
+        press(&mut app, "cw");
+        press(&mut app, "w");
+        assert_eq!(span_text(&app), "%");
+    }
+
+    #[test]
+    fn a_full_stop_after_a_percentage_still_ends_a_sentence() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_line(dir.path(), "It grew 45.5%. Then more.");
+        press(&mut app, "cs");
+        assert_eq!(span_text(&app), "It grew 45.5%.");
+    }
+
+    #[test]
+    fn scientific_notation_is_one_word() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_line(dir.path(), "about 1.5e-10 metres");
+        press(&mut app, "cw");
+        press(&mut app, "w");
+        assert_eq!(span_text(&app), "1.5e-10");
+        press(&mut app, "w");
+        assert_eq!(span_text(&app), "metres");
+    }
+
+    #[test]
+    fn scientific_notation_with_a_signed_exponent_is_one_word() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_line(dir.path(), "about 2.3E+5 units");
+        press(&mut app, "cw");
+        press(&mut app, "w");
+        assert_eq!(span_text(&app), "2.3E+5");
+    }
+
+    #[test]
+    fn scientific_notation_does_not_end_a_sentence() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_line(dir.path(), "It is 1.5e-10 exactly. Then more.");
+        press(&mut app, "cs");
+        assert_eq!(span_text(&app), "It is 1.5e-10 exactly.");
+    }
+
+    #[test]
+    fn a_plus_after_a_word_is_still_its_own_word() {
+        // The exponent rule needs a digit before the `e`, so an identifier that
+        // merely ends in one does not absorb the sign after it.
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_line(dir.path(), "the cache+1 case");
+        press(&mut app, "cw");
+        press(&mut app, "w");
+        assert_eq!(span_text(&app), "cache");
+        press(&mut app, "w");
+        assert_eq!(span_text(&app), "+");
+        press(&mut app, "w");
+        assert_eq!(span_text(&app), "1");
+    }
+
+    // ---- Links ------------------------------------------------------------
+
+    #[test]
+    fn a_url_is_one_word() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_line(dir.path(), "See https://example.com/a?x=1 for more");
+        press(&mut app, "cw");
+        press(&mut app, "w");
+        assert_eq!(span_text(&app), "https://example.com/a?x=1");
+        press(&mut app, "w");
+        assert_eq!(span_text(&app), "for");
+    }
+
+    #[test]
+    fn a_url_does_not_break_a_sentence() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_line(dir.path(), "See https://example.com/a.html for it. Then.");
+        press(&mut app, "cs");
+        assert_eq!(span_text(&app), "See https://example.com/a.html for it.");
+    }
+
+    #[test]
+    fn a_stop_after_a_url_is_its_own_word_and_ends_the_sentence() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_line(dir.path(), "See https://example.com. Then more.");
+        press(&mut app, "cs");
+        assert_eq!(span_text(&app), "See https://example.com.");
+        press(&mut app, "cw");
+        press(&mut app, "w");
+        assert_eq!(span_text(&app), "https://example.com");
+        press(&mut app, "w");
+        assert_eq!(span_text(&app), ".");
+    }
+
+    #[test]
+    fn a_bracketed_url_is_one_word_between_its_brackets() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_line(dir.path(), "see (https://doi.org/10.1000/182) there");
+        press(&mut app, "cw");
+        press(&mut app, "w");
+        assert_eq!(span_text(&app), "(");
+        press(&mut app, "w");
+        assert_eq!(span_text(&app), "https://doi.org/10.1000/182");
+        press(&mut app, "w");
+        assert_eq!(span_text(&app), ")");
+    }
+
+    #[test]
+    fn a_url_keeps_a_bracket_that_is_part_of_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_line(dir.path(), "at https://x.org/wiki/Glob_(pattern) today");
+        press(&mut app, "cw");
+        press(&mut app, "w");
+        assert_eq!(span_text(&app), "https://x.org/wiki/Glob_(pattern)");
+    }
+
+    #[test]
+    fn a_bare_host_with_a_path_is_one_word() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_line(dir.path(), "see doi.org/10.1000/182 and www.example.com/x");
+        press(&mut app, "cw");
+        press(&mut app, "w");
+        assert_eq!(span_text(&app), "doi.org/10.1000/182");
+        press(&mut app, "w");
+        assert_eq!(span_text(&app), "and");
+        press(&mut app, "w");
+        assert_eq!(span_text(&app), "www.example.com/x");
+    }
+
+    #[test]
+    fn an_email_address_is_one_word() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_line(dir.path(), "write to jane.doe@example.com today");
+        press(&mut app, "cw");
+        press(&mut app, "ww");
+        assert_eq!(span_text(&app), "jane.doe@example.com");
+        press(&mut app, "w");
+        assert_eq!(span_text(&app), "today");
+    }
+
+    #[test]
+    fn a_word_pair_joined_by_a_slash_is_not_a_link() {
+        // "and/or" has no host in front of the slash, so it keeps the three
+        // stops it has always had.
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_line(dir.path(), "one and/or two");
+        press(&mut app, "cw");
+        press(&mut app, "w");
+        assert_eq!(span_text(&app), "and");
+        press(&mut app, "w");
+        assert_eq!(span_text(&app), "/");
+        press(&mut app, "w");
+        assert_eq!(span_text(&app), "or");
+    }
+
+    #[test]
+    fn a_hyphenated_compound_is_one_word() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_line(dir.path(), "a well-known result");
+        press(&mut app, "cw");
+        press(&mut app, "w");
+        assert_eq!(span_text(&app), "well-known");
+        press(&mut app, "w");
+        assert_eq!(span_text(&app), "result");
+    }
+
+    #[test]
+    fn a_multiply_hyphenated_compound_is_one_word() {
+        // The rule composes: every hyphen with word characters on both sides
+        // joins, so the whole chain is a single stop.
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_line(dir.path(), "the state-of-the-art method");
+        press(&mut app, "cw");
+        press(&mut app, "w");
+        assert_eq!(span_text(&app), "state-of-the-art");
+    }
+
+    #[test]
+    fn a_hyphen_joins_letters_to_digits() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_line(dir.path(), "the COVID-19 data");
+        press(&mut app, "cw");
+        press(&mut app, "w");
+        assert_eq!(span_text(&app), "COVID-19");
+    }
+
+    #[test]
+    fn a_hyphenated_compound_walks_backwards_as_one_word() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_line(dir.path(), "a well-known result");
+        press(&mut app, "cw");
+        press(&mut app, "www"); // a, well-known, result
+        press(&mut app, "b");
+        assert_eq!(span_text(&app), "well-known");
+    }
+
+    #[test]
+    fn a_spaced_hyphen_is_still_its_own_word() {
+        // Nothing to join: a dash used as punctuation keeps its own stop.
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_line(dir.path(), "one - two");
+        press(&mut app, "cw");
+        press(&mut app, "w");
+        assert_eq!(span_text(&app), "-");
+        press(&mut app, "w");
+        assert_eq!(span_text(&app), "two");
+    }
+
+    #[test]
+    fn a_trailing_hyphen_is_still_its_own_word() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_line(dir.path(), "the well- known result");
+        press(&mut app, "cw");
+        press(&mut app, "w");
+        assert_eq!(span_text(&app), "well");
+        press(&mut app, "w");
+        assert_eq!(span_text(&app), "-");
+    }
+
+    #[test]
+    fn an_em_dash_between_words_does_not_join_them() {
+        // Only hyphens join. A dash separates clauses, so it stays a stop of
+        // its own however tightly it is set.
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_line(dir.path(), "one—two three");
+        press(&mut app, "cw");
+        assert_eq!(span_text(&app), "one");
+        press(&mut app, "w");
+        assert_eq!(span_text(&app), "—");
+        press(&mut app, "w");
+        assert_eq!(span_text(&app), "two");
+    }
+
+    #[test]
+    fn a_double_hyphen_between_words_does_not_join_them() {
+        // `--` is an ASCII dash, not a hyphen: neither one has a word
+        // character on both sides, so the pair is punctuation as before.
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_line(dir.path(), "one--two three");
+        press(&mut app, "cw");
+        press(&mut app, "w");
+        assert_eq!(span_text(&app), "--");
+        press(&mut app, "w");
+        assert_eq!(span_text(&app), "two");
+    }
+
+    #[test]
+    fn a_hyphenated_compound_does_not_disturb_sentences() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_line(dir.path(), "It is a well-known result. Then more.");
+        press(&mut app, "cs");
+        assert_eq!(span_text(&app), "It is a well-known result.");
     }
 
     // ---- Page furniture ---------------------------------------------------
@@ -3866,6 +4337,142 @@ mod tests {
             rects.len(),
             2,
             "a heading is not drawn as one block: {rects:?}"
+        );
+    }
+
+    // ---- Equations --------------------------------------------------------
+
+    /// A page whose lines are evenly spaced, with a two-line display equation
+    /// at lines 2-3. Its first line ends in a full stop, as an equation in a
+    /// paper routinely does — a stop in the middle of the construct, and the one
+    /// thing `is_one_sentence` has to make inert. Hand-built, like the heading
+    /// page, so the behaviour here cannot be broken by the detector's
+    /// heuristics.
+    fn equation_page_content() -> PageContent {
+        let texts = [
+            "Alpha beta.",
+            "We obtain the bound",
+            "f(x) = 0.",
+            "g(y) = 1.",
+            "Final prose line.",
+        ];
+        let lines: Vec<ContentLine> = texts
+            .iter()
+            .enumerate()
+            .map(|(i, t)| text_line(100.0 + i as f32 * 12.0, t))
+            .collect();
+        let objects = vec![ContentObject {
+            kind: ObjectKind::Equation,
+            bbox: lines[2].bbox.union(lines[3].bbox),
+            start_line: 2,
+            end_line: 3,
+        }];
+        PageContent {
+            lines,
+            objects,
+            ..Default::default()
+        }
+    }
+
+    fn app_with_equation_page(dir: &Path) -> App {
+        let mut app = app_with_text_pages(dir, &["placeholder page"]);
+        app.set_page_content(0, equation_page_content());
+        app
+    }
+
+    #[test]
+    fn sentence_motion_treats_an_equation_as_one_step() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_equation_page(dir.path());
+        press(&mut app, "cs");
+        press(&mut app, "ss"); // past both prose sentences
+        let (start, end) = app.focus_span().unwrap();
+        assert_eq!(
+            (start.line, end.line),
+            (2, 3),
+            "the whole equation is one sentence"
+        );
+        press(&mut app, "s");
+        assert_eq!(
+            app.caret().unwrap().line,
+            4,
+            "next s must leave the equation"
+        );
+    }
+
+    #[test]
+    fn a_stop_inside_an_equation_does_not_split_it() {
+        // The stop closing the first line would otherwise end a sentence there,
+        // leaving the second line of the same equation as another.
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_equation_page(dir.path());
+        press(&mut app, "cs");
+        press(&mut app, "ss");
+        let (start, end) = app.focus_span().unwrap();
+        let last = equation_page_content().lines[3].cells.len() - 1;
+        assert_eq!((start.line, start.cell), (2, 0));
+        assert_eq!((end.line, end.cell), (3, last));
+    }
+
+    #[test]
+    fn a_sentence_above_an_equation_does_not_run_into_it() {
+        // The prose line has no full stop, so only the region edge stops it.
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_equation_page(dir.path());
+        press(&mut app, "cs");
+        press(&mut app, "s");
+        let (_, end) = app.focus_span().unwrap();
+        assert_eq!(end.line, 1, "sentence leaked into the equation");
+    }
+
+    #[test]
+    fn paragraph_motion_treats_an_equation_as_one_paragraph() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_equation_page(dir.path());
+        press(&mut app, "cp");
+        press(&mut app, "p");
+        let (start, end) = app.focus_span().unwrap();
+        assert_eq!((start.line, end.line), (2, 3));
+        press(&mut app, "p");
+        assert_caret(&app, 0, 4, 0);
+    }
+
+    #[test]
+    fn word_motion_still_walks_through_an_equation() {
+        // The point of the kind: an equation is a region, not atomic, so its
+        // parts stay reachable one word at a time.
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_equation_page(dir.path());
+        press(&mut app, "cw");
+        press_until_line(&mut app, "w", 2);
+        let mut stops = vec![app.caret().unwrap().cell];
+        for _ in 0..4 {
+            press(&mut app, "w");
+            let caret = app.caret().unwrap();
+            if caret.line != 2 {
+                break;
+            }
+            stops.push(caret.cell);
+        }
+        assert!(
+            stops.len() > 1,
+            "the equation was one stop, not several words: {stops:?}"
+        );
+    }
+
+    #[test]
+    fn char_motion_still_walks_through_an_equation() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_equation_page(dir.path());
+        press(&mut app, "cc");
+        press_until_line(&mut app, "j", 2);
+        press(&mut app, "l");
+        assert_caret(&app, 0, 2, 1);
+        let (start, end) = app.focus_span().unwrap();
+        assert_eq!(
+            (start.cell, end.cell),
+            (1, 1),
+            "char scope highlighted more than one character"
         );
     }
 
@@ -4262,15 +4869,17 @@ mod tests {
     #[test]
     fn word_right_and_left_step_between_words() {
         let dir = tempfile::tempdir().unwrap();
-        let mut app = app_with_text_pages(dir.path(), &["alpha beta-gamma"]);
+        // A colon, not a hyphen: a hyphen between two words joins them into a
+        // single stop -- see `a_hyphenated_compound_is_one_word`.
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta:gamma"]);
         press(&mut app, "cw");
-        // `l`/`w` advance to the next word run (the "beta" before the hyphen).
+        // `l`/`w` advance to the next word run (the "beta" before the colon).
         press(&mut app, "l");
         let mark = app.word_mark().unwrap();
         assert_eq!((mark.start_cell, mark.end_cell), (6, 9));
         press(&mut app, "w");
         let mark = app.word_mark().unwrap();
-        // The "-" punctuation run is its own word-like stop.
+        // The ":" punctuation run is its own word-like stop.
         assert_eq!(mark.start_cell, 10);
         // `h`/`b` move back.
         press(&mut app, "b");
