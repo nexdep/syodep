@@ -7,6 +7,36 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-07-29 — 0.8.0
+
+Since 0.7.0. **Existing configs keep working** — unlike 0.7.0, nothing was
+removed. The new `[input]` section and the new command names are additive.
+
+- **A pause now completes a key sequence.** `c` or `v` on its own enters focus
+  or visual mode after a brief stop, keeping whatever granularity is live.
+  Sequences typed at normal speed are unaffected: `cw` is still word focus.
+  Tunable with `[input] timeout_ms` (500 ms default, `0` disables).
+- **`s` and `p` move by sentence and paragraph**, at any scope, the way `w`
+  already moved by word. They are motions, not scope changes: in word focus,
+  `s` jumps to the next sentence's first word and the highlight stays
+  word-sized, where `cs` stays put and highlights the whole sentence.
+- **Open file moved from `o` to `<C-o>`.** `o` swaps the selection ends while
+  selecting, so open-file was the one command that silently had no binding in a
+  mode. This is the change most likely to disturb muscle memory.
+- **Returning to normal mode resets the granularity to characters.** Normal
+  mode has none of its own, so it no longer remembers one: `cs`, `<Esc>`, `v`
+  now starts a character selection rather than a sentence one.
+- **Leaving a selection by naming a scope keeps your place.** Previously only
+  `<Esc>` did; `cw` and friends dropped you back where the selection started.
+
+### If you rebound `o`
+
+A config that sets `"o" = "open_file"` under `[keys]` keeps that binding — user
+entries extend the defaults rather than replacing them — so `o` will still open
+files for you *and* `<C-o>` will too. Remove the line to follow the new default.
+
+---
+
 ## 2026-07-29 — `s` and `p` move by sentence and paragraph
 
 ### Implemented
