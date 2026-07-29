@@ -7,6 +7,16 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-07-29 — Equation fixture text is platform-dependent
+
+Windows CI failed `page_content_detects_a_display_equation`: MuPDF there
+extracts the Symbol fixture as Latin `a + b = g`, while Linux gets Greek
+`α + β = γ`. Detection still found the equation (font name), but the test
+asserted on Greek glyphs. The integration check now accepts either decoding;
+the pure `equation_ranges` tests keep using Greek strings directly.
+
+---
+
 ## 2026-07-29 — Display equations are navigation units
 
 A formula used to be a short line of odd characters: `s` walked into it, it was
@@ -71,8 +81,9 @@ fires, the page just navigates line by line.
 
 Testing a font-based heuristic without embedding a font: the new
 `pdf_with_equation` sets its formula in base-14 **`Symbol`**, so MuPDF reports
-the font name `Symbol` *and* the encoding turns `a + b = g` into `α + β = γ`.
-One tiny handcrafted PDF exercises both signals and the whole pipeline. The
+the font name `Symbol`. On some MuPDF builds the encoding also turns
+`a + b = g` into `α + β = γ`; on others (notably Windows CI) the Latin bytes
+survive. The font signal alone is enough for the integration test. The
 6-object assembly is now shared with `pdf_with_heading` as `two_font_page_pdf`.
 
 13 detection tests (10 pure on `equation_ranges`, 3 on real MuPDF) plus 6

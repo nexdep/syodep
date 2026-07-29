@@ -372,10 +372,10 @@ pub fn pdf_with_table_gap(cols: usize, rows: usize, caption_gap: f32) -> Vec<u8>
 /// Build a single A4 page with body prose, a display equation set apart on its
 /// own line, and more prose. Used to exercise equation detection.
 ///
-/// The equation is set in base-14 `Symbol`, which needs no embedded font and
-/// gives detection both of its signals at once: MuPDF reports the font name
-/// (`Symbol`) and the encoding turns `a + b = g` into `α + β = γ`, so the
-/// characters read as mathematics too.
+/// The equation is set in base-14 `Symbol`, which needs no embedded font.
+/// MuPDF reports the font name (`Symbol`) so the font signal fires; on some
+/// builds the encoding also turns `a + b = g` into `α + β = γ` (character
+/// signal), on others the Latin bytes come through unchanged.
 pub fn pdf_with_equation() -> Vec<u8> {
     let mut content = String::new();
     // Prose. Long lines, so these set the column width the equation is measured

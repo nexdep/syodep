@@ -2663,23 +2663,23 @@ mod tests {
             .collect();
         assert_eq!(equations.len(), 1, "objects: {:?}", content.objects);
         let equation = equations[0];
-        // The formula, and only the formula: `Symbol` encodes `a + b = g` as
-        // Greek, so this is what the caret sees.
+        // The formula, and only the formula. MuPDF may decode Symbol as Greek
+        // (`α + β = γ`) or leave the Latin source (`a + b = g`); either is fine
+        // — detection here is driven by the font name.
         assert_eq!(equation.start_line, equation.end_line, "prose swallowed");
         let text = text_of(equation.start_line);
-        assert!(
-            text.contains('\u{3b1}') && text.contains('='),
-            "equation line reads {text:?}"
-        );
+        let looks_like_formula = text.contains('=')
+            && (text.contains('\u{3b1}') || (text.contains('a') && text.contains('+')));
+        assert!(looks_like_formula, "equation line reads {text:?}");
         // The prose around it stays outside.
         for i in 0..content.lines.len() {
             if i == equation.start_line {
                 continue;
             }
+            let other = text_of(i);
             assert!(
-                !text_of(i).contains('\u{3b1}'),
-                "line {i} reads {:?}",
-                text_of(i)
+                !other.contains('=') && !other.contains('\u{3b1}'),
+                "line {i} reads {other:?}"
             );
         }
     }
