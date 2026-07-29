@@ -22,11 +22,11 @@ use syodep_pdf::{
 use syodep_storage::{Position, Storage};
 
 use crate::caret::{
-    column_index_of, column_ranges, continues_word_run, is_sentence_terminator,
-    is_sentence_trailer, is_word_target, nearest_cell_in_line, nearest_line_in_column,
-    paragraph_segments, split_segments_at_objects, word_class, Caret, Dir, Landing, LineMark, Mode,
-    ObjectId, ParagraphMark, Scope, SentenceMark, VisualAnchor, VisualSelection, WordClass,
-    WordMark,
+    column_index_of, column_ranges, continues_word_run, is_inside_number, is_numeric_separator,
+    is_sentence_terminator, is_sentence_trailer, is_word_target, nearest_cell_in_line,
+    nearest_line_in_column, paragraph_segments, split_segments_at_objects, word_class, Caret, Dir,
+    Landing, LineMark, Mode, ObjectId, ParagraphMark, Scope, SentenceMark, VisualAnchor,
+    VisualSelection, WordClass, WordMark,
 };
 use crate::command::Command;
 use crate::input::{InputState, KeyOutcome, Keymap, KeymapError};
@@ -908,17 +908,47 @@ impl App {
     }
 
     fn same_word_run(&mut self, left: Caret, right: Caret) -> bool {
+        let same_line = left.page == right.page && left.line == right.line;
+        // A number is one word however it is punctuated: the separator in
+        // `3.14` joins to the digits on either side of it, so `w` steps over
+        // the whole figure instead of stopping three times inside it.
+        if same_line && (self.is_number_interior(left) || self.is_number_interior(right)) {
+            return true;
+        }
         let Some(left_class) = self.word_class_at(left) else {
             return false;
         };
         let Some(right_class) = self.word_class_at(right) else {
             return false;
         };
-        continues_word_run(
-            left_class,
-            right_class,
-            left.page == right.page && left.line == right.line,
-        )
+        continues_word_run(left_class, right_class, same_line)
+    }
+
+    /// Whether the character at `c` is a separator sitting inside a number.
+    ///
+    /// Only the same line counts: a figure is not carried across a line break,
+    /// and treating one as though it were would join text that merely happens
+    /// to end and begin with digits.
+    fn is_number_interior(&mut self, c: Caret) -> bool {
+        let Some(here) = self.char_at(c) else {
+            return false;
+        };
+        if !is_numeric_separator(here) {
+            return false;
+        }
+        let before = self.prev_cell_on_line(c).and_then(|p| self.char_at(p));
+        let after = self.next_cell_on_line(c).and_then(|n| self.char_at(n));
+        is_inside_number(before, here, after)
+    }
+
+    fn next_cell_on_line(&mut self, c: Caret) -> Option<Caret> {
+        self.next_cell(c)
+            .filter(|n| n.page == c.page && n.line == c.line)
+    }
+
+    fn prev_cell_on_line(&mut self, c: Caret) -> Option<Caret> {
+        self.prev_cell(c)
+            .filter(|p| p.page == c.page && p.line == c.line)
     }
 
     fn next_word_target_from(&mut self, mut caret: Caret) -> Option<Caret> {
@@ -1195,6 +1225,12 @@ impl App {
             Some(ch) if is_sentence_terminator(ch) || is_sentence_trailer(ch) => ch,
             _ => return false,
         };
+        // A full stop with digits on both sides is a decimal point, not the
+        // end of anything: `3.14` is one number in the middle of a sentence.
+        // The stop in `costs 3.` still ends it, because nothing follows.
+        if self.is_number_interior(c) {
+            return false;
+        }
         // The group must end at `c`: the next cell cannot continue it.
         if let Some(next) = self.next_cell_same_page(c) {
             if matches!(self.char_at(next), Some(ch) if is_sentence_terminator(ch) || is_sentence_trailer(ch))
@@ -3013,6 +3049,97 @@ mod tests {
         assert_caret(&app, 0, 0, 2);
         press(&mut app, "w");
         assert_caret(&app, 0, 0, 2);
+    }
+
+    // ---- Numbers ----------------------------------------------------------
+
+    /// A page whose one line is `text`, for exercising word and sentence runs.
+    fn app_with_line(dir: &Path, text: &str) -> App {
+        let mut app = app_with_text_pages(dir, &["placeholder page"]);
+        app.set_page_content(
+            0,
+            PageContent {
+                lines: vec![text_line(100.0, text)],
+                ..Default::default()
+            },
+        );
+        app
+    }
+
+    /// The text the focus span currently covers.
+    fn span_text(app: &App) -> String {
+        let (start, end) = app.focus_span().unwrap();
+        app.content(start.page)[start.line].cells[start.cell..=end.cell]
+            .iter()
+            .filter_map(|c| match c.kind {
+                CellKind::Char(ch) => Some(ch),
+                CellKind::Image => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_decimal_number_is_one_word() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_line(dir.path(), "pi is 3.14 exactly");
+        press(&mut app, "cw");
+        press(&mut app, "ww"); // "pi", "is", then the number
+        assert_eq!(span_text(&app), "3.14");
+        press(&mut app, "w");
+        assert_eq!(span_text(&app), "exactly");
+    }
+
+    #[test]
+    fn a_grouped_number_is_one_word() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_line(dir.path(), "about 1,234.56 units");
+        press(&mut app, "cw");
+        press(&mut app, "w");
+        assert_eq!(span_text(&app), "1,234.56");
+    }
+
+    #[test]
+    fn a_full_stop_after_a_number_is_still_its_own_word() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_line(dir.path(), "it costs 3. Next");
+        press(&mut app, "cw");
+        press(&mut app, "ww");
+        assert_eq!(span_text(&app), "3");
+        press(&mut app, "w");
+        assert_eq!(span_text(&app), ".");
+    }
+
+    #[test]
+    fn a_decimal_point_does_not_end_a_sentence() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_line(dir.path(), "pi is 3.14 exactly. Then more.");
+        press(&mut app, "cs");
+        assert_eq!(span_text(&app), "pi is 3.14 exactly.");
+    }
+
+    #[test]
+    fn a_grouped_number_does_not_end_a_sentence() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_line(dir.path(), "we saw 1,234.56 of them. Then more.");
+        press(&mut app, "cs");
+        assert_eq!(span_text(&app), "we saw 1,234.56 of them.");
+    }
+
+    #[test]
+    fn a_full_stop_after_a_number_still_ends_a_sentence() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_line(dir.path(), "it costs 3. Then more.");
+        press(&mut app, "cs");
+        assert_eq!(span_text(&app), "it costs 3.");
+    }
+
+    #[test]
+    fn a_sentence_motion_steps_over_a_number_rather_than_into_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_line(dir.path(), "pi is 3.14 exactly. Then more.");
+        press(&mut app, "cs");
+        press(&mut app, "s");
+        assert_eq!(span_text(&app), "Then more.");
     }
 
     // ---- Page furniture ---------------------------------------------------

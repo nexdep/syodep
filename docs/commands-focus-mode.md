@@ -96,6 +96,12 @@ Word motions use Vim-like lowercase boundaries: letters/digits/underscore form
 word runs, punctuation/symbols form separate runs, whitespace is skipped, and
 each image or table is a single stop.
 
+A number is always one word, however it is punctuated: `3.14` and `1,234.56` are
+each a single stop, because a separator with digits on both sides belongs to the
+figure. The same rule keeps a decimal point from ending a sentence — `pi is 3.14
+exactly.` is one sentence, not two. A full stop that merely follows a number
+still ends both, since nothing follows it: `it costs 3.` behaves as before.
+
 The view auto-scrolls to keep the highlight on screen as it moves.
 
 ## Tables and images

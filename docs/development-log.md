@@ -7,6 +7,31 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-07-29 — A number is one word and never ends a sentence
+
+`3.14` used to be three word stops and, worse, two sentences: the decimal point
+was read as a full stop, so `s` landed in the middle of a figure and a sentence
+span stopped short. Now a separator with digits on **both** sides belongs to the
+number, so `3.14` and `1,234.56` are each a single word and pass through sentence
+detection untouched. The rule composes, which is what makes the grouped case work
+without special-casing it.
+
+A full stop that merely follows a number is unaffected — `it costs 3.` still ends
+the word and the sentence, because nothing follows the stop. That asymmetry is
+the whole rule: digits on both sides, or it is punctuation as before.
+
+Only the same line counts. A figure is not carried across a line break, and
+joining one would splice text that merely happens to end and begin with digits.
+
+Both halves come from one pure predicate, `is_inside_number(before, sep, after)`,
+consulted from `same_word_run` and `sentence_boundary_after`. Abbreviations
+(`Mr.`, `e.g.`) remain a known simplification — they need a dictionary, not a
+shape test.
+
+9 new tests, 314 total.
+
+---
+
 ## 2026-07-29 — Page furniture is out of the caret's path
 
 Moving through a paper meant stepping through the running header on every page,

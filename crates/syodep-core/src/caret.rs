@@ -279,10 +279,31 @@ pub fn continues_word_run(left: WordClass, right: WordClass, same_line: bool) ->
         )
 }
 
-/// Whether `c` ends a sentence. Decimal points and abbreviations (`3.14`,
-/// `Mr.`) are treated as terminators too — a deliberate v1 simplification.
+/// Whether `c` ends a sentence.
+///
+/// This is the character's shape alone. A full stop inside a number is not a
+/// terminator — see [`is_inside_number`] — but an abbreviation's full stop
+/// (`Mr.`) still is, which remains a simplification.
 pub fn is_sentence_terminator(c: char) -> bool {
     matches!(c, '.' | '!' | '?')
+}
+
+/// Whether `c` can sit *inside* a number, holding its digits together: a
+/// decimal point or a digit-grouping separator.
+pub fn is_numeric_separator(c: char) -> bool {
+    matches!(c, '.' | ',')
+}
+
+/// Whether `separator`, with `before` and `after` beside it, is punctuation
+/// inside a number rather than between words or sentences.
+///
+/// This is what makes `3.14` one word and one sentence while the full stop in
+/// `costs 3.` still ends both: the test is that digits flank the separator on
+/// *both* sides. It composes, so `1,234.56` holds together throughout.
+pub fn is_inside_number(before: Option<char>, separator: char, after: Option<char>) -> bool {
+    is_numeric_separator(separator)
+        && before.is_some_and(|c| c.is_numeric())
+        && after.is_some_and(|c| c.is_numeric())
 }
 
 /// Whether `c` is a closing character that stays attached to the end of a
@@ -675,6 +696,24 @@ mod tests {
             start_line,
             end_line,
         }
+    }
+
+    #[test]
+    fn a_separator_between_digits_is_inside_a_number() {
+        assert!(is_inside_number(Some('3'), '.', Some('1')));
+        assert!(is_inside_number(Some('1'), ',', Some('2')));
+    }
+
+    #[test]
+    fn a_separator_without_digits_on_both_sides_is_not() {
+        // "costs 3." — nothing follows, so the stop still ends the sentence.
+        assert!(!is_inside_number(Some('3'), '.', Some(' ')));
+        assert!(!is_inside_number(Some('3'), '.', None));
+        // "etc. 5" — a full stop that merely happens to precede a figure.
+        assert!(!is_inside_number(Some('c'), '.', Some('5')));
+        // Only a decimal point or a grouping comma joins digits.
+        assert!(!is_inside_number(Some('3'), '-', Some('1')));
+        assert!(!is_inside_number(Some('3'), '!', Some('1')));
     }
 
     #[test]
