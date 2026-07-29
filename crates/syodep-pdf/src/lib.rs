@@ -157,6 +157,10 @@ pub struct ContentObject {
 pub struct PageContent {
     pub lines: Vec<ContentLine>,
     pub objects: Vec<ContentObject>,
+    /// Lines removed as page furniture — running heads, folios, rotated
+    /// stamps. Never navigable, kept so nothing is destroyed and so tests can
+    /// assert *which* lines went rather than merely how many.
+    pub furniture: Vec<ContentLine>,
 }
 
 impl PageContent {
@@ -184,6 +188,9 @@ pub struct ContentOptions {
     /// Detect headings so each is one sentence and one paragraph. Free: the
     /// type sizes it keys on come from the pass that extracts the text.
     pub detect_headings: bool,
+    /// Drop running heads, folios and text that does not run in the page's
+    /// reading direction, so the caret never traverses them.
+    pub skip_page_furniture: bool,
 }
 
 impl Default for ContentOptions {
@@ -191,11 +198,12 @@ impl Default for ContentOptions {
         Self {
             detect_tables: true,
             detect_headings: true,
+            skip_page_furniture: true,
         }
     }
 }
 
-/// The typography of one content line, used only to spot headings.
+/// The typography of one content line, used only by detection.
 ///
 /// Not part of [`ContentLine`]: nothing outside detection needs it, and
 /// keeping it out means the public content types stay about geometry.
@@ -205,7 +213,95 @@ struct LineStyle {
     size: f32,
     /// Whether the line is essentially all bold.
     bold: bool,
+    /// Angle of the line's baseline in degrees, or `None` when its characters
+    /// disagree or carry no usable direction.
+    angle: Option<f32>,
+    /// The line's baseline, as the median character origin. Glyph extents make
+    /// a bounding box a poor position key — a descender moves it by points —
+    /// whereas the baseline is where the type actually sits.
+    baseline: f32,
 }
+
+/// Which edge of the page a margin band hugs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Edge {
+    Top,
+    Bottom,
+}
+
+/// One thing that recurs in the margins of a document.
+#[derive(Debug, Clone, PartialEq)]
+struct FurnitureEntry {
+    text: String,
+    edge: Edge,
+    /// Distance from the nearer page edge, so mixed page sizes still match.
+    offset: f32,
+    pages: usize,
+}
+
+/// What a document repeats in its margins: running heads, folios and the like.
+///
+/// Document-scoped rather than per-page, because repetition *is* the evidence.
+/// A title appears once and so is never mistaken for a running head.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FurnitureProfile {
+    entries: Vec<FurnitureEntry>,
+    pages_sampled: usize,
+}
+
+impl FurnitureProfile {
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn pages_sampled(&self) -> usize {
+        self.pages_sampled
+    }
+}
+
+/// A line summarised for the margin-repetition vote.
+#[derive(Debug, Clone, PartialEq)]
+struct BandLine {
+    text: String,
+    edge: Edge,
+    offset: f32,
+}
+
+/// How far off the page's dominant direction a line must sit to be marginal.
+/// Ordinary lines report their angle to the exact degree — measured across a
+/// real document, every one came back `0.0` — so this is enormously slack.
+const ANGLE_TOLERANCE_DEG: f32 = 10.0;
+
+/// The dominant direction must carry this share of a page's characters. Below
+/// it the page has no clear reading direction and nothing is marginal.
+const ANGLE_DOMINANCE: f32 = 0.55;
+
+/// How much of the page, top and bottom, counts as margin band.
+const BAND_SHARE: f32 = 0.15;
+
+/// How far two baselines may differ and still be the same running element.
+const BASELINE_TOLERANCE: f32 = 2.5;
+
+/// A margin entry must recur on at least this many sampled pages, and this
+/// share of them. Two rather than one is what stops a one-off title being read
+/// as a running head; the share tolerates headers that alternate between
+/// facing pages.
+const MIN_REPEAT_PAGES: usize = 2;
+const MIN_REPEAT_SHARE: f32 = 0.30;
+
+/// Caps on the repetition rule (the rotation rule needs none — see
+/// [`furniture_mask`]).
+const MAX_ENTRIES_PER_EDGE: usize = 4;
+const MAX_FURNITURE_PER_EDGE: usize = 3;
+const MAX_FURNITURE_SHARE: f32 = 0.25;
+const MIN_LINES_FOR_SHARE_CAP: usize = 12;
+
+/// Pages are sampled as this many anchors, each a *pair* of facing pages.
+const SAMPLE_ANCHORS: usize = 4;
 
 /// An RGBA8 image, tightly packed (`stride == width * 4`).
 #[derive(Debug, Clone)]
@@ -358,7 +454,12 @@ impl Document {
     /// Tables come from a **second** structured-text pass (see
     /// [`Document::table_bboxes`]), because the pass that finds them cannot
     /// also yield their text.
-    pub fn page_content(&self, page: usize, opts: ContentOptions) -> Result<PageContent, PdfError> {
+    pub fn page_content(
+        &self,
+        page: usize,
+        opts: ContentOptions,
+        furniture_profile: Option<&FurnitureProfile>,
+    ) -> Result<PageContent, PdfError> {
         self.check_page(page)?;
         let mupdf_page = self.inner.load_page(page as i32)?;
         let text_page = mupdf_page.to_text_page(TextPageFlags::PRESERVE_IMAGES)?;
@@ -379,23 +480,45 @@ impl Document {
                 styles.push(LineStyle {
                     size: 0.0,
                     bold: false,
+                    // An image has no direction and no text, so it can never be
+                    // furniture: a logo inside a running header survives as an
+                    // image stop. Deliberately conservative.
+                    angle: None,
+                    baseline: (bbox.y0 + bbox.y1) / 2.0,
                 });
                 continue;
             }
             for line in block.lines() {
                 let mut cells = Vec::new();
                 let mut sizes: Vec<(i32, usize)> = Vec::new();
+                let mut dirs: Vec<(f32, f32)> = Vec::new();
+                let mut origins: Vec<f32> = Vec::new();
                 let (mut bold, mut inked) = (0usize, 0usize);
                 for ch in line.chars() {
                     let Some(c) = ch.char() else { continue };
+                    let quad = ch.quad();
                     cells.push(Cell {
                         kind: CellKind::Char(c),
-                        bbox: rect_from_quad(&ch.quad()),
+                        bbox: rect_from_quad(&quad),
                     });
                     if c.is_whitespace() {
                         continue;
                     }
                     inked += 1;
+                    origins.push(ch.origin().y);
+                    // The top and bottom edges of the quad both run along the
+                    // baseline, so either gives the direction the line travels
+                    // in — even for a single glyph, where there is no second
+                    // origin to subtract from.
+                    let (mut dx, mut dy) = (quad.ur.x - quad.ul.x, quad.ur.y - quad.ul.y);
+                    if dx.hypot(dy) < 1e-3 {
+                        dx = quad.lr.x - quad.ll.x;
+                        dy = quad.lr.y - quad.ll.y;
+                    }
+                    let len = dx.hypot(dy);
+                    if len >= 1e-3 {
+                        dirs.push((dx / len, dy / len));
+                    }
                     // Bucket to 0.1pt so one superscript cannot outvote the
                     // body of the line.
                     let bucket = (ch.size() * 10.0).round() as i32;
@@ -414,15 +537,47 @@ impl Document {
                     .iter()
                     .max_by_key(|(bucket, n)| (*n, *bucket))
                     .map_or(0.0, |(bucket, _)| *bucket as f32 / 10.0);
-                lines.push(ContentLine {
-                    bbox: rect_from_mupdf(line.bounds()),
-                    cells,
-                });
+                let bbox = rect_from_mupdf(line.bounds());
+                origins.sort_by(f32::total_cmp);
+                let baseline = origins
+                    .get(origins.len() / 2)
+                    .copied()
+                    .unwrap_or((bbox.y0 + bbox.y1) / 2.0);
+                lines.push(ContentLine { bbox, cells });
                 styles.push(LineStyle {
                     size,
                     bold: inked > 0 && bold * 5 >= inked * 4,
+                    angle: line_angle(&dirs),
+                    baseline,
                 });
             }
+        }
+
+        // Furniture goes before anything else looks at the page, so headings
+        // and tables are judged against reading matter alone: a full-width
+        // running header inflates the "widest line" the heading rule compares
+        // against, and an 8pt folio drags its body-size vote.
+        let mut furniture = Vec::new();
+        if opts.skip_page_furniture {
+            let height = self.page_size(page)?.height;
+            let mask = furniture_mask(&lines, &styles, height, furniture_profile);
+            let mut old_to_new = vec![None; lines.len()];
+            let (mut kept_lines, mut kept_styles) = (Vec::new(), Vec::new());
+            for (i, (line, style)) in lines.into_iter().zip(styles).enumerate() {
+                if mask[i] {
+                    furniture.push(line);
+                } else {
+                    old_to_new[i] = Some(kept_lines.len());
+                    kept_lines.push(line);
+                    kept_styles.push(style);
+                }
+            }
+            // Image indices point into the unfiltered vector; dropping lines
+            // without remapping them compiles perfectly well and silently
+            // labels a line of text as an image.
+            image_lines = image_lines.iter().filter_map(|&i| old_to_new[i]).collect();
+            lines = kept_lines;
+            styles = kept_styles;
         }
 
         // A single line can never form a table, so skip the second pass.
@@ -437,8 +592,86 @@ impl Document {
             Vec::new()
         };
 
-        let objects = content_objects(&lines, &image_lines, &tables, &headings);
-        Ok(PageContent { lines, objects })
+        let objects = content_objects(&lines, &image_lines, &tables, &headings, &furniture);
+        Ok(PageContent {
+            lines,
+            objects,
+            furniture,
+        })
+    }
+
+    /// Learn what this document repeats in its margins.
+    ///
+    /// Sampled as [`SAMPLE_ANCHORS`] anchors of *two consecutive pages* rather
+    /// than evenly spaced single pages. Evenly spaced sampling lands on one
+    /// parity — 100 pages sampled 8 times steps by 14, hitting only even pages
+    /// — and a book that puts its title on versos and the chapter on rectos
+    /// would have half its running heads never recur. Pairs cover both at the
+    /// same cost.
+    pub fn furniture_profile(&self) -> Result<FurnitureProfile, PdfError> {
+        let count = self.page_count();
+        if count < 2 {
+            return Ok(FurnitureProfile::empty());
+        }
+        let mut pages: Vec<usize> = Vec::new();
+        for k in 0..SAMPLE_ANCHORS {
+            let anchor = k * (count - 1) / SAMPLE_ANCHORS.max(1);
+            for p in [anchor, anchor + 1] {
+                if p < count && !pages.contains(&p) {
+                    pages.push(p);
+                }
+            }
+        }
+        let mut samples = Vec::new();
+        for page in pages {
+            // A page that will not extract is skipped, not fatal: a profile
+            // built from fewer pages is still useful.
+            let Ok(summary) = self.band_lines(page) else {
+                continue;
+            };
+            samples.push(summary);
+        }
+        Ok(build_profile(&samples))
+    }
+
+    /// One page's margin-band lines, summarised for the repetition vote.
+    fn band_lines(&self, page: usize) -> Result<Vec<BandLine>, PdfError> {
+        let height = self.page_size(page)?.height;
+        let mupdf_page = self.inner.load_page(page as i32)?;
+        // No PRESERVE_IMAGES: an image is never furniture, so it is not worth
+        // extracting one here.
+        let text_page = mupdf_page.to_text_page(TextPageFlags::empty())?;
+        let mut out = Vec::new();
+        for block in text_page.blocks() {
+            if !matches!(block.r#type(), TextBlockType::Text) {
+                continue;
+            }
+            for line in block.lines() {
+                let mut origins = Vec::new();
+                let mut text = String::new();
+                for ch in line.chars() {
+                    let Some(c) = ch.char() else { continue };
+                    text.push(c);
+                    if !c.is_whitespace() {
+                        origins.push(ch.origin().y);
+                    }
+                }
+                if origins.is_empty() {
+                    continue;
+                }
+                origins.sort_by(f32::total_cmp);
+                let baseline = origins[origins.len() / 2];
+                let Some((edge, offset)) = band_of(baseline, height) else {
+                    continue;
+                };
+                let text = normalise_furniture_text(&text);
+                if text.is_empty() {
+                    continue;
+                }
+                out.push(BandLine { text, edge, offset });
+            }
+        }
+        Ok(out)
     }
 
     /// Bounding boxes of the tables MuPDF detects on `page`.
@@ -475,6 +708,275 @@ impl Document {
         let outlines = self.inner.outlines()?;
         Ok(outlines.into_iter().map(convert_outline).collect())
     }
+}
+
+/// The angle of a line's baseline, in degrees, from its characters' direction
+/// vectors (each already normalised).
+///
+/// A circular mean rather than a bucketed vote: bucketing splits a single
+/// physical direction across the +/-180 wraparound, so text at +179 and -179
+/// would average to 0 — pointing the opposite way. When the resultant is short
+/// the characters genuinely disagree and the answer is `None`, which means the
+/// line is never treated as marginal.
+fn line_angle(dirs: &[(f32, f32)]) -> Option<f32> {
+    if dirs.is_empty() {
+        return None;
+    }
+    let (mut sx, mut sy) = (0.0f32, 0.0f32);
+    for (x, y) in dirs {
+        sx += x;
+        sy += y;
+    }
+    if sx.hypot(sy) < 0.5 * dirs.len() as f32 {
+        return None;
+    }
+    Some(sy.atan2(sx).to_degrees())
+}
+
+/// Smallest signed difference between two angles in degrees, across the
+/// +/-180 wraparound.
+fn angle_difference(a: f32, b: f32) -> f32 {
+    let mut d = (a - b) % 360.0;
+    if d > 180.0 {
+        d -= 360.0;
+    } else if d < -180.0 {
+        d += 360.0;
+    }
+    d
+}
+
+/// The direction most of a page's characters run in.
+///
+/// Lines are clustered greedily by angle, weighted by how many characters they
+/// carry. A tie is broken towards horizontal, which rescues a sparse page whose
+/// rotated sidebar out-weighs its body text. `None` when no direction carries
+/// [`ANGLE_DOMINANCE`] of the page — better to flag nothing than to guess.
+fn dominant_angle(angles: &[(Option<f32>, usize)]) -> Option<f32> {
+    let total: usize = angles
+        .iter()
+        .filter(|(a, _)| a.is_some())
+        .map(|(_, w)| *w)
+        .sum();
+    if total == 0 {
+        return None;
+    }
+    let mut ordered: Vec<(f32, usize)> = angles
+        .iter()
+        .filter_map(|(a, w)| a.map(|a| (a, *w)))
+        .collect();
+    ordered.sort_by_key(|(_, weight)| std::cmp::Reverse(*weight));
+
+    let mut clusters: Vec<(f32, usize)> = Vec::new();
+    for (angle, weight) in ordered {
+        match clusters
+            .iter_mut()
+            .find(|(rep, _)| angle_difference(angle, *rep).abs() <= ANGLE_TOLERANCE_DEG)
+        {
+            Some((_, w)) => *w += weight,
+            None => clusters.push((angle, weight)),
+        }
+    }
+    let (best_angle, best_weight) = *clusters.iter().max_by_key(|(_, w)| *w)?;
+    // A page whose text is split between two directions has no reading
+    // direction to speak of, so nothing on it is marginal. This is also what
+    // protects a sparse page whose rotated sidebar outweighs its prose: no
+    // winner clears the bar, so neither is flagged.
+    if (best_weight as f32) < ANGLE_DOMINANCE * total as f32 {
+        return None;
+    }
+    Some(best_angle)
+}
+
+/// Reduce a line to the key the margin-repetition vote compares.
+///
+/// Digits collapse to `#`, so a page number matches itself across pages;
+/// everything that is neither alphanumeric nor space is dropped, which is what
+/// makes `- 12 -` and `12` the same key and stops the period in `2.1` mattering.
+/// An empty result means the line carried no comparable text at all (a rule, a
+/// row of dots) and must be excluded, since an empty key collides with every
+/// other one.
+fn normalise_furniture_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut last_hash = false;
+    for c in text.chars() {
+        let mapped = if c.is_ascii_digit() {
+            '#'
+        } else if c.is_alphanumeric() {
+            c.to_lowercase().next().unwrap_or(c)
+        } else if c.is_whitespace() {
+            ' '
+        } else {
+            continue;
+        };
+        if mapped == '#' && last_hash {
+            continue;
+        }
+        last_hash = mapped == '#';
+        out.push(mapped);
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Which band a baseline falls in, and how far it sits from that page edge.
+fn band_of(baseline: f32, page_height: f32) -> Option<(Edge, f32)> {
+    if page_height <= 0.0 {
+        return None;
+    }
+    if baseline <= BAND_SHARE * page_height {
+        Some((Edge::Top, baseline))
+    } else if baseline >= (1.0 - BAND_SHARE) * page_height {
+        Some((Edge::Bottom, page_height - baseline))
+    } else {
+        None
+    }
+}
+
+/// Learn which margin lines recur, from one summary per sampled page.
+fn build_profile(samples: &[Vec<BandLine>]) -> FurnitureProfile {
+    let pages_sampled = samples.len();
+    let mut entries: Vec<FurnitureEntry> = Vec::new();
+    for page in samples {
+        // One page cannot vote twice for the same entry.
+        let mut counted: Vec<usize> = Vec::new();
+        for line in page {
+            let found = entries.iter().position(|e| {
+                e.text == line.text
+                    && e.edge == line.edge
+                    && (e.offset - line.offset).abs() <= BASELINE_TOLERANCE
+            });
+            match found {
+                Some(i) => {
+                    if !counted.contains(&i) {
+                        entries[i].pages += 1;
+                        counted.push(i);
+                    }
+                }
+                None => {
+                    entries.push(FurnitureEntry {
+                        text: line.text.clone(),
+                        edge: line.edge,
+                        offset: line.offset,
+                        pages: 1,
+                    });
+                    counted.push(entries.len() - 1);
+                }
+            }
+        }
+    }
+    let min_pages = MIN_REPEAT_PAGES.max((MIN_REPEAT_SHARE * pages_sampled as f32).ceil() as usize);
+    entries.retain(|e| e.pages >= min_pages);
+    entries.sort_by_key(|e| std::cmp::Reverse(e.pages));
+    for edge in [Edge::Top, Edge::Bottom] {
+        let mut kept = 0;
+        entries.retain(|e| {
+            if e.edge != edge {
+                return true;
+            }
+            kept += 1;
+            kept <= MAX_ENTRIES_PER_EDGE
+        });
+    }
+    FurnitureProfile {
+        entries,
+        pages_sampled,
+    }
+}
+
+/// Which of a page's lines are furniture rather than reading material.
+///
+/// Two independent rules. **Rotation**: a line more than
+/// [`ANGLE_TOLERANCE_DEG`] off the page's dominant direction. This one needs no
+/// cap and provably cannot empty a page — the dominant cluster is by
+/// construction the majority of the page's characters and is never flagged, so
+/// a wholly sideways page keeps everything. **Repetition**: a margin-band line
+/// whose normalised text and baseline recur across the document. That one is
+/// capped, because its evidence comes from elsewhere.
+fn furniture_mask(
+    lines: &[ContentLine],
+    styles: &[LineStyle],
+    page_height: f32,
+    profile: Option<&FurnitureProfile>,
+) -> Vec<bool> {
+    let mut mask = vec![false; lines.len()];
+    if lines.is_empty() {
+        return mask;
+    }
+
+    let weights: Vec<(Option<f32>, usize)> = lines
+        .iter()
+        .zip(styles)
+        .map(|(l, s)| (s.angle, l.cells.len()))
+        .collect();
+    if let Some(dominant) = dominant_angle(&weights) {
+        for (i, style) in styles.iter().enumerate() {
+            if let Some(angle) = style.angle {
+                if angle_difference(angle, dominant).abs() > ANGLE_TOLERANCE_DEG {
+                    mask[i] = true;
+                }
+            }
+        }
+    }
+
+    let Some(profile) = profile.filter(|p| !p.is_empty()) else {
+        return mask;
+    };
+    let mut repeated: Vec<usize> = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        if mask[i] {
+            continue;
+        }
+        let Some((edge, offset)) = band_of(styles[i].baseline, page_height) else {
+            continue;
+        };
+        let text = normalise_furniture_text(&line_text(line));
+        if text.is_empty() {
+            continue;
+        }
+        let matched = profile.entries.iter().any(|e| {
+            e.text == text && e.edge == edge && (e.offset - offset).abs() <= BASELINE_TOLERANCE
+        });
+        if matched {
+            repeated.push(i);
+        }
+    }
+
+    // Beyond these bounds the evidence is not credible: leave the page alone.
+    let per_edge = |edge: Edge| {
+        repeated
+            .iter()
+            .filter(|&&i| band_of(styles[i].baseline, page_height).map(|b| b.0) == Some(edge))
+            .count()
+    };
+    // The per-edge cap is the real bound and applies always. The share cap is
+    // only meaningful once a page has enough lines for a share to mean
+    // anything — a short page is legitimately a third furniture.
+    //
+    // The repetition rule may never take a page's last line. A margin is only
+    // a margin if there is something it is in the margin *of*, and the failure
+    // this prevents is the worst one available: text plainly visible on the
+    // page that the caret cannot reach at all.
+    let share_applies = lines.len() >= MIN_LINES_FOR_SHARE_CAP;
+    let too_many = repeated.len() == lines.len()
+        || per_edge(Edge::Top) > MAX_FURNITURE_PER_EDGE
+        || per_edge(Edge::Bottom) > MAX_FURNITURE_PER_EDGE
+        || (share_applies && repeated.len() as f32 > MAX_FURNITURE_SHARE * lines.len() as f32);
+    if !too_many {
+        for i in repeated {
+            mask[i] = true;
+        }
+    }
+    mask
+}
+
+/// The characters of a line, for text comparison.
+fn line_text(line: &ContentLine) -> String {
+    line.cells
+        .iter()
+        .filter_map(|c| match c.kind {
+            CellKind::Char(ch) => Some(ch),
+            CellKind::Image => None,
+        })
+        .collect()
 }
 
 /// How much larger than the body text a line must be set to read as a heading.
@@ -582,10 +1084,16 @@ fn content_objects(
     image_lines: &[usize],
     tables: &[Rect],
     headings: &[(usize, usize)],
+    furniture: &[ContentLine],
 ) -> Vec<ContentObject> {
-    let non_empty = lines.iter().filter(|l| !l.cells.is_empty()).count();
-    let content_area = lines
-        .iter()
+    // The "claims the whole page" guards below must be judged against the
+    // whole page, furniture included. Otherwise removing a running head and a
+    // folio makes a full-page table claim every remaining line, the guard
+    // fires, and table detection quietly dies on exactly the pages that have
+    // tables. Membership and indices stay in filtered space.
+    let whole_page = || lines.iter().chain(furniture);
+    let non_empty = whole_page().filter(|l| !l.cells.is_empty()).count();
+    let content_area = whole_page()
         .map(|l| l.bbox)
         .reduce(|a, b| a.union(b))
         .map_or(0.0, |r| r.area());
@@ -817,7 +1325,7 @@ mod tests {
     fn page_content_extracts_chars_in_reading_order() {
         let doc = three_page_doc();
         let lines = doc
-            .page_content(0, ContentOptions::default())
+            .page_content(0, ContentOptions::default(), None)
             .unwrap()
             .lines;
         assert!(!lines.is_empty());
@@ -851,7 +1359,7 @@ mod tests {
     fn page_content_out_of_range_fails() {
         let doc = three_page_doc();
         assert!(matches!(
-            doc.page_content(3, ContentOptions::default()),
+            doc.page_content(3, ContentOptions::default(), None),
             Err(PdfError::PageOutOfRange { .. })
         ));
     }
@@ -860,7 +1368,7 @@ mod tests {
     fn page_content_includes_one_cell_per_image() {
         let doc = Document::from_bytes(&crate::test_support::pdf_with_image()).unwrap();
         let lines = doc
-            .page_content(0, ContentOptions::default())
+            .page_content(0, ContentOptions::default(), None)
             .unwrap()
             .lines;
         let images: Vec<Cell> = lines
@@ -915,7 +1423,7 @@ mod tests {
     #[test]
     fn object_ranges_cover_the_lines_inside_a_table_box() {
         let lines = stacked_lines(10);
-        let objects = content_objects(&lines, &[], &[box_over(&lines, 3..=6)], &[]);
+        let objects = content_objects(&lines, &[], &[box_over(&lines, 3..=6)], &[], &[]);
         assert_eq!(objects.len(), 1);
         assert_eq!(objects[0].kind, ObjectKind::Table);
         assert_eq!((objects[0].start_line, objects[0].end_line), (3, 6));
@@ -924,7 +1432,7 @@ mod tests {
     #[test]
     fn object_ranges_reject_a_single_line_table() {
         let lines = stacked_lines(10);
-        let objects = content_objects(&lines, &[], &[box_over(&lines, 4..=4)], &[]);
+        let objects = content_objects(&lines, &[], &[box_over(&lines, 4..=4)], &[], &[]);
         assert_eq!(objects, vec![], "a one-line table is just a line");
     }
 
@@ -933,7 +1441,7 @@ mod tests {
         // MuPDF's whole-page fallback fires on ordinary prose; this guard is
         // the only thing standing between it and unnavigable pages.
         let lines = stacked_lines(10);
-        let objects = content_objects(&lines, &[], &[box_over(&lines, 0..=9)], &[]);
+        let objects = content_objects(&lines, &[], &[box_over(&lines, 0..=9)], &[], &[]);
         assert_eq!(objects, vec![]);
     }
 
@@ -949,7 +1457,7 @@ mod tests {
             x1: 210.0,
             y1: 172.0,
         };
-        let objects = content_objects(&lines, &[], &[table], &[]);
+        let objects = content_objects(&lines, &[], &[table], &[], &[]);
         assert_eq!(objects, vec![], "a gapped table must degrade, not guess");
     }
 
@@ -961,6 +1469,7 @@ mod tests {
             &[],
             &[box_over(&lines, 2..=8), box_over(&lines, 4..=6)],
             &[],
+            &[],
         );
         assert_eq!(objects.len(), 1);
         assert_eq!((objects[0].start_line, objects[0].end_line), (2, 8));
@@ -969,7 +1478,7 @@ mod tests {
     #[test]
     fn object_ranges_make_each_image_its_own_object() {
         let lines = stacked_lines(6);
-        let objects = content_objects(&lines, &[1, 4], &[], &[]);
+        let objects = content_objects(&lines, &[1, 4], &[], &[], &[]);
         assert_eq!(objects.len(), 2);
         assert!(objects.iter().all(|o| o.kind == ObjectKind::Image));
         assert_eq!((objects[0].start_line, objects[0].end_line), (1, 1));
@@ -979,7 +1488,7 @@ mod tests {
     #[test]
     fn object_ranges_absorb_an_image_inside_a_table() {
         let lines = stacked_lines(10);
-        let objects = content_objects(&lines, &[5], &[box_over(&lines, 3..=6)], &[]);
+        let objects = content_objects(&lines, &[5], &[box_over(&lines, 3..=6)], &[], &[]);
         assert_eq!(objects.len(), 1, "the table is the enclosing unit");
         assert_eq!(objects[0].kind, ObjectKind::Table);
     }
@@ -992,6 +1501,7 @@ mod tests {
             &[0, 15],
             &[box_over(&lines, 8..=11), box_over(&lines, 3..=5)],
             &[(17, 18)],
+            &[],
         );
         for pair in objects.windows(2) {
             assert!(
@@ -1033,6 +1543,8 @@ mod tests {
             styles.push(LineStyle {
                 size: 10.0,
                 bold: false,
+                angle: Some(0.0),
+                baseline: y + 8.0,
             });
         }
         (lines, styles)
@@ -1046,7 +1558,11 @@ mod tests {
         bold: bool,
         width: f32,
     ) {
-        styles[i] = LineStyle { size, bold };
+        styles[i] = LineStyle {
+            size,
+            bold,
+            ..styles[i]
+        };
         lines[i].bbox.x1 = lines[i].bbox.x0 + width;
     }
 
@@ -1131,7 +1647,7 @@ mod tests {
     fn object_ranges_drop_a_heading_that_overlaps_a_table() {
         // A bold, short line inside a table is a column header.
         let lines = stacked_lines(10);
-        let objects = content_objects(&lines, &[], &[box_over(&lines, 3..=6)], &[(4, 4)]);
+        let objects = content_objects(&lines, &[], &[box_over(&lines, 3..=6)], &[(4, 4)], &[]);
         assert_eq!(objects.len(), 1);
         assert_eq!(objects[0].kind, ObjectKind::Table);
     }
@@ -1139,7 +1655,7 @@ mod tests {
     #[test]
     fn object_ranges_keep_a_heading_outside_every_table() {
         let lines = stacked_lines(10);
-        let objects = content_objects(&lines, &[], &[box_over(&lines, 5..=8)], &[(1, 2)]);
+        let objects = content_objects(&lines, &[], &[box_over(&lines, 5..=8)], &[(1, 2)], &[]);
         assert_eq!(objects.len(), 2);
         assert_eq!(objects[0].kind, ObjectKind::Heading);
         assert_eq!((objects[0].start_line, objects[0].end_line), (1, 2));
@@ -1149,7 +1665,9 @@ mod tests {
     #[test]
     fn page_content_detects_a_heading_and_a_bold_subheading() {
         let doc = Document::from_bytes(&crate::test_support::pdf_with_heading()).unwrap();
-        let content = doc.page_content(0, ContentOptions::default()).unwrap();
+        let content = doc
+            .page_content(0, ContentOptions::default(), None)
+            .unwrap();
         let headings: Vec<_> = content
             .objects
             .iter()
@@ -1185,7 +1703,9 @@ mod tests {
     #[test]
     fn page_content_reports_no_heading_on_uniform_prose() {
         let doc = three_page_doc();
-        let content = doc.page_content(0, ContentOptions::default()).unwrap();
+        let content = doc
+            .page_content(0, ContentOptions::default(), None)
+            .unwrap();
         assert!(
             !content
                 .objects
@@ -1206,6 +1726,7 @@ mod tests {
                     detect_headings: false,
                     ..ContentOptions::default()
                 },
+                None,
             )
             .unwrap();
         assert!(content
@@ -1214,12 +1735,506 @@ mod tests {
             .all(|o| o.kind != ObjectKind::Heading));
     }
 
+    // ---- Page furniture --------------------------------------------------
+
+    fn dirs_at(degrees: f32, n: usize) -> Vec<(f32, f32)> {
+        let r = degrees.to_radians();
+        vec![(r.cos(), r.sin()); n]
+    }
+
+    #[test]
+    fn line_angle_of_horizontal_text_is_zero() {
+        assert_eq!(line_angle(&dirs_at(0.0, 5)), Some(0.0));
+    }
+
+    #[test]
+    fn line_angle_of_a_rotated_run() {
+        let a = line_angle(&dirs_at(-90.0, 4)).unwrap();
+        assert!((a + 90.0).abs() < 0.01, "got {a}");
+    }
+
+    #[test]
+    fn line_angle_survives_the_wraparound() {
+        // +179 and -179 are the same physical direction; a bucketed vote would
+        // average them to 0, which points the opposite way.
+        let mut dirs = dirs_at(179.0, 3);
+        dirs.extend(dirs_at(-179.0, 3));
+        let a = line_angle(&dirs).unwrap();
+        assert!(a.abs() > 170.0, "got {a}");
+    }
+
+    #[test]
+    fn line_angle_is_none_without_usable_directions() {
+        assert_eq!(line_angle(&[]), None);
+        // Characters pointing opposite ways cancel: no direction to report.
+        let mut dirs = dirs_at(0.0, 3);
+        dirs.extend(dirs_at(180.0, 3));
+        assert_eq!(line_angle(&dirs), None);
+    }
+
+    #[test]
+    fn dominant_angle_is_the_character_weighted_majority() {
+        let angles = [(Some(0.0), 300), (Some(-90.0), 20), (Some(-45.0), 10)];
+        assert_eq!(dominant_angle(&angles), Some(0.0));
+    }
+
+    #[test]
+    fn dominant_angle_of_a_sideways_page_is_the_rotation() {
+        let angles = [(Some(-90.0), 200), (Some(-90.0), 180)];
+        assert_eq!(dominant_angle(&angles), Some(-90.0));
+    }
+
+    #[test]
+    fn dominant_angle_flags_nothing_on_a_near_tie() {
+        // A sparse page whose rotated stamp just out-weighs its prose: no
+        // direction clears the floor, so neither is treated as marginal.
+        let angles = [(Some(-90.0), 105), (Some(0.0), 100)];
+        assert_eq!(dominant_angle(&angles), None);
+    }
+
+    #[test]
+    fn dominant_angle_is_none_when_no_direction_carries_the_page() {
+        let angles = [(Some(0.0), 100), (Some(-90.0), 100)];
+        assert_eq!(dominant_angle(&angles), None);
+    }
+
+    #[test]
+    fn normalise_masks_digit_runs_and_folds_case() {
+        assert_eq!(normalise_furniture_text("Page 12 of 340"), "page # of #");
+        assert_eq!(
+            normalise_furniture_text("Shared MIME-info Database"),
+            "shared mimeinfo database"
+        );
+        // Decoration around a folio must not stop it matching a bare one.
+        assert_eq!(
+            normalise_furniture_text("— 12 —"),
+            normalise_furniture_text("12")
+        );
+    }
+
+    #[test]
+    fn normalise_of_a_decorative_rule_is_empty() {
+        // An empty key would collide with every other decorative line, so
+        // such lines are excluded from the vote entirely.
+        assert_eq!(normalise_furniture_text("......."), "");
+        assert_eq!(normalise_furniture_text("---"), "");
+    }
+
+    fn band(text: &str, edge: Edge, offset: f32) -> BandLine {
+        BandLine {
+            text: text.to_owned(),
+            edge,
+            offset,
+        }
+    }
+
+    #[test]
+    fn profile_learns_a_line_that_repeats_across_pages() {
+        let samples: Vec<Vec<BandLine>> = (0..6)
+            .map(|_| vec![band("shared mimeinfo database", Edge::Top, 42.0)])
+            .collect();
+        let profile = build_profile(&samples);
+        assert_eq!(profile.entries.len(), 1);
+        assert_eq!(profile.pages_sampled(), 6);
+    }
+
+    #[test]
+    fn profile_ignores_a_line_seen_once() {
+        let mut samples: Vec<Vec<BandLine>> = (0..6).map(|_| Vec::new()).collect();
+        samples[0].push(band("a paper title", Edge::Top, 90.0));
+        assert!(build_profile(&samples).is_empty());
+    }
+
+    #[test]
+    fn profile_ignores_a_line_below_the_share_threshold() {
+        // Two of eight is 25%: under the floor, so a coincidence rather than
+        // a running element.
+        let mut samples: Vec<Vec<BandLine>> = (0..8).map(|_| Vec::new()).collect();
+        samples[0].push(band("#", Edge::Bottom, 104.0));
+        samples[1].push(band("#", Edge::Bottom, 104.0));
+        assert!(build_profile(&samples).is_empty());
+    }
+
+    #[test]
+    fn profile_tolerates_baseline_jitter_but_not_a_different_height() {
+        let jitter: Vec<Vec<BandLine>> = (0..4)
+            .map(|i| vec![band("running head", Edge::Top, 42.0 + i as f32 * 0.5)])
+            .collect();
+        assert_eq!(build_profile(&jitter).entries.len(), 1);
+
+        let moved: Vec<Vec<BandLine>> = (0..4)
+            .map(|i| vec![band("running head", Edge::Top, 42.0 + i as f32 * 20.0)])
+            .collect();
+        assert!(build_profile(&moved).is_empty());
+    }
+
+    #[test]
+    fn profile_keeps_the_two_edges_apart() {
+        let samples: Vec<Vec<BandLine>> = (0..4)
+            .map(|_| vec![band("#", Edge::Top, 42.0), band("#", Edge::Bottom, 42.0)])
+            .collect();
+        let profile = build_profile(&samples);
+        assert_eq!(profile.entries.len(), 2);
+    }
+
+    /// A page of `count` lines, evenly spaced down `height`, all upright.
+    fn page_lines(count: usize, height: f32) -> (Vec<ContentLine>, Vec<LineStyle>) {
+        let mut lines = Vec::new();
+        let mut styles = Vec::new();
+        for i in 0..count {
+            let y = height * (i as f32 + 0.5) / count as f32;
+            lines.push(text_line_at(y, "body text here"));
+            styles.push(LineStyle {
+                size: 10.0,
+                bold: false,
+                angle: Some(0.0),
+                baseline: y,
+            });
+        }
+        (lines, styles)
+    }
+
+    fn text_line_at(y: f32, text: &str) -> ContentLine {
+        let cells: Vec<Cell> = text
+            .chars()
+            .enumerate()
+            .map(|(i, ch)| Cell {
+                kind: CellKind::Char(ch),
+                bbox: Rect {
+                    x0: 100.0 + i as f32 * 6.0,
+                    y0: y - 8.0,
+                    x1: 106.0 + i as f32 * 6.0,
+                    y1: y,
+                },
+            })
+            .collect();
+        ContentLine {
+            bbox: Rect {
+                x0: 100.0,
+                y0: y - 8.0,
+                x1: 100.0 + text.chars().count() as f32 * 6.0,
+                y1: y,
+            },
+            cells,
+        }
+    }
+
+    fn profile_of(entries: &[(&str, Edge, f32)]) -> FurnitureProfile {
+        FurnitureProfile {
+            entries: entries
+                .iter()
+                .map(|(t, e, o)| FurnitureEntry {
+                    text: (*t).to_owned(),
+                    edge: *e,
+                    offset: *o,
+                    pages: 4,
+                })
+                .collect(),
+            pages_sampled: 8,
+        }
+    }
+
+    #[test]
+    fn mask_removes_a_repeated_running_head() {
+        let height = 842.0;
+        let (mut lines, mut styles) = page_lines(10, height);
+        lines[0] = text_line_at(42.0, "shared mime info database");
+        styles[0].baseline = 42.0;
+        let profile = profile_of(&[("shared mime info database", Edge::Top, 42.0)]);
+        let mask = furniture_mask(&lines, &styles, height, Some(&profile));
+        assert!(mask[0]);
+        assert!(mask[1..].iter().all(|m| !m));
+    }
+
+    #[test]
+    fn mask_keeps_a_band_line_that_does_not_repeat() {
+        let height = 842.0;
+        let (mut lines, mut styles) = page_lines(10, height);
+        lines[0] = text_line_at(42.0, "a one off paper title");
+        styles[0].baseline = 42.0;
+        let profile = profile_of(&[("shared mime info database", Edge::Top, 42.0)]);
+        assert!(furniture_mask(&lines, &styles, height, Some(&profile))
+            .iter()
+            .all(|m| !m));
+    }
+
+    #[test]
+    fn mask_keeps_a_repeated_line_outside_the_bands() {
+        // The bands are what stop a repeated phrase in body text vanishing.
+        let height = 842.0;
+        let (mut lines, mut styles) = page_lines(10, height);
+        let middle = height / 2.0;
+        lines[5] = text_line_at(middle, "shared mime info database");
+        styles[5].baseline = middle;
+        let profile = profile_of(&[("shared mime info database", Edge::Top, middle)]);
+        assert!(furniture_mask(&lines, &styles, height, Some(&profile))
+            .iter()
+            .all(|m| !m));
+    }
+
+    #[test]
+    fn mask_removes_a_rotated_stamp_without_any_profile() {
+        let height = 842.0;
+        let (lines, mut styles) = page_lines(10, height);
+        styles[3].angle = Some(-90.0);
+        let mask = furniture_mask(&lines, &styles, height, None);
+        assert!(mask[3]);
+        assert_eq!(mask.iter().filter(|m| **m).count(), 1);
+    }
+
+    #[test]
+    fn mask_keeps_everything_on_a_sideways_page() {
+        // The rotated direction is the reading direction here, so it is the
+        // dominant one and nothing is marginal.
+        let height = 842.0;
+        let (lines, mut styles) = page_lines(10, height);
+        for s in styles.iter_mut() {
+            s.angle = Some(-90.0);
+        }
+        assert!(furniture_mask(&lines, &styles, height, None)
+            .iter()
+            .all(|m| !m));
+    }
+
+    #[test]
+    fn mask_caps_the_repetition_rule_per_edge() {
+        // Four "running heads" stacked in one band is not a running head.
+        let height = 842.0;
+        let (mut lines, mut styles) = page_lines(20, height);
+        let mut entries = Vec::new();
+        for (i, line) in lines.iter_mut().enumerate().take(4) {
+            let y = 20.0 + i as f32 * 8.0;
+            *line = text_line_at(y, "running head");
+            styles[i].baseline = y;
+            entries.push(("running head", Edge::Top, y));
+        }
+        let profile = profile_of(&entries);
+        assert!(furniture_mask(&lines, &styles, height, Some(&profile))
+            .iter()
+            .all(|m| !m));
+    }
+
+    #[test]
+    fn mask_caps_the_repetition_rule_by_share() {
+        // On a page with enough lines to judge, a quarter of them being
+        // furniture means the evidence is not credible.
+        let height = 842.0;
+        let (mut lines, mut styles) = page_lines(12, height);
+        let mut entries = Vec::new();
+        for (i, offset) in [20.0f32, 30.0, 812.0, 822.0].into_iter().enumerate() {
+            lines[i] = text_line_at(offset, "running head");
+            styles[i].baseline = offset;
+            let (edge, off) = band_of(offset, height).unwrap();
+            entries.push(("running head", edge, off));
+        }
+        let profile = profile_of(&entries);
+        assert!(furniture_mask(&lines, &styles, height, Some(&profile))
+            .iter()
+            .all(|m| !m));
+    }
+
+    #[test]
+    fn repetition_never_takes_a_pages_last_line() {
+        // The worst failure this feature could produce is text visible on the
+        // page that the caret cannot reach, so the repetition rule always
+        // leaves something behind.
+        let height = 842.0;
+        let lines = vec![
+            text_line_at(42.0, "running head"),
+            text_line_at(800.0, "12"),
+        ];
+        let styles = vec![
+            LineStyle {
+                size: 9.0,
+                bold: false,
+                angle: Some(0.0),
+                baseline: 42.0,
+            },
+            LineStyle {
+                size: 9.0,
+                bold: false,
+                angle: Some(0.0),
+                baseline: 800.0,
+            },
+        ];
+        let profile = profile_of(&[("running head", Edge::Top, 42.0), ("#", Edge::Bottom, 42.0)]);
+        let mask = furniture_mask(&lines, &styles, height, Some(&profile));
+        assert!(mask.iter().all(|m| !m), "mask: {mask:?}");
+    }
+
+    #[test]
+    fn image_line_indices_survive_furniture_removal() {
+        // Regression: image indices point into the unfiltered vector. Dropping
+        // a line without remapping them compiles fine and silently labels a
+        // line of text as an image.
+        let lines = [
+            text_line_at(20.0, "body one"),
+            text_line_at(40.0, "body two"),
+            text_line_at(60.0, "body three"),
+        ];
+        // Pretend line 0 was furniture: the image at old index 2 must land at 1.
+        let kept: Vec<ContentLine> = lines[1..].to_vec();
+        let objects = content_objects(&kept, &[1], &[], &[], &lines[..1]);
+        let image = objects
+            .iter()
+            .find(|o| o.kind == ObjectKind::Image)
+            .expect("image object");
+        assert_eq!((image.start_line, image.end_line), (1, 1));
+    }
+
+    #[test]
+    fn a_table_covering_every_body_line_survives_a_page_that_had_furniture() {
+        // Regression: the "claims the whole page" guard must count furniture
+        // too, or removing a running head makes a full-page table trip it.
+        let all = stacked_lines(12);
+        let body: Vec<ContentLine> = all[..10].to_vec();
+        let furniture: Vec<ContentLine> = all[10..].to_vec();
+        let table = box_over(&body, 0..=9);
+        let objects = content_objects(&body, &[], &[table], &[], &furniture);
+        assert_eq!(
+            objects
+                .iter()
+                .filter(|o| o.kind == ObjectKind::Table)
+                .count(),
+            1,
+            "the table was discarded: {objects:?}"
+        );
+    }
+
+    #[test]
+    fn page_content_skips_a_running_header_and_a_folio() {
+        let doc =
+            Document::from_bytes(&crate::test_support::pdf_with_running_header(6, true)).unwrap();
+        let profile = doc.furniture_profile().unwrap();
+        assert!(!profile.is_empty(), "nothing repeated: {profile:?}");
+        let content = doc
+            .page_content(2, ContentOptions::default(), Some(&profile))
+            .unwrap();
+        let body: String = content.lines.iter().map(line_text).collect();
+        assert!(
+            !body.contains("Shared MIME-info Database"),
+            "header survived"
+        );
+        assert!(body.contains("The database is a set"), "body was removed");
+        let removed: String = content.furniture.iter().map(line_text).collect();
+        assert!(removed.contains("Shared MIME-info Database"));
+        assert!(removed.contains('3'), "folio not removed: {removed:?}");
+    }
+
+    #[test]
+    fn page_content_keeps_a_top_line_that_differs_on_every_page() {
+        let doc =
+            Document::from_bytes(&crate::test_support::pdf_with_running_header(6, false)).unwrap();
+        let profile = doc.furniture_profile().unwrap();
+        let content = doc
+            .page_content(2, ContentOptions::default(), Some(&profile))
+            .unwrap();
+        let body: String = content.lines.iter().map(line_text).collect();
+        assert!(
+            body.contains("Writing a glob pattern"),
+            "a one-off heading was removed: {body:?}"
+        );
+    }
+
+    #[test]
+    fn a_running_head_with_a_counter_in_it_is_still_caught() {
+        // Digits are masked before comparison, so "Chapter 1 of 9" and
+        // "Chapter 2 of 9" are one running head, not two headings.
+        assert_eq!(
+            normalise_furniture_text("Chapter 1 of 9"),
+            normalise_furniture_text("Chapter 7 of 9")
+        );
+    }
+
+    #[test]
+    fn page_content_keeps_the_furniture_when_the_option_is_off() {
+        let doc =
+            Document::from_bytes(&crate::test_support::pdf_with_running_header(6, true)).unwrap();
+        let profile = doc.furniture_profile().unwrap();
+        let content = doc
+            .page_content(
+                2,
+                ContentOptions {
+                    skip_page_furniture: false,
+                    ..ContentOptions::default()
+                },
+                Some(&profile),
+            )
+            .unwrap();
+        let body: String = content.lines.iter().map(line_text).collect();
+        assert!(body.contains("Shared MIME-info Database"));
+        assert!(content.furniture.is_empty());
+    }
+
+    #[test]
+    fn page_content_skips_rotated_marginal_text() {
+        let doc = Document::from_bytes(&crate::test_support::pdf_with_rotated_text(false)).unwrap();
+        let content = doc
+            .page_content(0, ContentOptions::default(), None)
+            .unwrap();
+        let body: String = content.lines.iter().map(line_text).collect();
+        assert!(!body.contains("CONFIDENTIAL"), "side stamp survived");
+        assert!(!body.contains("PREPRINT"), "watermark survived");
+        assert!(body.contains("The database is a set"), "body was removed");
+        assert_eq!(content.furniture.len(), 2);
+    }
+
+    #[test]
+    fn page_content_keeps_everything_on_a_sideways_page() {
+        let doc = Document::from_bytes(&crate::test_support::pdf_with_rotated_text(true)).unwrap();
+        let content = doc
+            .page_content(0, ContentOptions::default(), None)
+            .unwrap();
+        assert!(content.furniture.is_empty(), "a sideways page was emptied");
+        assert_eq!(content.lines.len(), 6);
+    }
+
+    #[test]
+    fn furniture_profile_of_a_single_page_document_is_empty() {
+        let doc =
+            Document::from_bytes(&crate::test_support::pdf_with_pages(&["only page"])).unwrap();
+        let profile = doc.furniture_profile().unwrap();
+        assert!(profile.is_empty());
+        assert_eq!(profile.pages_sampled(), 0);
+    }
+
+    #[test]
+    fn furniture_removal_leaves_the_table_and_heading_fixtures_alone() {
+        // Collateral-damage guard for the two shipped features.
+        let table = Document::from_bytes(&crate::test_support::pdf_with_table(4, 5)).unwrap();
+        let content = table
+            .page_content(0, ContentOptions::default(), None)
+            .unwrap();
+        assert_eq!(
+            content
+                .objects
+                .iter()
+                .filter(|o| o.kind == ObjectKind::Table)
+                .count(),
+            1
+        );
+        let heading = Document::from_bytes(&crate::test_support::pdf_with_heading()).unwrap();
+        let content = heading
+            .page_content(0, ContentOptions::default(), None)
+            .unwrap();
+        assert_eq!(
+            content
+                .objects
+                .iter()
+                .filter(|o| o.kind == ObjectKind::Heading)
+                .count(),
+            2
+        );
+    }
+
     #[test]
     fn page_content_reports_no_table_on_plain_prose() {
         // The failure that hurts users is a false positive, so this is a
         // load-bearing test rather than a nicety.
         let doc = three_page_doc();
-        let content = doc.page_content(0, ContentOptions::default()).unwrap();
+        let content = doc
+            .page_content(0, ContentOptions::default(), None)
+            .unwrap();
         assert!(
             !content.objects.iter().any(|o| o.kind == ObjectKind::Table),
             "prose reported as a table: {:?}",
@@ -1230,7 +2245,9 @@ mod tests {
     #[test]
     fn page_content_reports_no_table_on_a_two_column_page() {
         let doc = Document::from_bytes(&crate::test_support::pdf_two_column_page(6)).unwrap();
-        let content = doc.page_content(0, ContentOptions::default()).unwrap();
+        let content = doc
+            .page_content(0, ContentOptions::default(), None)
+            .unwrap();
         assert!(
             !content.objects.iter().any(|o| o.kind == ObjectKind::Table),
             "columns reported as a table: {:?}",
@@ -1241,7 +2258,9 @@ mod tests {
     #[test]
     fn page_content_reports_an_image_as_a_one_line_object() {
         let doc = Document::from_bytes(&crate::test_support::pdf_with_image()).unwrap();
-        let content = doc.page_content(0, ContentOptions::default()).unwrap();
+        let content = doc
+            .page_content(0, ContentOptions::default(), None)
+            .unwrap();
         let images: Vec<_> = content
             .objects
             .iter()
@@ -1258,7 +2277,9 @@ mod tests {
     #[test]
     fn page_content_detects_a_ruled_grid_as_one_table() {
         let doc = Document::from_bytes(&crate::test_support::pdf_with_table(4, 5)).unwrap();
-        let content = doc.page_content(0, ContentOptions::default()).unwrap();
+        let content = doc
+            .page_content(0, ContentOptions::default(), None)
+            .unwrap();
         let tables: Vec<_> = content
             .objects
             .iter()
@@ -1299,6 +2320,7 @@ mod tests {
                     detect_tables: false,
                     ..ContentOptions::default()
                 },
+                None,
             )
             .unwrap();
         assert!(content.objects.iter().all(|o| o.kind != ObjectKind::Table));

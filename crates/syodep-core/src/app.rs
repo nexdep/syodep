@@ -16,7 +16,8 @@ use std::path::{Path, PathBuf};
 use syodep_config::keys::Chord;
 use syodep_config::Config;
 use syodep_pdf::{
-    Bitmap, CellKind, ContentLine, ContentObject, ContentOptions, ObjectKind, PageContent, Rect,
+    Bitmap, CellKind, ContentLine, ContentObject, ContentOptions, FurnitureProfile, ObjectKind,
+    PageContent, Rect,
 };
 use syodep_storage::{Position, Storage};
 
@@ -97,6 +98,11 @@ struct Session {
     /// Lazily-extracted navigable content, per page. Text is cheap to keep, so
     /// every visited page stays cached for the life of the session.
     content: HashMap<usize, PageContent>,
+    /// What this document repeats in its margins. Learned once, before the
+    /// first page is extracted, so every cached page above was filtered
+    /// against the same evidence — otherwise navigation would differ depending
+    /// on which page happened to be visited first.
+    furniture: Option<FurnitureProfile>,
 }
 
 /// Top-level application state. One instance per window.
@@ -259,6 +265,7 @@ impl App {
             view,
             cache: RenderCache::default(),
             content: HashMap::new(),
+            furniture: None,
         });
         // Caret positions are document-specific; reset to normal mode.
         self.mode = Mode::Normal;
@@ -632,11 +639,22 @@ impl App {
         if session.content.contains_key(&page) {
             return;
         }
+        // Learn the margins before extracting anything, so every page in this
+        // session is filtered against the same evidence. Done here rather than
+        // at open so that merely reading a document never pays for it — page
+        // content is only ever extracted once the caret is used.
+        if session.furniture.is_none() && self.config.view.skip_page_furniture {
+            session.furniture = Some(session.doc.furniture_profile().unwrap_or_default());
+        }
         let opts = ContentOptions {
             detect_tables: self.config.view.detect_tables,
             detect_headings: self.config.view.detect_headings,
+            skip_page_furniture: self.config.view.skip_page_furniture,
         };
-        let content = session.doc.page_content(page, opts).unwrap_or_default();
+        let content = session
+            .doc
+            .page_content(page, opts, session.furniture.as_ref())
+            .unwrap_or_default();
         let Some(session) = self.session.as_mut() else {
             return;
         };
@@ -2997,6 +3015,109 @@ mod tests {
         assert_caret(&app, 0, 0, 2);
     }
 
+    // ---- Page furniture ---------------------------------------------------
+
+    fn app_with_running_header(dir: &Path, pages: usize) -> App {
+        let mut app = App::new(Config::default(), Some(Storage::in_memory().unwrap()));
+        app.set_viewport_size(595.0, 600.0);
+        let bytes = syodep_pdf::test_support::pdf_with_running_header(pages, true);
+        let path = write_pdf_bytes(dir, "header.pdf", bytes);
+        app.open_document(&path).unwrap();
+        app
+    }
+
+    fn page_text_of(app: &App, page: usize) -> String {
+        app.content(page)
+            .iter()
+            .flat_map(|l| l.cells.iter())
+            .filter_map(|c| match c.kind {
+                CellKind::Char(ch) => Some(ch),
+                CellKind::Image => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_caret_never_reaches_a_running_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_running_header(dir.path(), 6);
+        press(&mut app, "cw");
+        // Walk a whole page; the header and folio must never come up.
+        for _ in 0..80 {
+            press(&mut app, "w");
+        }
+        for page in 0..3 {
+            let text = page_text_of(&app, page);
+            if text.is_empty() {
+                continue;
+            }
+            assert!(
+                !text.contains("Shared MIME-info Database"),
+                "page {page} still carries the header"
+            );
+            assert!(
+                text.contains("The database is a set"),
+                "page {page} lost its body"
+            );
+        }
+    }
+
+    #[test]
+    fn focus_enters_on_the_first_body_line_not_the_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_running_header(dir.path(), 6);
+        press(&mut app, "ce");
+        let (start, _) = app.focus_span().unwrap();
+        let line: String = app.content(start.page)[start.line]
+            .cells
+            .iter()
+            .filter_map(|c| match c.kind {
+                CellKind::Char(ch) => Some(ch),
+                CellKind::Image => None,
+            })
+            .collect();
+        assert!(
+            line.starts_with("The database"),
+            "focus entered on {line:?}"
+        );
+    }
+
+    #[test]
+    fn the_furniture_profile_is_learned_once_per_session() {
+        // Pages extracted in any order must see the same evidence, or
+        // navigation would depend on which page was visited first.
+        let dir = tempfile::tempdir().unwrap();
+        let mut forwards = app_with_running_header(dir.path(), 6);
+        for page in 0..4 {
+            forwards.ensure_content(page);
+        }
+        let mut backwards = app_with_running_header(dir.path(), 6);
+        for page in (0..4).rev() {
+            backwards.ensure_content(page);
+        }
+        for page in 0..4 {
+            assert_eq!(
+                page_text_of(&forwards, page),
+                page_text_of(&backwards, page),
+                "page {page} differs by visit order"
+            );
+        }
+    }
+
+    #[test]
+    fn turning_the_option_off_restores_the_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.view.skip_page_furniture = false;
+        let mut app = App::new(config, Some(Storage::in_memory().unwrap()));
+        app.set_viewport_size(595.0, 600.0);
+        let bytes = syodep_pdf::test_support::pdf_with_running_header(6, true);
+        let path = write_pdf_bytes(dir.path(), "header.pdf", bytes);
+        app.open_document(&path).unwrap();
+        app.ensure_content(2);
+        assert!(page_text_of(&app, 2).contains("Shared MIME-info Database"));
+    }
+
     // ---- Atomic objects (tables and images) ------------------------------
 
     /// One content line of `text` at `y`, with a 6pt-wide cell per character.
@@ -3053,7 +3174,11 @@ mod tests {
             start_line: 2,
             end_line: 5,
         }];
-        PageContent { lines, objects }
+        PageContent {
+            lines,
+            objects,
+            ..Default::default()
+        }
     }
 
     fn app_with_table_page(dir: &Path) -> App {
@@ -3105,7 +3230,11 @@ mod tests {
             end_line: end,
         };
         let objects = vec![heading(2, 2), heading(5, 6)];
-        PageContent { lines, objects }
+        PageContent {
+            lines,
+            objects,
+            ..Default::default()
+        }
     }
 
     fn app_with_heading_page(dir: &Path) -> App {

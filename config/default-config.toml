@@ -43,6 +43,11 @@ detect_tables = true
 # so it is not glued to the text below it for want of a full stop.
 # Word and line scope still move through a heading normally.
 detect_headings = true
+# Skip page furniture when moving: running headers, page numbers, and
+# text that does not run in the page's reading direction, such as a
+# sideways margin stamp or an inclined watermark. Headers and footers
+# are recognised by repeating across pages, never by position alone.
+skip_page_furniture = true
 
 [files]
 # Starting directory for the Open dialog (<C-o>). When unset, the

@@ -128,6 +128,18 @@ into runs treat it as a unit.
 
 Turn detection off with `view.detect_headings` — see `docs/config.md`.
 
+## Page furniture
+
+Running headers, page numbers, sideways margin stamps and inclined watermarks
+are not part of the reading flow, so the caret never lands on them at any scope
+and no selection covers them. They are still drawn on the page. Headers and
+footers are recognised by repeating across pages rather than by where they sit,
+so a title or a section heading near the top of a page is never mistaken for
+one. Turn it off with `view.skip_page_furniture` — see `docs/config.md`.
+
+`Ln N` in the status line counts navigable lines, so `Ln 1` is the first line of
+body text rather than the running header above it.
+
 ## Inherited view commands
 
 Every normal-mode command stays available in focus mode with its normal

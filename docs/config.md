@@ -42,6 +42,7 @@ bookmarks, highlights, notes, history. That lives in the SQLite database
 | `visual_opacity` | float | `0.4` | opacity of the selection highlight, `0.0`-`1.0` |
 | `detect_tables` | bool | `true` | treat each detected table as one stop for focus and selection motions |
 | `detect_headings` | bool | `true` | treat each detected heading as one step at sentence and paragraph scope |
+| `skip_page_furniture` | bool | `true` | keep running headers, page numbers and sideways text out of the caret's path |
 
 Documents with a saved reading position restore their previous scroll and
 zoom instead of applying `default_zoom`/`fit_width_on_open`.
@@ -65,6 +66,26 @@ counts as a heading when it is set noticeably larger than the page's body text,
 or when it is entirely bold at body size and does not fill the column width.
 Detection costs nothing extra to extract; set it to `false` if the heuristic
 misjudges a document.
+
+**Page furniture.** With `skip_page_furniture = true` the caret never traverses
+a running header, a page number, a sideways stamp down a margin, or an inclined
+watermark: they are dropped from the navigable content layer entirely, at every
+scope, and no selection can cover them. They are still drawn on the page, and
+still extracted — only navigation ignores them. There is no key to toggle this
+mid-document by design; it is a setting.
+
+Headers and footers are recognised by **repeating across pages**, never by
+position alone. A line counts only when the same text — with digit runs masked,
+so page numbers and `Chapter 7 of 9` still match themselves — appears at the
+same height on other pages. That is why a paper's title, which appears once, is
+never mistaken for a running head. Sideways text is anything not running in the
+page's own dominant direction, so a page laid out entirely sideways keeps all of
+it; **rotated column labels inside a table are skipped too**, which is the one
+case where this removes something you might have wanted.
+
+Set it to `false` to walk every extracted line as before. Note that `Ln 1` in
+the status line then means the page's first *content* line rather than its first
+body line.
 
 **Overlay colours.** All five focus modes (caret, line, word, sentence,
 paragraph) share `focus_color`: the highlight tells you that focus is active,

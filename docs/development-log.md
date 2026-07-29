@@ -7,6 +7,93 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-07-29 — Page furniture is out of the caret's path
+
+Moving through a paper meant stepping through the running header on every page,
+the folio at the foot, any sideways stamp down the margin and the big inclined
+watermark preprints carry. None of it is reading matter. It is now dropped from
+the navigable content layer entirely — not skipped by motion, *removed* — so
+every motion, span and overlay ignores it with no change to the caret at all.
+The lines are kept in `PageContent::furniture` rather than discarded.
+
+### Two rules
+
+**Rotation.** A line more than 10&deg; off the page's *dominant* direction.
+Dominant rather than horizontal is what lets a page laid out sideways keep
+everything, and it makes the rule provably unable to empty a page: the dominant
+cluster is by construction the majority and is never flagged. The angle comes
+from the character quads — `ur - ul` runs along the baseline and is well-defined
+even for a single glyph — as a circular mean rather than a bucketed vote, since
+bucketing splits one physical direction across the ±180&deg; wraparound.
+
+**Repetition.** A margin-band line whose digit-masked text and baseline recur
+across sampled pages. Position is never evidence on its own, which is why a
+paper's title survives: it appears once. Digit masking means a folio matches
+itself across pages, and `Chapter 7 of 9` is correctly one running head rather
+than nine headings.
+
+### Thresholds, and the observations that set them
+
+Measured on the shared-mime-info spec before any code was written. Its running
+header sits at baseline **56.19 on 18 of 19 pages — zero jitter** — so the 2.5pt
+tolerance is generous; the same text appears once more at 88.82, as the *title*
+on page 0, and correctly survives. Every ordinary line reported an angle of
+exactly `0.0`, so 10&deg; is enormously slack. Eight sampling passes cost 13.4ms.
+
+Baselines, not bounding boxes, are the position key: a descender shifts a box by
+points, which would make a header match on some pages and not others.
+
+Sampling is four anchors of **two consecutive pages**, not evenly spaced singles:
+100 pages sampled 8 times steps by 14 and lands on one parity, so a book that
+alternates verso and recto running heads would never see the recto one repeat.
+
+The bare-folio rule was **cut**. Digit masking already makes page numbers repeat
+like anything else, and a standalone "bottom-band number" rule would have
+deleted the bare-number body lines this document carries at 674–686pt. The 30%
+repeat floor is load-bearing for the same reason: two body lines coincidentally
+sharing a baseline score 25% and are rejected.
+
+### Three things the tests caught
+
+- **Table detection would have died silently.** `content_objects` discards a
+  table claiming every non-empty line — a guard that passes today only because
+  the header and folio pad the count. Remove them and a full-page table trips
+  it. The guards now count lines *plus* furniture.
+- **`image_lines` indices needed remapping.** They point into the unfiltered
+  vector; dropping lines without remapping compiles cleanly and labels a line of
+  text an image.
+- **The upright tiebreak was unreachable.** If an upright cluster carried ≥0.9×
+  the leader, the leader could never hold 55% of the page, so the branch could
+  not fire. Deleted; the dominance floor already gives the safe outcome.
+
+### One deliberate override
+
+A design review argued a divider page holding only a header and a folio *should*
+end up with zero lines, since page stepping already skips empty pages. The test
+suite disagreed loudly: the shared fixture gives each page one line, `Page N
+text`, which normalises identically across pages, and the whole document became
+unnavigable. That is the worst failure this feature can produce — text plainly
+visible that the caret cannot reach — so the repetition rule now never takes a
+page's last line. Cheap insurance against a catastrophic mode, at the cost of
+leaving two lines on a genuinely blank divider page.
+
+### Known limitations
+
+A table continued across pages whose column-header row sits at the same height
+each time will be removed if it falls inside the top band; long tables usually
+start lower, and a gap test cannot separate this from a real running head.
+Chapter titles that change per chapter are not caught — the principled
+escalation is matching band text against `Document::outline()`, which already
+exists. Images are never furniture, so a logo inside a running header survives.
+
+`Ln N` in the status line now counts body lines: the running header no longer
+occupies line 1. Nothing persists it, so no migration.
+
+23 new tests, 305 total. New fixtures: `pdf_with_running_header`,
+`pdf_with_rotated_text`.
+
+---
+
 ## 2026-07-29 — Headings are single sentence and paragraph steps
 
 Headings rarely end in a full stop, so the sentence walker ran straight through

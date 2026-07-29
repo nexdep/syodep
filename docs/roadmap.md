@@ -53,6 +53,8 @@ them, and is the seam highlighting builds on. See the development log.
   treated as one stop by every scope above char, in focus and visual mode
 - ✅ Headings as sentence/paragraph units: detected from type size and weight,
   so a heading is one step for `s` and `p` while `w` still walks its words
+- ✅ Page furniture kept out of the caret's path: running heads and folios by
+  cross-page repetition, sideways stamps and watermarks by baseline direction
 - ⬜ Text-object selection, highlighting, annotation (`viw`-style
   composability on top of the existing command/count system)
 - ⬜ Smart jump to references, figures, tables, equations (the table/image

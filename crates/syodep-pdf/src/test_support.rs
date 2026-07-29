@@ -451,6 +451,221 @@ pub fn pdf_with_heading() -> Vec<u8> {
     buf
 }
 
+/// Assemble a one-page A4 PDF around `content`, with `/F1` Helvetica.
+fn single_page_pdf(content: &str) -> Vec<u8> {
+    let mut buf: Vec<u8> = b"%PDF-1.4\n".to_vec();
+    let total_objects = 5;
+    let mut offsets: Vec<usize> = vec![0; total_objects + 1];
+    let write_obj = |buf: &mut Vec<u8>, offsets: &mut Vec<usize>, num: usize, body: &[u8]| {
+        offsets[num] = buf.len();
+        buf.extend_from_slice(format!("{num} 0 obj\n").as_bytes());
+        buf.extend_from_slice(body);
+        buf.extend_from_slice(b"\nendobj\n");
+    };
+    write_obj(
+        &mut buf,
+        &mut offsets,
+        1,
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+    );
+    write_obj(
+        &mut buf,
+        &mut offsets,
+        2,
+        b"<< /Type /Pages /Kids [4 0 R] /Count 1 >>",
+    );
+    write_obj(
+        &mut buf,
+        &mut offsets,
+        3,
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    );
+    write_obj(
+        &mut buf,
+        &mut offsets,
+        4,
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] \
+          /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R >>",
+    );
+    write_obj(
+        &mut buf,
+        &mut offsets,
+        5,
+        format!(
+            "<< /Length {} >>\nstream\n{content}\nendstream",
+            content.len()
+        )
+        .as_bytes(),
+    );
+    let xref_offset = buf.len();
+    buf.extend_from_slice(format!("xref\n0 {}\n", total_objects + 1).as_bytes());
+    buf.extend_from_slice(b"0000000000 65535 f \n");
+    for offset in &offsets[1..] {
+        buf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    buf.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n",
+            total_objects + 1
+        )
+        .as_bytes(),
+    );
+    buf
+}
+
+/// Build a `pages`-page document with body prose, a page number at the foot,
+/// and a line at the top that is either the same on every page (a running
+/// header) or different on each. Used to exercise furniture detection, which
+/// keys on repetition rather than position.
+///
+/// Note the coordinate flip: PDF content streams are bottom-up, so the header
+/// is written at a high `y` and comes out near the *top* of MuPDF's top-down
+/// structured text.
+pub fn pdf_with_running_header(pages: usize, repeat_header: bool) -> Vec<u8> {
+    let body = [
+        "The database is a set of directories that each contain a copy of",
+        "the same layout, so applications may add to it independently.",
+        "Every entry is resolved in order until one of them matches.",
+        "A later directory may override what an earlier one provided.",
+    ];
+    let mut streams = Vec::new();
+    for p in 0..pages {
+        let mut content = String::new();
+        // The varying headers must differ in *words*, not merely in a number:
+        // digits are masked before comparison, so "Chapter 1"/"Chapter 2" are
+        // one running head with a counter in it, and are meant to be caught.
+        let varying = [
+            "Installing the database",
+            "Resolving a media type",
+            "Writing a glob pattern",
+            "Matching by magic bytes",
+            "Extending the namespace",
+            "Recommended checking order",
+        ];
+        let header = if repeat_header {
+            "Shared MIME-info Database".to_owned()
+        } else {
+            varying[p % varying.len()].to_owned()
+        };
+        content.push_str(&format!("BT /F1 9 Tf 100 800 Td ({header}) Tj ET\n"));
+        for (i, text) in body.iter().enumerate() {
+            let y = 700.0 - i as f32 * 16.0;
+            content.push_str(&format!("BT /F1 11 Tf 100 {y} Td ({text}) Tj ET\n"));
+        }
+        content.push_str(&format!("BT /F1 9 Tf 300 40 Td ({}) Tj ET\n", p + 1));
+        streams.push(content);
+    }
+
+    // Object numbering: 1 catalog, 2 pages, 3 font, then per page 4+2i / 5+2i.
+    let total_objects = 3 + 2 * pages;
+    let mut buf: Vec<u8> = b"%PDF-1.4\n".to_vec();
+    let mut offsets: Vec<usize> = vec![0; total_objects + 1];
+    let write_obj = |buf: &mut Vec<u8>, offsets: &mut Vec<usize>, num: usize, body: &[u8]| {
+        offsets[num] = buf.len();
+        buf.extend_from_slice(format!("{num} 0 obj\n").as_bytes());
+        buf.extend_from_slice(body);
+        buf.extend_from_slice(b"\nendobj\n");
+    };
+    write_obj(
+        &mut buf,
+        &mut offsets,
+        1,
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+    );
+    let kids: Vec<String> = (0..pages).map(|i| format!("{} 0 R", 4 + 2 * i)).collect();
+    write_obj(
+        &mut buf,
+        &mut offsets,
+        2,
+        format!(
+            "<< /Type /Pages /Kids [{}] /Count {pages} >>",
+            kids.join(" ")
+        )
+        .as_bytes(),
+    );
+    write_obj(
+        &mut buf,
+        &mut offsets,
+        3,
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    );
+    for (i, content) in streams.iter().enumerate() {
+        let page_num = 4 + 2 * i;
+        let content_num = 5 + 2 * i;
+        write_obj(
+            &mut buf,
+            &mut offsets,
+            page_num,
+            format!(
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] \
+                 /Resources << /Font << /F1 3 0 R >> >> /Contents {content_num} 0 R >>"
+            )
+            .as_bytes(),
+        );
+        write_obj(
+            &mut buf,
+            &mut offsets,
+            content_num,
+            format!(
+                "<< /Length {} >>\nstream\n{content}\nendstream",
+                content.len()
+            )
+            .as_bytes(),
+        );
+    }
+    let xref_offset = buf.len();
+    buf.extend_from_slice(format!("xref\n0 {}\n", total_objects + 1).as_bytes());
+    buf.extend_from_slice(b"0000000000 65535 f \n");
+    for offset in &offsets[1..] {
+        buf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    buf.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n",
+            total_objects + 1
+        )
+        .as_bytes(),
+    );
+    buf
+}
+
+/// Build a single page carrying rotated text: a 90&deg; stamp down the left
+/// margin and a 45&deg; watermark across the middle. With `whole_page` the page
+/// contains *only* rotated text, so the rotated direction is the dominant one.
+///
+/// Rotation needs the six-number `Tm` operator rather than `Td`.
+pub fn pdf_with_rotated_text(whole_page: bool) -> Vec<u8> {
+    let body = [
+        "The database is a set of directories that each contain a copy of",
+        "the same layout, so applications may add to it independently.",
+        "Every entry is resolved in order until one of them matches.",
+        "A later directory may override what an earlier one provided.",
+        "Each application installs exactly one file into the directory.",
+        "The order in which they are read is not otherwise significant.",
+    ];
+    let mut content = String::new();
+    if whole_page {
+        // Every line turned ninety degrees: a page laid out sideways, where
+        // the rotated direction *is* the reading direction.
+        for (i, text) in body.iter().enumerate() {
+            let x = 100.0 + i as f32 * 16.0;
+            content.push_str(&format!(
+                "BT /F1 11 Tf 0 1 -1 0 {x} 120 Tm ({text}) Tj ET\n"
+            ));
+        }
+        return single_page_pdf(&content);
+    }
+    // 90 degrees counter-clockwise, down the left margin.
+    content.push_str("BT /F1 10 Tf 0 1 -1 0 40 300 Tm (CONFIDENTIAL DRAFT COPY) Tj ET\n");
+    // 45 degrees across the page.
+    content.push_str("BT /F1 30 Tf 0.707 0.707 -0.707 0.707 150 250 Tm (PREPRINT) Tj ET\n");
+    for (i, text) in body.iter().enumerate() {
+        let y = 700.0 - i as f32 * 16.0;
+        content.push_str(&format!("BT /F1 11 Tf 100 {y} Td ({text}) Tj ET\n"));
+    }
+    single_page_pdf(&content)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

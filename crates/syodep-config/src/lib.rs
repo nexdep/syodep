@@ -115,6 +115,9 @@ pub struct ViewConfig {
     /// Detect headings so each is a single step at sentence and paragraph
     /// scope. Costs nothing extra to extract, but relies on a heuristic.
     pub detect_headings: bool,
+    /// Drop running headers, page numbers and text that does not run in the
+    /// page's reading direction, so the caret never traverses them.
+    pub skip_page_furniture: bool,
 }
 
 impl Default for ViewConfig {
@@ -133,6 +136,7 @@ impl Default for ViewConfig {
             visual_opacity: 0.4,
             detect_tables: true,
             detect_headings: true,
+            skip_page_furniture: true,
         }
     }
 }
@@ -469,6 +473,13 @@ pub fn default_config_doc() -> String {
          # Word and line scope still move through a heading normally.\n",
     );
     let _ = writeln!(out, "detect_headings = {}", view.detect_headings);
+    out.push_str(
+        "# Skip page furniture when moving: running headers, page numbers, and\n\
+         # text that does not run in the page's reading direction, such as a\n\
+         # sideways margin stamp or an inclined watermark. Headers and footers\n\
+         # are recognised by repeating across pages, never by position alone.\n",
+    );
+    let _ = writeln!(out, "skip_page_furniture = {}", view.skip_page_furniture);
     out.push('\n');
 
     out.push_str(

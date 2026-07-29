@@ -140,6 +140,30 @@ every line on a page, or that map to a non-contiguous set of lines, are
 discarded rather than guessed at — degrading to line-by-line navigation is
 always safe, whereas a wrong atomic unit is a very visible navigation bug.
 
+**Decision — page furniture is removed from the content layer, not skipped by
+motion:** running heads, folios and text that does not run in the page's
+direction never enter `PageContent::lines`, so every motion, span and overlay
+ignores them without a single change to the caret. The removed lines are kept in
+`PageContent::furniture` rather than discarded. Two independent rules find them.
+*Rotation* flags a line more than 10&deg; off the page's **dominant** direction —
+dominant rather than absolute horizontal, which is what lets a page laid out
+sideways keep everything, and what makes the rule provably unable to empty a
+page, since the dominant cluster is the majority and is never flagged.
+*Repetition* flags a margin-band line whose digit-masked text and baseline recur
+across sampled pages; position alone is never evidence, so a title that appears
+once survives. Sampling takes four anchors of *two consecutive pages*, because
+evenly spaced single pages land on one parity and would miss the recto running
+head of any book that alternates. Baselines, not bounding boxes, are the
+position key — a descender moves a box by points. Filtering happens *before*
+table and heading detection, which also improves both: a full-width running
+header inflated the heading rule's widest-line comparison and an 8pt folio
+dragged its body-size vote. Consequently `content_objects` must judge its
+"claims the whole page" guards against lines *plus* furniture, or a full-page
+table starts tripping its own guard once the header is gone. The profile is
+document-scoped and owned by `syodep-core`'s session, built lazily on first
+content need, so `Document` keeps no interior mutability and merely reading a
+document never pays for it.
+
 **Decision — a heading is a *region*, not an atomic object:** `ObjectKind`
 carries `is_atomic()`, false only for `Heading`. Motion and highlighting go
 through the atomic accessors, so a heading keeps its words individually
