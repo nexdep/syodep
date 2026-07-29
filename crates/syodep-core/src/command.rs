@@ -67,6 +67,10 @@ pub enum Command {
     FocusPrevWord,
     /// Move to the end of the current word, whatever the scope.
     FocusEndWord,
+    /// Move to the start of the next sentence, whatever the scope.
+    FocusNextSentence,
+    /// Move to the start of the next paragraph, whatever the scope.
+    FocusNextParagraph,
     // Visual mode (a two-ended selection over content).
     /// Enter visual mode, inheriting the current focus mode's granularity.
     VisualEnter,
@@ -96,6 +100,10 @@ pub enum Command {
     VisualPrevWord,
     /// Move the active end to the end of the current word, whatever the scope.
     VisualEndWord,
+    /// Move the active end to the start of the next sentence, whatever the scope.
+    VisualNextSentence,
+    /// Move the active end to the start of the next paragraph, whatever the scope.
+    VisualNextParagraph,
     /// Make the other end of the selection the active one.
     VisualSwapEnds,
     /// Set the active end's granularity to characters.
@@ -158,6 +166,8 @@ pub const ALL_COMMANDS: &[(&str, Command)] = &[
     ("focus_next_word", Command::FocusNextWord),
     ("focus_prev_word", Command::FocusPrevWord),
     ("focus_end_word", Command::FocusEndWord),
+    ("focus_next_sentence", Command::FocusNextSentence),
+    ("focus_next_paragraph", Command::FocusNextParagraph),
     ("visual_enter", Command::VisualEnter),
     ("visual_enter_char", Command::VisualEnterChar),
     ("visual_enter_word", Command::VisualEnterWord),
@@ -172,6 +182,8 @@ pub const ALL_COMMANDS: &[(&str, Command)] = &[
     ("visual_next_word", Command::VisualNextWord),
     ("visual_prev_word", Command::VisualPrevWord),
     ("visual_end_word", Command::VisualEndWord),
+    ("visual_next_sentence", Command::VisualNextSentence),
+    ("visual_next_paragraph", Command::VisualNextParagraph),
     ("visual_swap_ends", Command::VisualSwapEnds),
     ("visual_scope_char", Command::VisualScopeChar),
     ("visual_scope_word", Command::VisualScopeWord),

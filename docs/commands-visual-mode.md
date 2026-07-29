@@ -46,15 +46,21 @@ swaps the ends without needing `oo`.
 | `visual_next_word` | move the active end to the start of the next word | repeats N times |
 | `visual_prev_word` | move the active end to the start of the previous word | repeats N times |
 | `visual_end_word` | move the active end to the end of the current word | repeats N times |
+| `visual_next_sentence` | move the active end to the start of the next sentence | repeats N times |
+| `visual_next_paragraph` | move the active end to the start of the next paragraph | repeats N times |
 
 `hjkl` and the arrow keys move by the active end's scope: one character in char
 scope, one word in word scope, one line in line scope, and so on. In sentence
 and paragraph scope the unit is a linear sequence, so all four directions
 collapse to previous/next - the same shape as focus mode at those scopes.
 
-`w`, `b` and `e` always move by a word, whatever the scope is. In line scope
-the head still moves a word at a time while the edge snaps out to the whole
-line.
+`w`, `b`, `e`, `s` and `p` always move by their own unit, whatever the active
+end's scope is: word, word, word-end, sentence and paragraph respectively. In
+line scope the head still moves a word (or a sentence) at a time while the edge
+snaps out to the whole line.
+
+`s` and `p` do not change either end's scope — `vs` and `vp` do that. So `s`
+grows the selection by a sentence while keeping word-granular edges.
 
 The ends may cross freely: the selection always runs from the earlier end to
 the later one, so passing the anchor and coming back leaves the selection

@@ -238,6 +238,11 @@ pub fn default_focus_keybindings() -> BTreeMap<String, String> {
         ("w", "focus_next_word"),
         ("e", "focus_end_word"),
         ("b", "focus_prev_word"),
+        // Sentence and paragraph get a forward motion each, the same way `w`
+        // is the word one. `cs`/`cp` still switch scope: `s` *moves* by a
+        // sentence, `cs` *focuses by* sentence.
+        ("s", "focus_next_sentence"),
+        ("p", "focus_next_paragraph"),
         ("<Esc>", "focus_exit"),
     ]
     .into_iter()
@@ -266,6 +271,8 @@ pub fn default_visual_keybindings() -> BTreeMap<String, String> {
         ("w", "visual_next_word"),
         ("e", "visual_end_word"),
         ("b", "visual_prev_word"),
+        ("s", "visual_next_sentence"),
+        ("p", "visual_next_paragraph"),
         ("o", "visual_swap_ends"),
         // `o` waits for the next key (it is also a prefix), so it only takes
         // effect together with whatever follows. `oo` swaps immediately.
