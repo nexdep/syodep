@@ -25,7 +25,8 @@ real files. The strategy, in descending order of coverage:
    `pdf_with_heading` (a large heading plus a bold subheading over body prose),
    `pdf_with_running_header` (multi-page, with the header either constant or
    varying, plus a folio) and `pdf_with_rotated_text` (a sideways stamp and an
-   inclined watermark, or a page laid out entirely sideways).
+   inclined watermark, or a page laid out entirely sideways) and
+   `pdf_with_list` (a colon lead-in, three bulleted items, a closing sentence).
 
    Navigation over tables is tested two ways on purpose. The mapping from
    detected boxes to line ranges (`content_objects`) is a pure function tested

@@ -22,11 +22,11 @@ use syodep_pdf::{
 use syodep_storage::{Position, Storage};
 
 use crate::caret::{
-    column_index_of, column_ranges, continues_word_run, is_inside_number, is_numeric_separator,
-    is_sentence_terminator, is_sentence_trailer, is_word_target, nearest_cell_in_line,
-    nearest_line_in_column, paragraph_segments, split_segments_at_objects, word_class, Caret, Dir,
-    Landing, LineMark, Mode, ObjectId, ParagraphMark, Scope, SentenceMark, VisualAnchor,
-    VisualSelection, WordClass, WordMark,
+    column_index_of, column_ranges, continues_word_run, is_abbreviation, is_inside_number,
+    is_numeric_separator, is_sentence_terminator, is_sentence_trailer, is_word_target,
+    nearest_cell_in_line, nearest_line_in_column, opens_a_sentence, paragraph_segments,
+    split_segments_at_objects, word_class, Caret, Dir, Landing, LineMark, Mode, ObjectId,
+    ParagraphMark, Scope, SentenceMark, VisualAnchor, VisualSelection, WordClass, WordMark,
 };
 use crate::command::Command;
 use crate::input::{InputState, KeyOutcome, Keymap, KeymapError};
@@ -679,7 +679,7 @@ impl App {
             .unwrap_or(&[])
     }
 
-    /// Cached atomic objects (tables, images) for `page`.
+    /// Cached structural objects for `page` — every kind, atomic or not.
     fn objects(&self, page: usize) -> &[ContentObject] {
         self.session
             .as_ref()
@@ -915,6 +915,16 @@ impl App {
         if same_line && (self.is_number_interior(left) || self.is_number_interior(right)) {
             return true;
         }
+        // An abbreviation is one word, stops included: `e.g.` is a single stop
+        // for `w`, not four.
+        if same_line {
+            if let Some(span) = self.abbreviation_at(left) {
+                let within = |c: Caret| c.cell >= span.0 && c.cell <= span.1;
+                if within(left) && within(right) {
+                    return true;
+                }
+            }
+        }
         let Some(left_class) = self.word_class_at(left) else {
             return false;
         };
@@ -939,6 +949,69 @@ impl App {
         let before = self.prev_cell_on_line(c).and_then(|p| self.char_at(p));
         let after = self.next_cell_on_line(c).and_then(|n| self.char_at(n));
         is_inside_number(before, here, after)
+    }
+
+    /// The inclusive cell range of the whitespace-delimited token containing
+    /// `c`, when that token is an abbreviation.
+    ///
+    /// This is what makes `e.g.` one word and one sentence: the same span
+    /// answers both questions, so word runs and sentence runs cannot disagree
+    /// about where the construct begins and ends.
+    fn abbreviation_at(&mut self, c: Caret) -> Option<(usize, usize)> {
+        self.ensure_content(c.page);
+        let cells = self.content(c.page).get(c.line)?.cells.as_slice();
+        if c.cell >= cells.len() {
+            return None;
+        }
+        let is_space =
+            |cell: &syodep_pdf::Cell| matches!(cell.kind, CellKind::Char(ch) if ch.is_whitespace());
+        if is_space(&cells[c.cell]) {
+            return None;
+        }
+        let start = cells[..c.cell]
+            .iter()
+            .rposition(is_space)
+            .map_or(0, |i| i + 1);
+        let end = cells[c.cell..]
+            .iter()
+            .position(is_space)
+            .map_or(cells.len() - 1, |n| c.cell + n - 1);
+        let token: String = cells[start..=end]
+            .iter()
+            .filter_map(|cell| match cell.kind {
+                CellKind::Char(ch) => Some(ch),
+                CellKind::Image => None,
+            })
+            .collect();
+        is_abbreviation(&token).then_some((start, end))
+    }
+
+    /// Whether the stop at `c` closes an abbreviation without ending the
+    /// sentence it sits in.
+    fn is_abbreviation_stop(&mut self, c: Caret) -> bool {
+        let Some((_, end)) = self.abbreviation_at(c) else {
+            return false;
+        };
+        // A stop *inside* the construct never ends anything.
+        if c.cell < end {
+            return true;
+        }
+        // The closing stop does, but only when a new sentence follows it.
+        let mut following = String::new();
+        let mut cur = c;
+        for _ in 0..8 {
+            match self.next_cell_same_page(cur) {
+                Some(next) => {
+                    cur = next;
+                    match self.char_at(cur) {
+                        Some(ch) => following.push(ch),
+                        None => break,
+                    }
+                }
+                None => return false,
+            }
+        }
+        !opens_a_sentence(&following)
     }
 
     fn next_cell_on_line(&mut self, c: Caret) -> Option<Caret> {
@@ -1221,6 +1294,11 @@ impl App {
         if self.in_heading(c) {
             return false;
         }
+        // Nor inside a list item's own marker: `1. First point` is one
+        // sentence, not an enumerator followed by a sentence.
+        if self.in_list_marker(c) {
+            return false;
+        }
         let here = match self.char_at(c) {
             Some(ch) if is_sentence_terminator(ch) || is_sentence_trailer(ch) => ch,
             _ => return false,
@@ -1229,6 +1307,12 @@ impl App {
         // end of anything: `3.14` is one number in the middle of a sentence.
         // The stop in `costs 3.` still ends it, because nothing follows.
         if self.is_number_interior(c) {
+            return false;
+        }
+        // Nor a stop belonging to `e.g.`, `Fig.` and friends. The stops inside
+        // such a construct are inert; the one closing it ends a sentence only
+        // when a new one visibly follows.
+        if self.is_abbreviation_stop(c) {
             return false;
         }
         // The group must end at `c`: the next cell cannot continue it.
@@ -1308,6 +1392,36 @@ impl App {
     fn in_heading(&mut self, at: Caret) -> bool {
         self.region_at(at.page, at.line)
             .is_some_and(|o| o.kind == ObjectKind::Heading)
+    }
+
+    /// Whether `at` falls within the marker that opens a list item.
+    ///
+    /// The marker is exactly the line's first token: detection only accepts a
+    /// marker that is followed by a space or is the whole line, so on a line it
+    /// accepted, the first token *is* the marker. That means no second copy of
+    /// the marker grammar has to live here, and no mapping between character
+    /// and cell indices — which would diverge the moment a bullet were drawn as
+    /// an image.
+    fn in_list_marker(&mut self, at: Caret) -> bool {
+        let starts_item = self
+            .region_at(at.page, at.line)
+            .is_some_and(|o| o.kind == ObjectKind::ListItem && at.line == o.start_line);
+        if !starts_item {
+            return false;
+        }
+        let cells = self
+            .content(at.page)
+            .get(at.line)
+            .map(|l| l.cells.as_slice());
+        let Some(cells) = cells else { return false };
+        let is_space =
+            |cell: &syodep_pdf::Cell| matches!(cell.kind, CellKind::Char(c) if c.is_whitespace());
+        let first = cells.iter().position(|c| !is_space(c)).unwrap_or(0);
+        let past = cells[first..]
+            .iter()
+            .position(is_space)
+            .map_or(cells.len(), |n| first + n);
+        at.cell < past
     }
 
     /// [`Self::next_cell_same_page`], additionally stopping at the edge of a
@@ -1429,12 +1543,21 @@ impl App {
 
     // ---- Paragraph motion ----------------------------------------------
 
-    /// A page's paragraphs, cut so that no paragraph straddles a table or an
-    /// image and each object stands alone.
+    /// A page's paragraphs, cut so that no paragraph straddles an object that
+    /// stands alone as one.
+    ///
+    /// List items are the exception: a list is a single paragraph made of many
+    /// items, so `p` skips the whole list while `s` walks it item by item.
     fn page_paragraphs(&mut self, page: usize) -> Vec<(usize, usize)> {
         self.ensure_content(page);
         let segs = paragraph_segments(self.content(page));
-        split_segments_at_objects(&segs, self.objects(page))
+        let splitting: Vec<ContentObject> = self
+            .objects(page)
+            .iter()
+            .filter(|o| o.kind.splits_paragraphs())
+            .copied()
+            .collect();
+        split_segments_at_objects(&segs, &splitting)
     }
 
     /// The paragraph (segment of lines) that contains `line` on `page`.
@@ -3051,6 +3174,160 @@ mod tests {
         assert_caret(&app, 0, 0, 2);
     }
 
+    // ---- Lists ------------------------------------------------------------
+
+    /// A lead-in line, three bulleted items (one of them wrapping) and a
+    /// closing sentence. No item ends in a full stop, which is the whole
+    /// problem: without list boundaries this is all one sentence.
+    fn list_page_content() -> PageContent {
+        let texts = [
+            "The files created by the tool are:",
+            "\u{2022} the globs file",
+            "\u{2022} the magic file, which maps content",
+            "to types by inspection",
+            "\u{2022} the aliases file",
+            "Each of them is regenerated in turn.",
+        ];
+        let lines: Vec<ContentLine> = texts
+            .iter()
+            .enumerate()
+            .map(|(i, t)| text_line(100.0 + i as f32 * 12.0, t))
+            .collect();
+        let item = |start: usize, end: usize| ContentObject {
+            kind: syodep_pdf::ObjectKind::ListItem,
+            bbox: lines[start].bbox.union(lines[end].bbox),
+            start_line: start,
+            end_line: end,
+        };
+        PageContent {
+            objects: vec![item(1, 1), item(2, 3), item(4, 4)],
+            lines,
+            ..Default::default()
+        }
+    }
+
+    fn app_with_list_page(dir: &Path) -> App {
+        let mut app = app_with_text_pages(dir, &["placeholder page"]);
+        app.set_page_content(0, list_page_content());
+        app
+    }
+
+    #[test]
+    fn the_lead_in_prose_does_not_run_into_the_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_list_page(dir.path());
+        press(&mut app, "cs");
+        let (start, end) = app.focus_span().unwrap();
+        assert_eq!(
+            (start.line, end.line),
+            (0, 0),
+            "the colon line swallowed the list"
+        );
+    }
+
+    #[test]
+    fn each_list_item_is_its_own_sentence() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_list_page(dir.path());
+        press(&mut app, "cs");
+        press(&mut app, "s");
+        assert_eq!(span_text(&app), "\u{2022} the globs file");
+        press(&mut app, "s");
+        // The second item wraps onto the line below, and carries it along.
+        let (start, end) = app.focus_span().unwrap();
+        assert_eq!((start.line, end.line), (2, 3));
+        press(&mut app, "s");
+        let (start, _) = app.focus_span().unwrap();
+        assert_eq!(
+            start.line, 4,
+            "the third item should start its own sentence"
+        );
+    }
+
+    #[test]
+    fn the_last_item_does_not_run_on_into_the_prose_after_the_list() {
+        // The item has an end of its own, so the closing sentence stays out of
+        // it even though the item carries no full stop.
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_list_page(dir.path());
+        press(&mut app, "cs");
+        press(&mut app, "sss"); // onto the third item
+        let (start, end) = app.focus_span().unwrap();
+        assert_eq!((start.line, end.line), (4, 4));
+        press(&mut app, "s");
+        assert_eq!(span_text(&app), "Each of them is regenerated in turn.");
+    }
+
+    #[test]
+    fn a_list_is_still_one_paragraph() {
+        // Items bound sentences, not paragraphs: `p` skips the whole list.
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_list_page(dir.path());
+        press(&mut app, "cp");
+        let (start, end) = app.focus_span().unwrap();
+        assert_eq!((start.line, end.line), (0, 5));
+    }
+
+    #[test]
+    fn a_numbered_item_is_one_sentence_including_its_marker() {
+        // `1.` would otherwise end a sentence all by itself.
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["placeholder page"]);
+        let lines = vec![
+            text_line(100.0, "1. First point of the list"),
+            text_line(112.0, "2. Second point of the list"),
+        ];
+        let item = |i: usize| ContentObject {
+            kind: syodep_pdf::ObjectKind::ListItem,
+            bbox: lines[i].bbox,
+            start_line: i,
+            end_line: i,
+        };
+        app.set_page_content(
+            0,
+            PageContent {
+                objects: vec![item(0), item(1)],
+                lines,
+                ..Default::default()
+            },
+        );
+        press(&mut app, "cs");
+        assert_eq!(span_text(&app), "1. First point of the list");
+        press(&mut app, "s");
+        assert_eq!(span_text(&app), "2. Second point of the list");
+    }
+
+    #[test]
+    fn a_sentence_never_reaches_back_out_of_an_item() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_list_page(dir.path());
+        // Land inside the second item's wrapped line, then take its sentence.
+        press(&mut app, "cc");
+        press(&mut app, "jjj");
+        assert_eq!(app.caret().unwrap().line, 3);
+        press(&mut app, "cs");
+        let (start, _) = app.focus_span().unwrap();
+        assert_eq!(start.line, 2, "the sentence reached back past the marker");
+    }
+
+    #[test]
+    fn word_motion_is_unaffected_by_a_list() {
+        // Lists bound sentences only; `w` still walks the marker and words.
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_list_page(dir.path());
+        press(&mut app, "cw");
+        for _ in 0..12 {
+            if app.caret().unwrap().line == 1 {
+                break;
+            }
+            press(&mut app, "w");
+        }
+        assert_eq!(app.caret().unwrap().line, 1, "never reached the first item");
+        assert_eq!(span_text(&app), "\u{2022}");
+        press(&mut app, "w");
+        assert_eq!(span_text(&app), "the");
+    }
+
     // ---- Numbers ----------------------------------------------------------
 
     /// A page whose one line is `text`, for exercising word and sentence runs.
@@ -3066,16 +3343,86 @@ mod tests {
         app
     }
 
-    /// The text the focus span currently covers.
+    /// The text the focus span currently covers, across however many lines.
     fn span_text(app: &App) -> String {
         let (start, end) = app.focus_span().unwrap();
-        app.content(start.page)[start.line].cells[start.cell..=end.cell]
-            .iter()
-            .filter_map(|c| match c.kind {
-                CellKind::Char(ch) => Some(ch),
-                CellKind::Image => None,
-            })
-            .collect()
+        let lines = app.content(start.page);
+        let mut out = String::new();
+        for (line, content) in lines.iter().enumerate().take(end.line + 1).skip(start.line) {
+            let cells = &content.cells;
+            let first = if line == start.line { start.cell } else { 0 };
+            let last = if line == end.line {
+                end.cell.min(cells.len().saturating_sub(1))
+            } else {
+                cells.len().saturating_sub(1)
+            };
+            for cell in &cells[first..=last] {
+                if let CellKind::Char(ch) = cell.kind {
+                    out.push(ch);
+                }
+            }
+        }
+        out
+    }
+
+    // ---- Abbreviations ----------------------------------------------------
+
+    #[test]
+    fn dotted_initials_do_not_break_a_sentence() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_line(dir.path(), "Use a glob, e.g. the star form. Then stop.");
+        press(&mut app, "cs");
+        assert_eq!(span_text(&app), "Use a glob, e.g. the star form.");
+    }
+
+    #[test]
+    fn dotted_initials_are_one_word() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_line(dir.path(), "Use a glob, e.g. the star form.");
+        press(&mut app, "cw");
+        press(&mut app, "www"); // Use, a, glob, then the comma
+        press(&mut app, "w");
+        assert_eq!(span_text(&app), "e.g.");
+        press(&mut app, "w");
+        assert_eq!(span_text(&app), "the");
+    }
+
+    #[test]
+    fn a_known_abbreviation_does_not_break_a_sentence() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_line(dir.path(), "As shown in Fig. 3 the glob wins. Then stop.");
+        press(&mut app, "cs");
+        assert_eq!(span_text(&app), "As shown in Fig. 3 the glob wins.");
+    }
+
+    #[test]
+    fn an_abbreviation_still_ends_a_sentence_before_a_capital() {
+        // `etc.` genuinely closes this one, and the capital says so.
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_line(dir.path(), "Globs, magic, etc. The next sentence here.");
+        press(&mut app, "cs");
+        assert_eq!(span_text(&app), "Globs, magic, etc.");
+        press(&mut app, "s");
+        assert_eq!(span_text(&app), "The next sentence here.");
+    }
+
+    #[test]
+    fn an_abbreviation_before_a_lower_case_word_keeps_the_sentence() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_line(dir.path(), "Globs, magic, etc. and then more. Next.");
+        press(&mut app, "cs");
+        assert_eq!(span_text(&app), "Globs, magic, etc. and then more.");
+    }
+
+    #[test]
+    fn an_ordinary_word_before_a_lower_case_word_still_ends_the_sentence() {
+        // The capital test is consulted only where an abbreviation is already
+        // suspected. Applied to prose at large it would merge these two, which
+        // is exactly what a technical document does constantly.
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_line(dir.path(), "It scans all the data. glob rules follow.");
+        press(&mut app, "cs");
+        assert_eq!(span_text(&app), "It scans all the data.");
     }
 
     #[test]

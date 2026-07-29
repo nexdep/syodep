@@ -7,6 +7,154 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-07-29 — An abbreviation is one word and does not end a sentence
+
+`e.g.` was four word stops and two sentences. Now abbreviations are single words
+whose internal stops are inert, in the same shape as the number rule: one
+predicate consulted from both `same_word_run` and `sentence_boundary_after`, so
+word runs and sentence runs cannot disagree about where the construct ends.
+
+Two kinds, deliberately handled differently. **Dotted initials** — `e.g.`,
+`i.e.`, `U.S.`, `Ph.D.`, `a.k.a.` — are recognised by *shape*: a run of one- or
+two-letter groups joined by stops. No list, nothing to maintain, and no sentence
+ever ends in the middle of one. **Everything else** needs naming, because `Fig.`
+is indistinguishable from a word ending a sentence, so there is a curated list:
+Latin and citation forms, references, bibliographic forms, titles, months, days,
+organisations and measurement.
+
+### The capitalisation test, and why it is not applied generally
+
+`etc.` and `U.S.` genuinely can end a sentence. So the closing stop of an
+abbreviation still ends one — but only when a capital follows. `…oranges, etc.
+The next` splits; `…etc. and then` does not.
+
+The tempting generalisation is to apply that everywhere: "a stop followed by a
+lower-case word is not an ending". Measured on the reference document first,
+that rule would have merged **nine genuine sentence boundaries** — after
+`match.`, `data.`, `bits.`, `rule.`, `byte.`, `type.` — because a technical
+document constantly begins a sentence with a lower-case identifier. So the
+capitalisation signal is consulted *only* where an abbreviation is already
+suspected, which is precisely where the evidence says it is safe. A test pins
+that: `an_ordinary_word_before_a_lower_case_word_still_ends_the_sentence`.
+
+Several list entries (`no.`, `min.`, `co.`) are also ordinary words that can
+close a sentence. That is safe for the same reason — the list only says "suspect
+an abbreviation here", never "this is never an ending".
+
+### Result
+
+On the reference document, sentence stops went 415 → 413: exactly the two
+spurious boundaries inside its single `e.g.`, with all nine lower-case-follows
+boundaries correctly left alone.
+
+11 new tests, 353 total.
+
+---
+
+## 2026-07-29 — A list item is a region, so it has an end
+
+The first cut of list support gave items a *start* and nothing else: a
+`list_starts` vector of line indices, plus two bespoke filters in the sentence
+walkers refusing to cross one. That made each item a sentence but left the last
+item of every list joining the prose below it, since nothing said where a list
+ended.
+
+The fix was not a `list_ends` vector beside the first. A list item is a region
+like a heading or a table, and a region has two edges by construction. Giving
+items an extent deletes both filters and `App::starts_list_item` outright:
+`next_cell_in_region`/`prev_cell_in_region` revert character-for-character to
+the one-line `same_region` filters they were before lists existed. The feature
+stops existing in the motion code entirely.
+
+`ObjectKind` grew a second predicate to pay for it. Regions now read as a chain:
+a table or image is one stop at every scope; a heading is one step for `s` and
+`p`; a list item is one step for `s` only, because a list is one paragraph made
+of many items.
+
+### The extent rule, and two measurements that shaped it
+
+An item covers its marker and every following line indented past that marker,
+stopping at the next marker, at any object already claimed, at a paragraph-sized
+gap, or when the text returns to the marker's margin. Measured on the reference
+document: markers at x0=119.6, item text and wrapped continuations at 129.5,
+prose resuming at 119.6.
+
+**A design review caught a bug that would have shipped.** On a two-column page
+the first line of column two is trivially "indented past" a marker in column
+one, so an item swallowed the head of the next column. A y-reset guard fixes it,
+and `an_item_never_crosses_a_column_break` fails without it — verified by
+removing the guard and watching the item become `(1,2)`.
+
+**The spike then caught the guard being too strict.** An exact "did we move up?"
+test cut every item off at its marker on the pages where MuPDF emits the bullet
+as its own line: a bullet's box starts a point or two *below* its text's,
+because the glyph is small and the text has ascenders. The guard needs a
+one-line tolerance. Under-extension on the real document went from 13 items to
+zero.
+
+The remaining stops all proved to be the gap guard doing real work. In this
+document the body prose sits *right* of the list markers, so the indent rule
+alone can never end an item there — the reviewer predicted exactly this, and it
+is why the gap guard is load-bearing rather than polish.
+
+### Also folded in
+
+A numbered item no longer splits at its own marker. Rather than exporting the
+marker grammar a second time, the rule is *a sentence never ends inside the
+first token of a list item* — exact, because detection only accepts a marker
+that is followed by a space or is the whole line, so on any line it accepted the
+first token **is** the marker. No character-to-cell index mapping either, which
+would have diverged the moment a bullet were drawn as an image.
+
+Detection also moved inside `content_objects`, judged against the objects
+already claimed rather than against raw heading ranges. A marker inside a table
+is a table row; an item reaching a figure truncates at it instead of being
+discarded for touching one. Disjointness is now by construction — the scan
+breaks on a blocked line — with a `debug_assert` over the sorted result.
+
+On the reference document: 36 items, 6 tables and 27 headings, all unchanged.
+
+18 new tests, 343 total.
+
+---
+
+## 2026-07-29 — A list item always starts a sentence
+
+List items rarely end in a full stop, so a whole bulleted list — and the line
+introducing it, which usually ends in a colon — read as a single sentence. `s`
+now stops at the start of every item.
+
+Extraction shapes items two ways, and both had to work. Usually the bullet and
+its text are one line (`• A standard way to install…`), but where the indent is
+wide enough MuPDF emits the bullet as a line of its own followed by the text as
+another. Keying on "this line opens with a marker" covers both: in the split
+case the bullet line is the item's start and its text line simply continues it.
+
+Detection is shape plus corroboration. A marker counts only when at least one
+other line of the same kind starts at the same left edge, which is what
+separates a real list from a sentence opening `1998. That year…`. Numbered
+section headings are indistinguishable from enumerated items by shape, so lines
+already known to be headings are excluded outright — without that, every `2.1.
+Directory layout` in the reference document became a list item. On that document
+the rule finds 36 item starts, all genuine bullets, no false positives.
+
+The two sentence-walking choke points added the check, so nothing else moved.
+Lists bound sentences only: `w` still walks the marker and the words after it,
+and paragraph scope still reads a list as one paragraph, which is a coherent
+model — the list is the paragraph, each item a sentence within it.
+
+**Known limit, pinned by a test:** item *starts* are boundaries and nothing
+marks where a list *ends*, so the final item joins whatever prose follows it,
+exactly as any unterminated line always has. Fixing it needs list extents —
+knowing which lines are continuations rather than the next paragraph.
+`the_last_item_runs_on_into_the_prose_after_the_list` is the test that will
+change the day that lands. *(It landed the same day: see the entry above, where
+items became regions with extents and that test inverted.)*
+
+9 new tests, 323 total. New fixture: `pdf_with_list`.
+
+---
+
 ## 2026-07-29 — A number is one word and never ends a sentence
 
 `3.14` used to be three word stops and, worse, two sentences: the decimal point

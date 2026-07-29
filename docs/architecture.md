@@ -164,6 +164,17 @@ document-scoped and owned by `syodep-core`'s session, built lazily on first
 content need, so `Document` keeps no interior mutability and merely reading a
 document never pays for it.
 
+**Decision — regions form a chain of decreasing coarseness:** every
+`ContentObject` bounds a sentence, which is what being a region means; the two
+predicates on `ObjectKind` say how much further each kind goes. A table or an
+image `is_atomic()` — one stop at every scope above char. A heading is not
+atomic but `splits_paragraphs()`, so it is one step for `s` and `p` while `w`
+walks its words. A list item is neither: one step for `s` only, because a list
+is a single paragraph made of many items. Adding a kind means answering those
+two questions rather than threading a new mechanism through the motion code —
+which is exactly what list items did before they became regions, and what
+removing that mechanism bought back.
+
 **Decision — a heading is a *region*, not an atomic object:** `ObjectKind`
 carries `is_atomic()`, false only for `Heading`. Motion and highlighting go
 through the atomic accessors, so a heading keeps its words individually

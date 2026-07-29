@@ -294,6 +294,70 @@ pub fn is_numeric_separator(c: char) -> bool {
     matches!(c, '.' | ',')
 }
 
+/// Abbreviations whose closing full stop is usually not the end of a sentence.
+///
+/// Lower-case and without the stop. Dotted initials (`e.g.`, `U.S.`, `Ph.D.`)
+/// are *not* here — they are recognised by shape, so they need no list and no
+/// maintenance. This is only for the ones a rule cannot infer.
+///
+/// Several entries are also ordinary words that can genuinely close a sentence
+/// (`no.`, `min.`, `co.`). That is safe because the closing stop still ends a
+/// sentence when a capital follows it — the list only says "suspect an
+/// abbreviation here", never "this is never an ending".
+const ABBREVIATIONS: &[&str] = &[
+    // Latin and citation
+    "al", "approx", "ca", "cf", "et", "etc", "ibid", "op", "resp", "seq", "viz", "vs",
+    // References into a document
+    "app", "ch", "chap", "eq", "eqs", "fig", "figs", "no", "nos", "p", "para", "pp", "pt", "ref",
+    "refs", "sec", "secs", "tab", "tabs", "vol", "vols", // Bibliographic
+    "ed", "eds", "orig", "repr", "rev", "suppl", "trans", "transl", // Titles
+    "capt", "col", "dr", "gen", "hon", "jr", "lt", "mr", "mrs", "ms", "prof", "sgt", "sr", "st",
+    // Months
+    "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept", "oct", "nov", "dec",
+    // Days
+    "mon", "tue", "tues", "wed", "thu", "thur", "thurs", "fri", "sat", "sun",
+    // Organisations and measurement
+    "co", "corp", "dept", "est", "excl", "incl", "inc", "ltd", "max", "min", "univ",
+];
+
+/// Whether `token` is a run of short letter groups joined by stops, as in
+/// `e.g.`, `i.e.`, `U.S.`, `Ph.D.` or `a.k.a.`.
+///
+/// Recognised by shape rather than by a list: no sentence ever ends in the
+/// middle of one, and no list has to be maintained or translated.
+pub fn is_dotted_initials(token: &str) -> bool {
+    let body = token.strip_suffix('.').unwrap_or(token);
+    let segments: Vec<&str> = body.split('.').collect();
+    segments.len() >= 2
+        && segments
+            .iter()
+            .all(|s| (1..=2).contains(&s.chars().count()) && s.chars().all(char::is_alphabetic))
+}
+
+/// Whether `token` — with or without its closing stop — is a known
+/// abbreviation.
+pub fn is_known_abbreviation(token: &str) -> bool {
+    let body = token.strip_suffix('.').unwrap_or(token).to_lowercase();
+    !body.is_empty() && ABBREVIATIONS.contains(&body.as_str())
+}
+
+/// Whether `token` is an abbreviation of either kind.
+pub fn is_abbreviation(token: &str) -> bool {
+    is_dotted_initials(token) || is_known_abbreviation(token)
+}
+
+/// Whether text starting with `next` reads as a new sentence — the first
+/// letter or digit after any opening punctuation is a capital.
+///
+/// Only consulted where an abbreviation is already suspected. Applied to prose
+/// at large it merges real sentences: a technical document routinely starts one
+/// with a lower-case identifier.
+pub fn opens_a_sentence(next: &str) -> bool {
+    next.chars()
+        .find(|c| c.is_alphanumeric())
+        .is_some_and(char::is_uppercase)
+}
+
 /// Whether `separator`, with `before` and `after` beside it, is punctuation
 /// inside a number rather than between words or sentences.
 ///
@@ -696,6 +760,44 @@ mod tests {
             start_line,
             end_line,
         }
+    }
+
+    #[test]
+    fn dotted_initials_are_recognised_by_shape() {
+        for token in ["e.g.", "i.e.", "U.S.", "Ph.D.", "a.k.a.", "e.g"] {
+            assert!(is_dotted_initials(token), "{token}");
+        }
+    }
+
+    #[test]
+    fn ordinary_words_are_not_dotted_initials() {
+        // One stop after a whole word is not a run of initials, and a decimal
+        // is not one either.
+        for token in ["end.", "etc.", "3.14", "Fig.", "word", "."] {
+            assert!(!is_dotted_initials(token), "{token}");
+        }
+    }
+
+    #[test]
+    fn known_abbreviations_are_matched_without_their_stop_and_by_any_case() {
+        // Tokens are whitespace-delimited, so `et al.` arrives as two of them
+        // and it is `al.` that carries the stop.
+        for token in ["etc.", "Fig.", "fig", "AL.", "vol.", "Dr.", "Sept."] {
+            assert!(is_known_abbreviation(token), "{token}");
+        }
+        for token in ["end", "the", "database", ""] {
+            assert!(!is_known_abbreviation(token), "{token}");
+        }
+    }
+
+    #[test]
+    fn a_capital_after_the_stop_opens_a_sentence() {
+        assert!(opens_a_sentence(" The next one"));
+        assert!(opens_a_sentence(" (Then again"));
+        // A lower-case word or a figure continues what came before.
+        assert!(!opens_a_sentence(" and then"));
+        assert!(!opens_a_sentence(" 3 items"));
+        assert!(!opens_a_sentence(""));
     }
 
     #[test]

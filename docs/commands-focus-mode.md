@@ -96,6 +96,35 @@ Word motions use Vim-like lowercase boundaries: letters/digits/underscore form
 word runs, punctuation/symbols form separate runs, whitespace is skipped, and
 each image or table is a single stop.
 
+**Lists.** Each list item is one sentence, so `s` steps through a list item by
+item even though items rarely end in a full stop. The line introducing a list
+does not run into its first item, and the last item does not run on into the
+prose after the list: an item covers its marker and the lines wrapped under it,
+and ends where the text returns to the marker's own margin. A numbered item is
+one sentence including its `1.`, not two.
+
+Both shapes of item count: a bullet followed by its text, and a bullet that
+extraction leaves on a line of its own with the text below it. A marker counts
+only when another item of the same kind lines up with it, so a sentence that
+merely opens with a numeral is not a list.
+
+Items bound sentences only. `w` still walks the marker and the words after it,
+and items do not split a list into paragraphs — though a list set with generous
+space between items may still be split by the ordinary paragraph-gap rule.
+
+**Abbreviations.** `e.g.`, `i.e.`, `U.S.`, `Ph.D.` and the like are one word and
+never break a sentence: the stops inside them are inert. Runs of initials
+joined by stops are recognised by shape, so nothing has to be listed. A set of
+common abbreviations that no rule can infer is also known — `etc.`, `cf.`,
+`vs.`, `et al.`, `Fig.`, `Eq.`, `Sec.`, `vol.`, `Dr.`, month and day names and
+others.
+
+Their *closing* stop still ends a sentence when a new one visibly follows it, so
+`…apples, oranges, etc. The next one` splits correctly while `…etc. and then
+more` does not. That capitalisation test is used only where an abbreviation is
+already suspected — applied to prose generally it merges real sentences, since
+technical writing constantly starts one with a lower-case identifier.
+
 A number is always one word, however it is punctuated: `3.14` and `1,234.56` are
 each a single stop, because a separator with digits on both sides belongs to the
 figure. The same rule keeps a decimal point from ending a sentence — `pi is 3.14

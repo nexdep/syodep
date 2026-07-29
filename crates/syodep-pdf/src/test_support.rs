@@ -629,6 +629,27 @@ pub fn pdf_with_running_header(pages: usize, repeat_header: bool) -> Vec<u8> {
     buf
 }
 
+/// Build a single A4 page with a lead-in line ending in a colon, a bulleted
+/// list of three items, and a closing sentence. Used to exercise list
+/// detection, where items carry no terminating full stop.
+pub fn pdf_with_list() -> Vec<u8> {
+    let mut content = String::new();
+    content.push_str("BT /F1 11 Tf 100 700 Td (The files created by the tool are:) Tj ET\n");
+    let items = [
+        "the globs file, mapping names to types",
+        "the magic file, mapping content to types",
+        "the aliases file, mapping aliases to types",
+    ];
+    for (i, text) in items.iter().enumerate() {
+        let y = 670.0 - i as f32 * 18.0;
+        // The bullet sits at the list indent, its text a little further in.
+        content.push_str(&format!("BT /F1 11 Tf 100 {y} Td (\\267) Tj ET\n"));
+        content.push_str(&format!("BT /F1 11 Tf 118 {y} Td ({text}) Tj ET\n"));
+    }
+    content.push_str("BT /F1 11 Tf 100 600 Td (Each of them is regenerated in turn.) Tj ET\n");
+    single_page_pdf(&content)
+}
+
 /// Build a single page carrying rotated text: a 90&deg; stamp down the left
 /// margin and a 45&deg; watermark across the middle. With `whole_page` the page
 /// contains *only* rotated text, so the rotated direction is the dominant one.

@@ -119,18 +119,27 @@ pub enum ObjectKind {
     Image,
     Table,
     Heading,
+    ListItem,
 }
 
 impl ObjectKind {
     /// Whether this is a single stop at *every* scope above char.
     ///
     /// Tables and images are: there is nothing useful inside them to move
-    /// through word by word. A heading is not — it is ordinary prose that you
-    /// may well want to select a word of, so it is a unit only for sentence
-    /// and paragraph scope, which it gets by bounding runs rather than by
-    /// being atomic.
+    /// through word by word. A heading or a list item is not — both are
+    /// ordinary prose you may well want to select a word of, so they are units
+    /// only for the scopes that group text into runs.
     pub fn is_atomic(self) -> bool {
-        !matches!(self, Self::Heading)
+        !matches!(self, Self::Heading | Self::ListItem)
+    }
+
+    /// Whether this stands alone as a paragraph.
+    ///
+    /// A list is one paragraph made of many items, so `p` skips the whole list
+    /// in a press while `s` walks it item by item. Every other kind is a
+    /// paragraph in its own right.
+    pub fn splits_paragraphs(self) -> bool {
+        !matches!(self, Self::ListItem)
     }
 }
 
@@ -172,8 +181,8 @@ impl PageContent {
             .find(|o| line >= o.start_line && line <= o.end_line)
     }
 
-    /// The *atomic* object containing `line`, if any — headings excluded.
-    /// This is what motion treats as one stop.
+    /// The *atomic* object containing `line`, if any — headings and list items
+    /// excluded. This is what motion treats as one stop.
     pub fn atomic_object_at(&self, line: usize) -> Option<&ContentObject> {
         self.object_at(line).filter(|o| o.kind.is_atomic())
     }
@@ -979,6 +988,177 @@ fn line_text(line: &ContentLine) -> String {
         .collect()
 }
 
+/// How close two markers' left edges must be to belong to the same list.
+const LIST_MARKER_ALIGN: f32 = 3.0;
+
+/// A list needs at least this many items. One line that looks like a marker is
+/// far more often ordinary prose — a sentence opening `1998. That year…`, or a
+/// stray dash — so a lone candidate is never a list.
+const MIN_LIST_ITEMS: usize = 2;
+
+/// How far past its marker a line must start to be part of that item. A flush
+/// list, whose continuations align with the marker, therefore yields items of
+/// one line each — deliberate, since under-reaching only shortens a sentence
+/// while over-reaching swallows the prose after the list.
+const LIST_INDENT_EPS: f32 = 1.0;
+
+/// A gap larger than this many line heights ends the item: an indented block
+/// that far below merely follows the list.
+const LIST_GAP_FACTOR: f32 = 1.5;
+
+/// No item may claim more than this many lines beyond its marker. Marker
+/// corroboration is page-wide, so a stray pair of marker-shaped lines can
+/// exist; this bounds what one is able to swallow.
+const LIST_ITEM_MAX_LINES: usize = 8;
+
+/// What a line's opening mark makes it, if anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Marker {
+    /// A bullet glyph, which may sit on a line of its own.
+    Bullet,
+    /// An enumerator such as `1.`, `2)`, `a.` or `iv)`.
+    Enumerated,
+}
+
+/// The list marker a line opens with, if any.
+///
+/// A marker must be followed by a space or be the whole line: PDF extraction
+/// frequently puts a bullet on its own line, separated from the item's text by
+/// the indent, so both shapes have to count.
+fn line_marker(text: &str) -> Option<(Marker, usize)> {
+    let indent = text.chars().take_while(|c| c.is_whitespace()).count();
+    let trimmed = text.trim_start();
+    let mut chars = trimmed.chars();
+    let first = chars.next()?;
+    let rest = chars.as_str();
+    let followed_by_space = |s: &str| s.is_empty() || s.starts_with(char::is_whitespace);
+
+    if matches!(
+        first,
+        '\u{2022}'
+            | '\u{00b7}'
+            | '\u{2023}'
+            | '\u{25e6}'
+            | '\u{25aa}'
+            | '\u{25ab}'
+            | '\u{2219}'
+            | '\u{25cf}'
+            | '\u{2043}'
+            | '*'
+            | '-'
+            | '\u{2013}'
+            | '\u{2014}'
+    ) && followed_by_space(rest)
+    {
+        return Some((Marker::Bullet, indent + 1));
+    }
+
+    // An enumerator: a short run of digits, one letter, or a roman numeral,
+    // closed by `.` or `)`. Kept short so `3.14 is the value` cannot qualify —
+    // there the character after the stop is a digit, not a space.
+    let label: String = trimmed
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric())
+        .collect();
+    if label.is_empty() || label.len() > 3 {
+        return None;
+    }
+    let after_label = &trimmed[label.len()..];
+    let mut closers = after_label.chars();
+    if !matches!(closers.next(), Some('.') | Some(')')) {
+        return None;
+    }
+    if !followed_by_space(closers.as_str()) {
+        return None;
+    }
+    let all_digits = label.chars().all(|c| c.is_ascii_digit());
+    let roman = label.chars().all(|c| {
+        matches!(
+            c.to_ascii_lowercase(),
+            'i' | 'v' | 'x' | 'l' | 'c' | 'd' | 'm'
+        )
+    });
+    let single_letter = label.len() == 1 && label.chars().all(|c| c.is_ascii_alphabetic());
+    // The label plus its closing `.` or `)`, after any indent.
+    (all_digits || roman || single_letter)
+        .then_some((Marker::Enumerated, indent + label.chars().count() + 1))
+}
+
+/// The lines that begin a list item.
+///
+/// Corroboration rather than shape alone: a marker counts only when at least
+/// one other line of the same kind starts at the same left edge, which is what
+/// separates a real list from a sentence that happens to open with a numeral.
+/// Lines inside a heading are excluded — a numbered section heading such as
+/// `2.1. Directory layout` is indistinguishable from an enumerated item by
+/// shape, and is already known to be a heading.
+fn list_items(lines: &[ContentLine], blocked: &[ContentObject]) -> Vec<(usize, usize)> {
+    let blocked_at = |i: usize| blocked.iter().any(|o| i >= o.start_line && i <= o.end_line);
+    let candidates: Vec<(usize, Marker, f32)> = lines
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !blocked_at(*i))
+        .filter_map(|(i, line)| line_marker(&line_text(line)).map(|(m, _)| (i, m, line.bbox.x0)))
+        .collect();
+
+    let starts: Vec<(usize, f32)> = candidates
+        .iter()
+        .filter(|&&(i, marker, x0)| {
+            let peers = candidates
+                .iter()
+                .filter(|&&(j, m, x)| j != i && m == marker && (x - x0).abs() <= LIST_MARKER_ALIGN)
+                .count();
+            peers + 1 >= MIN_LIST_ITEMS
+        })
+        .map(|&(i, _, x0)| (i, x0))
+        .collect();
+
+    // An item runs from its marker through the lines indented past that
+    // marker: its own text where extraction split the bullet off, and any
+    // wrapped continuation. The prose after a list returns to the marker's own
+    // margin, which is precisely where the last item has to stop.
+    let is_marker = |i: usize| starts.iter().any(|&(s, _)| s == i);
+    starts
+        .iter()
+        .map(|&(start, marker_x)| {
+            let mut end = start;
+            for j in start + 1..lines.len() {
+                // Corroboration is page-wide, so a stray pair of marker-shaped
+                // lines can exist. Cap how much one is allowed to claim.
+                if j - start > LIST_ITEM_MAX_LINES {
+                    break;
+                }
+                if is_marker(j) || blocked_at(j) || lines[j].cells.is_empty() {
+                    break;
+                }
+                let previous = lines[end].bbox;
+                let current = lines[j].bbox;
+                let height = (previous.y1 - previous.y0).max(1.0);
+                // Moving back up the page by more than a line is a new column
+                // or region, and the top of the next column is trivially
+                // "indented past" a marker in the left one — without this an
+                // item swallows it. The tolerance matters: a bullet's own box
+                // starts a point or two below its text's, because the glyph is
+                // small and the text has ascenders, so an exact test would cut
+                // every item off at its marker.
+                if previous.y0 - current.y0 > height {
+                    break;
+                }
+                // A wide gap means the block below merely follows the list
+                // rather than belonging to its last item.
+                if current.y0 - previous.y1 > LIST_GAP_FACTOR * height {
+                    break;
+                }
+                if current.x0 <= marker_x + LIST_INDENT_EPS {
+                    break;
+                }
+                end = j;
+            }
+            (start, end)
+        })
+        .collect()
+}
+
 /// How much larger than the body text a line must be set to read as a heading.
 ///
 /// 1.15 rather than something tighter because of a real failure: on a page
@@ -1175,7 +1355,33 @@ fn content_objects(
         });
     }
 
+    // List items are found last, against everything already claimed rather
+    // than against raw heading ranges: a bulleted line inside a table is a
+    // table row, and an item's extent stops at the figure below it rather than
+    // being thrown away for touching one. Because the scan breaks on a blocked
+    // line, the ranges are disjoint from `kept` by construction.
+    for (start, end) in list_items(lines, &kept) {
+        if end >= lines.len() {
+            continue;
+        }
+        let bbox = lines[start..=end]
+            .iter()
+            .map(|l| l.bbox)
+            .reduce(|a, b| a.union(b))
+            .unwrap_or(lines[start].bbox);
+        kept.push(ContentObject {
+            kind: ObjectKind::ListItem,
+            bbox,
+            start_line: start,
+            end_line: end,
+        });
+    }
+
     kept.sort_by_key(|o| o.start_line);
+    debug_assert!(
+        kept.windows(2).all(|w| w[0].end_line < w[1].start_line),
+        "objects must stay sorted and disjoint: {kept:?}"
+    );
     kept
 }
 
@@ -1733,6 +1939,279 @@ mod tests {
             .objects
             .iter()
             .all(|o| o.kind != ObjectKind::Heading));
+    }
+
+    // ---- Lists -----------------------------------------------------------
+
+    #[test]
+    fn a_bullet_is_a_marker_alone_or_before_text() {
+        // Extraction often puts the bullet on a line of its own.
+        assert_eq!(line_marker("\u{2022}"), Some((Marker::Bullet, 1)));
+        assert_eq!(
+            line_marker("\u{2022} A standard way to install"),
+            Some((Marker::Bullet, 1))
+        );
+        assert_eq!(line_marker("- a dashed item"), Some((Marker::Bullet, 1)));
+    }
+
+    #[test]
+    fn an_enumerator_is_a_marker() {
+        // The reported length covers the label and its closer, so a sentence
+        // can be stopped from ending inside the marker.
+        assert_eq!(line_marker("1. First item"), Some((Marker::Enumerated, 2)));
+        assert_eq!(line_marker("2) Second item"), Some((Marker::Enumerated, 2)));
+        assert_eq!(
+            line_marker("iv. Fourth item"),
+            Some((Marker::Enumerated, 3))
+        );
+        assert_eq!(
+            line_marker("a) Lettered item"),
+            Some((Marker::Enumerated, 2))
+        );
+    }
+
+    #[test]
+    fn a_marker_length_counts_the_indent_before_it() {
+        assert_eq!(line_marker("   1. Indented"), Some((Marker::Enumerated, 5)));
+        assert_eq!(
+            line_marker("  \u{2022} Indented"),
+            Some((Marker::Bullet, 3))
+        );
+    }
+
+    #[test]
+    fn ordinary_prose_is_not_a_marker() {
+        assert_eq!(line_marker("The database is a set"), None);
+        // A decimal is not an enumerator: a digit follows the stop, not a space.
+        assert_eq!(line_marker("3.14 is the value"), None);
+        // A hyphenated word is not a bullet: no space after the dash.
+        assert_eq!(line_marker("-ish results"), None);
+        // Too long to be an enumerator label.
+        assert_eq!(line_marker("1998. That year saw"), None);
+    }
+
+    #[test]
+    fn a_list_needs_more_than_one_item() {
+        // A lone marker-looking line is prose, not a list.
+        let lines = vec![
+            text_line_at(20.0, "Introductory prose here"),
+            text_line_at(40.0, "1. Something that looks like an item"),
+            text_line_at(60.0, "More prose follows on"),
+        ];
+        assert_eq!(list_items(&lines, &[]), Vec::<(usize, usize)>::new());
+    }
+
+    #[test]
+    fn aligned_markers_of_the_same_kind_form_a_list() {
+        let lines = vec![
+            text_line_at(20.0, "The files created are:"),
+            text_line_at(40.0, "\u{2022} the first file"),
+            text_line_at(60.0, "\u{2022} the second file"),
+            text_line_at(80.0, "\u{2022} the third file"),
+        ];
+        assert_eq!(list_items(&lines, &[]), vec![(1, 1), (2, 2), (3, 3)]);
+    }
+
+    /// Indent a line past the list's markers, as a wrapped continuation sits.
+    fn indent(line: &mut ContentLine, by: f32) {
+        line.bbox.x0 += by;
+    }
+
+    /// An object standing in the way of list detection.
+    fn blocking(
+        lines: &[ContentLine],
+        kind: ObjectKind,
+        start: usize,
+        end: usize,
+    ) -> ContentObject {
+        ContentObject {
+            kind,
+            bbox: lines[start].bbox.union(lines[end].bbox),
+            start_line: start,
+            end_line: end,
+        }
+    }
+
+    #[test]
+    fn an_item_covers_its_indented_continuation() {
+        let mut lines = vec![
+            text_line_at(20.0, "\u{2022} the first file"),
+            text_line_at(40.0, "wrapped onto a second line"),
+            text_line_at(60.0, "\u{2022} the second file"),
+        ];
+        indent(&mut lines[1], 10.0);
+        assert_eq!(list_items(&lines, &[]), vec![(0, 1), (2, 2)]);
+    }
+
+    #[test]
+    fn the_last_item_stops_where_the_list_ends() {
+        // The whole point: prose returning to the markers' own margin is not
+        // part of the final item.
+        let mut lines = vec![
+            text_line_at(20.0, "\u{2022} the first file"),
+            text_line_at(40.0, "\u{2022} the second file"),
+            text_line_at(60.0, "wrapped onto a second line"),
+            text_line_at(80.0, "Each of them is regenerated in turn."),
+        ];
+        indent(&mut lines[2], 10.0);
+        assert_eq!(list_items(&lines, &[]), vec![(0, 0), (1, 2)]);
+    }
+
+    #[test]
+    fn a_flush_list_yields_one_line_items() {
+        // Nothing is indented past the marker, so nothing can be shown to
+        // belong to the item. Under-reaching is the safe direction.
+        let lines = vec![
+            text_line_at(20.0, "\u{2022} the first file"),
+            text_line_at(40.0, "wrapped onto a second line"),
+            text_line_at(60.0, "\u{2022} the second file"),
+        ];
+        assert_eq!(list_items(&lines, &[]), vec![(0, 0), (2, 2)]);
+    }
+
+    #[test]
+    fn a_wide_gap_ends_an_item() {
+        let mut lines = vec![
+            text_line_at(20.0, "\u{2022} the first file"),
+            text_line_at(200.0, "a distant indented block"),
+            text_line_at(220.0, "\u{2022} the second file"),
+        ];
+        indent(&mut lines[1], 10.0);
+        assert_eq!(list_items(&lines, &[]), vec![(0, 0), (2, 2)]);
+    }
+
+    #[test]
+    fn an_item_never_crosses_a_column_break() {
+        // The top of the next column is trivially "indented past" a marker in
+        // the left one. Without the y-reset guard the last item of column one
+        // swallows the head of column two.
+        let mut lines = vec![
+            text_line_at(700.0, "\u{2022} the first file"),
+            text_line_at(720.0, "\u{2022} the second file"),
+            text_line_at(60.0, "the next column starts up here"),
+        ];
+        indent(&mut lines[2], 200.0);
+        assert_eq!(list_items(&lines, &[]), vec![(0, 0), (1, 1)]);
+    }
+
+    #[test]
+    fn an_item_stops_at_a_table_or_an_image() {
+        let mut lines = vec![
+            text_line_at(20.0, "\u{2022} the first file"),
+            text_line_at(40.0, "a figure caption below it"),
+            text_line_at(60.0, "\u{2022} the second file"),
+        ];
+        indent(&mut lines[1], 10.0);
+        let table = blocking(&lines, ObjectKind::Table, 1, 1);
+        // Without the table the caption would be part of the item.
+        assert_eq!(list_items(&lines, &[]), vec![(0, 1), (2, 2)]);
+        assert_eq!(list_items(&lines, &[table]), vec![(0, 0), (2, 2)]);
+    }
+
+    #[test]
+    fn a_marker_inside_a_table_is_not_an_item() {
+        let lines = vec![
+            text_line_at(20.0, "\u{2022} a bulleted table cell"),
+            text_line_at(40.0, "\u{2022} another table cell"),
+            text_line_at(60.0, "ordinary prose"),
+        ];
+        let table = blocking(&lines, ObjectKind::Table, 0, 1);
+        assert_eq!(list_items(&lines, &[table]), Vec::<(usize, usize)>::new());
+    }
+
+    #[test]
+    fn an_item_never_swallows_more_than_the_line_cap() {
+        let mut lines = vec![text_line_at(20.0, "\u{2022} the first file")];
+        for i in 1..14 {
+            let mut line = text_line_at(20.0 + i as f32 * 12.0, "an indented line");
+            indent(&mut line, 10.0);
+            lines.push(line);
+        }
+        lines.push(text_line_at(200.0, "\u{2022} the second file"));
+        let items = list_items(&lines, &[]);
+        assert_eq!(items[0], (0, LIST_ITEM_MAX_LINES));
+    }
+
+    #[test]
+    fn a_nested_marker_ends_the_outer_item() {
+        let mut lines = vec![
+            text_line_at(20.0, "\u{2022} outer item"),
+            text_line_at(40.0, "\u{2022} nested one"),
+            text_line_at(60.0, "\u{2022} nested two"),
+            text_line_at(80.0, "\u{2022} outer again"),
+        ];
+        indent(&mut lines[1], 40.0);
+        indent(&mut lines[2], 40.0);
+        // Two lists: the outer pair and the nested pair. The outer item stops
+        // at the nested marker rather than swallowing the sub-list.
+        assert_eq!(
+            list_items(&lines, &[]),
+            vec![(0, 0), (1, 1), (2, 2), (3, 3)]
+        );
+    }
+
+    #[test]
+    fn a_numbered_heading_is_not_a_list_item() {
+        // `2.1. Directory layout` is indistinguishable from an enumerated item
+        // by shape, so known headings are excluded outright.
+        let lines = vec![
+            text_line_at(20.0, "1. Introduction"),
+            text_line_at(40.0, "Body prose here"),
+            text_line_at(60.0, "2. Unified system"),
+        ];
+        assert_eq!(
+            list_items(
+                &lines,
+                &[
+                    blocking(&lines, ObjectKind::Heading, 0, 0),
+                    blocking(&lines, ObjectKind::Heading, 2, 2),
+                ]
+            ),
+            Vec::<(usize, usize)>::new()
+        );
+        // Without the heading knowledge they would both look like items.
+        assert_eq!(list_items(&lines, &[]), vec![(0, 0), (2, 2)]);
+    }
+
+    #[test]
+    fn the_object_kind_matrix_is_what_it_claims() {
+        for kind in [ObjectKind::Image, ObjectKind::Table] {
+            assert!(kind.is_atomic() && kind.splits_paragraphs(), "{kind:?}");
+        }
+        assert!(!ObjectKind::Heading.is_atomic());
+        assert!(ObjectKind::Heading.splits_paragraphs());
+        // A list item is the only kind that is neither: prose you can walk
+        // word by word, and part of the one paragraph its list makes.
+        assert!(!ObjectKind::ListItem.is_atomic());
+        assert!(!ObjectKind::ListItem.splits_paragraphs());
+    }
+
+    #[test]
+    fn page_content_reports_a_list_item_per_bullet() {
+        let doc = Document::from_bytes(&crate::test_support::pdf_with_list()).unwrap();
+        let content = doc
+            .page_content(0, ContentOptions::default(), None)
+            .unwrap();
+        let items: Vec<&ContentObject> = content
+            .objects
+            .iter()
+            .filter(|o| o.kind == ObjectKind::ListItem)
+            .collect();
+        assert_eq!(items.len(), 3, "objects: {:?}", content.objects);
+        for item in &items {
+            assert!(line_text(&content.lines[item.start_line])
+                .trim_start()
+                .starts_with('\u{2022}'));
+        }
+        // The closing prose returns to the markers' margin, so the final item
+        // must stop before it.
+        let last = items.last().unwrap();
+        let closing = content.lines.len() - 1;
+        assert!(
+            last.end_line < closing,
+            "the last item swallowed the closing prose"
+        );
+        assert!(line_text(&content.lines[closing]).contains("regenerated"));
     }
 
     // ---- Page furniture --------------------------------------------------
