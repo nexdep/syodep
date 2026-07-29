@@ -1,8 +1,10 @@
 # Focus mode commands
 
 **Focus mode** highlights one position in the document's content — text
-characters and images — and moves it with `hjkl`, independently of scrolling.
-Each image is a single stop.
+characters, images and tables — and moves it with `hjkl`, independently of
+scrolling. Each image and each detected table is a single stop: one motion
+lands on it, the next lands past it, however many lines it covers. Char scope
+is the exception and the escape hatch — see "Tables and images" below.
 
 What "one position" covers is the **scope**: a character, a word, a line, a
 sentence or a paragraph. The scope is a *setting of the mode*, not a mode of its
@@ -92,9 +94,24 @@ at a time.
 
 Word motions use Vim-like lowercase boundaries: letters/digits/underscore form
 word runs, punctuation/symbols form separate runs, whitespace is skipped, and
-each image is a single stop.
+each image or table is a single stop.
 
 The view auto-scrolls to keep the highlight on screen as it moves.
+
+## Tables and images
+
+A table or an image is **one unit** at every scope except char. `w`, `b`, `e`,
+`s`, `p` and `hjkl` all step onto it once and then step past it, no matter how
+many lines it spans, and the highlight covers the whole thing as a single
+rectangle. A paragraph or sentence next to a table never reaches into it
+either, so `p` on the prose above a figure highlights just that prose.
+
+Char scope is the escape hatch. Press `cc` while on a table and `h`/`l` step
+through its individual characters as usual, so a single number in a cell stays
+selectable. Switching back to any coarser scope snaps to the whole table again.
+
+Images are always single stops. Tables are found by a detection pass that can
+be turned off with `view.detect_tables` — see `docs/config.md`.
 
 ## Inherited view commands
 

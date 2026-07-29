@@ -34,6 +34,11 @@ focus_opacity = 0.4
 visual_color = "#d3d3d3"
 # Opacity of the selection highlight, 0.0 to 1.0.
 visual_opacity = 0.4
+# Treat each detected table as one stop for focus and selection
+# motions (char scope still steps through a table's characters).
+# Images are always single stops; this only controls table detection,
+# which costs a second text pass per page.
+detect_tables = true
 
 [files]
 # Starting directory for the Open dialog (<C-o>). When unset, the

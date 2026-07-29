@@ -119,9 +119,26 @@ input take plain data). Key pieces:
 The only crate that touches MuPDF. Wraps the maintained `mupdf` crate
 (bindings + vendored MuPDF C sources) and exposes syodep-owned types only:
 `Document`, `Size`, `Rect`, `Bitmap` (tightly packed RGBA8), `OutlineItem`,
-and the content-geometry layer `ContentLine`/`Cell` (per-page text/image
-boxes from `page_content`, the foundation the caret — and later selection
-and search — navigate). No MuPDF type or pointer crosses this boundary.
+and the content-geometry layer `PageContent` — `ContentLine`/`Cell` (per-page
+text/image boxes from `page_content`, the foundation the caret — and later
+selection and search — navigate) plus `ContentObject`, the runs of lines that
+navigation treats as one unit. No MuPDF type or pointer crosses this boundary.
+
+**Decision — tables and images are atomic units, found by a second text
+pass:** `page_content` extracts text once with `PRESERVE_IMAGES`, then runs a
+second pass with `TABLE_HUNT | COLLECT_VECTORS` from which it takes *only* the
+bounding boxes of the detected tables. Two passes are needed because the
+detection pass rewrites the page — it moves a table's text into a structure
+node whose children the Rust bindings cannot walk, and splits lines while
+redistributing characters into cells — so its geometry is unusable for text.
+`COLLECT_VECTORS` is not optional either: MuPDF hunts for tables among a page's
+ruled rectangles, and with no vectors collected it falls back to hunting the
+whole page at a loose threshold, which reports ordinary prose as one giant
+table. Trade-off: detection is a heuristic and costs a second pass (~2ms per
+page, cached), so `view.detect_tables` can switch it off. Boxes that claim
+every line on a page, or that map to a non-contiguous set of lines, are
+discarded rather than guessed at — degrading to line-by-line navigation is
+always safe, whereas a wrong atomic unit is a very visible navigation bug.
 
 **Decision — use `mupdf-rs` instead of hand-rolled bindgen FFI:** building
 MuPDF from vendored source via cargo gives reproducible Linux+Windows
@@ -204,6 +221,7 @@ Four small files; intentionally boring:
 | 9 | Config errors degrade to defaults + warning | app must always start | — |
 | 10 | cbindgen-generated header, checked into neither repo nor docs | single source of truth in Rust | ABI freeze for plugins (not planned) |
 | 11 | Modal caret over content geometry (mode-selected keymap) | Vim-like `hjkl` caret without losing `hjkl` scrolling; one stop per image; goal-column vertical motion | always-on caret, or richer text objects (phase 3) |
+| 14 | Atomicity is a property of the content, layered over the motion table rather than built into it | `step_scope` stays the pure per-scope description of a word/line/sentence/paragraph; one wrapper makes every scope treat a table or image as one unit, so counts and all six call sites keep working unchanged | a unit needs per-scope behaviour (then the wrapper becomes a scope arm) |
 
 ## Sioyek: conceptual inspirations (clean-room)
 

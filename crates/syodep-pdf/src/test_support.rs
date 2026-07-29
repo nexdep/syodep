@@ -248,6 +248,117 @@ pub fn pdf_with_image() -> Vec<u8> {
     buf
 }
 
+/// Build a single A4 page with a heading, a `cols` x `rows` ruled table, and a
+/// caption below it. Used to exercise table detection.
+///
+/// The rules are drawn as stroked rectangles because MuPDF's table hunt looks
+/// for ruled regions among a page's vector rectangles; a table of text alone,
+/// with no rules, is far less reliably recognised.
+pub fn pdf_with_table(cols: usize, rows: usize) -> Vec<u8> {
+    const LEFT: f32 = 100.0;
+    const TOP: f32 = 700.0;
+    const COL_W: f32 = 90.0;
+    const ROW_H: f32 = 28.0;
+
+    let table_w = COL_W * cols as f32;
+    let table_h = ROW_H * rows as f32;
+    let mut content = String::new();
+
+    content.push_str("BT /F1 16 Tf 100 760 Td (Results overview) Tj ET\n");
+
+    // Ruling lines: one stroked rectangle per row and per column, so the grid
+    // is unambiguous both horizontally and vertically.
+    content.push_str("0.7 w\n");
+    for r in 0..rows {
+        let y = TOP - ROW_H * (r + 1) as f32;
+        content.push_str(&format!("{LEFT} {y} {table_w} {ROW_H} re S\n"));
+    }
+    for c in 0..cols {
+        let x = LEFT + COL_W * c as f32;
+        let y = TOP - table_h;
+        content.push_str(&format!("{x} {y} {COL_W} {table_h} re S\n"));
+    }
+
+    // Cell text, one short run per cell, inset from the rule.
+    for r in 0..rows {
+        for c in 0..cols {
+            let x = LEFT + COL_W * c as f32 + 8.0;
+            let y = TOP - ROW_H * (r + 1) as f32 + 9.0;
+            content.push_str(&format!(
+                "BT /F1 10 Tf {x} {y} Td (R{}C{}) Tj ET\n",
+                r + 1,
+                c + 1
+            ));
+        }
+    }
+
+    let caption_y = TOP - table_h - 40.0;
+    content.push_str(&format!(
+        "BT /F1 10 Tf 100 {caption_y} Td (Caption for the table) Tj ET\n"
+    ));
+
+    let mut buf: Vec<u8> = b"%PDF-1.4\n".to_vec();
+    let total_objects = 5; // catalog, pages, font, page, content
+    let mut offsets: Vec<usize> = vec![0; total_objects + 1];
+    let write_obj = |buf: &mut Vec<u8>, offsets: &mut Vec<usize>, num: usize, body: &[u8]| {
+        offsets[num] = buf.len();
+        buf.extend_from_slice(format!("{num} 0 obj\n").as_bytes());
+        buf.extend_from_slice(body);
+        buf.extend_from_slice(b"\nendobj\n");
+    };
+
+    write_obj(
+        &mut buf,
+        &mut offsets,
+        1,
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+    );
+    write_obj(
+        &mut buf,
+        &mut offsets,
+        2,
+        b"<< /Type /Pages /Kids [4 0 R] /Count 1 >>",
+    );
+    write_obj(
+        &mut buf,
+        &mut offsets,
+        3,
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    );
+    write_obj(
+        &mut buf,
+        &mut offsets,
+        4,
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] \
+          /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R >>",
+    );
+    write_obj(
+        &mut buf,
+        &mut offsets,
+        5,
+        format!(
+            "<< /Length {} >>\nstream\n{content}\nendstream",
+            content.len()
+        )
+        .as_bytes(),
+    );
+
+    let xref_offset = buf.len();
+    buf.extend_from_slice(format!("xref\n0 {}\n", total_objects + 1).as_bytes());
+    buf.extend_from_slice(b"0000000000 65535 f \n");
+    for offset in &offsets[1..] {
+        buf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    buf.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n",
+            total_objects + 1
+        )
+        .as_bytes(),
+    );
+    buf
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

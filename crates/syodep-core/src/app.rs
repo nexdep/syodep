@@ -15,19 +15,25 @@ use std::path::{Path, PathBuf};
 
 use syodep_config::keys::Chord;
 use syodep_config::Config;
-use syodep_pdf::{Bitmap, CellKind, ContentLine, Rect};
+use syodep_pdf::{Bitmap, CellKind, ContentLine, ContentObject, ContentOptions, PageContent, Rect};
 use syodep_storage::{Position, Storage};
 
 use crate::caret::{
     column_index_of, column_ranges, continues_word_run, is_sentence_terminator,
     is_sentence_trailer, is_word_target, nearest_cell_in_line, nearest_line_in_column,
-    paragraph_segments, word_class, Caret, Dir, LineMark, Mode, ParagraphMark, Scope, SentenceMark,
-    VisualAnchor, VisualSelection, WordClass, WordMark,
+    paragraph_segments, split_segments_at_objects, word_class, Caret, Dir, Landing, LineMark, Mode,
+    ObjectId, ParagraphMark, Scope, SentenceMark, VisualAnchor, VisualSelection, WordClass,
+    WordMark,
 };
 use crate::command::Command;
 use crate::input::{InputState, KeyOutcome, Keymap, KeymapError};
 use crate::layout::{DocumentLayout, PageSize, ScreenRect, View};
 use crate::render_cache::RenderCache;
+
+/// Hard bound on how many raw steps one atomic step may take to leave an
+/// object. Only a runaway detection could ever approach it; it exists so the
+/// loop terminates no matter what the per-scope steppers do.
+const MAX_ATOMIC_STEPS: usize = 4096;
 
 /// Side effects the UI shell must perform after an input event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -88,7 +94,7 @@ struct Session {
     cache: RenderCache,
     /// Lazily-extracted navigable content, per page. Text is cheap to keep, so
     /// every visited page stays cached for the life of the session.
-    content: HashMap<usize, Vec<ContentLine>>,
+    content: HashMap<usize, PageContent>,
 }
 
 /// Top-level application state. One instance per window.
@@ -624,17 +630,76 @@ impl App {
         if session.content.contains_key(&page) {
             return;
         }
-        let lines = session.doc.page_content(page).unwrap_or_default();
-        session.content.insert(page, lines);
+        let opts = ContentOptions {
+            detect_tables: self.config.view.detect_tables,
+        };
+        let content = session.doc.page_content(page, opts).unwrap_or_default();
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+        session.content.insert(page, content);
     }
 
-    /// Cached content for `page` (empty if absent/uncached).
+    /// Replace a page's extracted content, so navigation can be tested against
+    /// an exact layout without depending on MuPDF's table-detection heuristic.
+    #[cfg(test)]
+    fn set_page_content(&mut self, page: usize, content: PageContent) {
+        if let Some(session) = self.session.as_mut() {
+            session.content.insert(page, content);
+        }
+    }
+
+    /// Cached content lines for `page` (empty if absent/uncached).
     fn content(&self, page: usize) -> &[ContentLine] {
         self.session
             .as_ref()
             .and_then(|s| s.content.get(&page))
-            .map(Vec::as_slice)
+            .map(|c| c.lines.as_slice())
             .unwrap_or(&[])
+    }
+
+    /// Cached atomic objects (tables, images) for `page`.
+    fn objects(&self, page: usize) -> &[ContentObject] {
+        self.session
+            .as_ref()
+            .and_then(|s| s.content.get(&page))
+            .map(|c| c.objects.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// The object containing `line` on `page`, extracting the page if needed.
+    fn object_at(&mut self, page: usize, line: usize) -> Option<ContentObject> {
+        self.ensure_content(page);
+        self.objects(page)
+            .iter()
+            .find(|o| line >= o.start_line && line <= o.end_line)
+            .copied()
+    }
+
+    /// Identity of the object a caret sits in, for "did we leave it yet".
+    fn object_id_at(&mut self, at: Caret) -> Option<ObjectId> {
+        self.object_at(at.page, at.line).map(|o| ObjectId {
+            page: at.page,
+            start_line: o.start_line,
+        })
+    }
+
+    /// The canonical caret for an object: its first cell, or its last.
+    fn object_landing(&mut self, page: usize, object: ContentObject, land: Landing) -> Caret {
+        match land {
+            Landing::Start => Caret {
+                page,
+                line: object.start_line,
+                cell: 0,
+            },
+            Landing::End => Caret {
+                page,
+                line: object.end_line,
+                cell: self
+                    .line_cell_count(page, object.end_line)
+                    .saturating_sub(1),
+            },
+        }
     }
 
     fn page_line_count(&mut self, page: usize) -> usize {
@@ -1124,7 +1189,7 @@ impl App {
             if self.sentence_boundary_after(cur) {
                 return cur;
             }
-            match self.next_cell_same_page(cur) {
+            match self.next_cell_in_region(cur) {
                 Some(next) => cur = next,
                 None => return cur,
             }
@@ -1136,13 +1201,35 @@ impl App {
     /// Analogue of [`Self::word_run_start`].
     fn sentence_run_start(&mut self, from: Caret) -> Caret {
         let mut cur = from;
-        while let Some(prev) = self.prev_cell_same_page(cur) {
+        while let Some(prev) = self.prev_cell_in_region(cur) {
             if self.sentence_boundary_after(prev) {
                 break;
             }
             cur = prev;
         }
         self.skip_whitespace_forward(cur)
+    }
+
+    /// Whether two positions lie in the same atomic region — both outside every
+    /// object, or both inside the same one.
+    fn same_region(&mut self, a: Caret, b: Caret) -> bool {
+        self.object_id_at(a) == self.object_id_at(b)
+    }
+
+    /// [`Self::next_cell_same_page`], additionally stopping at the edge of a
+    /// table or image. A table cell rarely ends in `.`, so without this a
+    /// sentence starting in the prose above a table would run right through it.
+    /// Only the *expansion* of a sentence is bounded this way; searching for the
+    /// next sentence still crosses freely, so a table simply becomes a sentence
+    /// of its own.
+    fn next_cell_in_region(&mut self, c: Caret) -> Option<Caret> {
+        self.next_cell_same_page(c)
+            .filter(|n| self.same_region(c, *n))
+    }
+
+    fn prev_cell_in_region(&mut self, c: Caret) -> Option<Caret> {
+        self.prev_cell_same_page(c)
+            .filter(|p| self.same_region(c, *p))
     }
 
     /// Build a [`SentenceMark`] for the sentence containing `caret`.
@@ -1248,10 +1335,17 @@ impl App {
 
     // ---- Paragraph motion ----------------------------------------------
 
-    /// The paragraph (segment of lines) that contains `line` on `page`.
-    fn paragraph_mark_containing(&mut self, page: usize, line: usize) -> Option<ParagraphMark> {
+    /// A page's paragraphs, cut so that no paragraph straddles a table or an
+    /// image and each object stands alone.
+    fn page_paragraphs(&mut self, page: usize) -> Vec<(usize, usize)> {
         self.ensure_content(page);
         let segs = paragraph_segments(self.content(page));
+        split_segments_at_objects(&segs, self.objects(page))
+    }
+
+    /// The paragraph (segment of lines) that contains `line` on `page`.
+    fn paragraph_mark_containing(&mut self, page: usize, line: usize) -> Option<ParagraphMark> {
+        let segs = self.page_paragraphs(page);
         segs.iter()
             .find(|(s, e)| *s <= line && line <= *e)
             .or_else(|| segs.last())
@@ -1264,7 +1358,7 @@ impl App {
 
     fn paragraph_step_next(&mut self, mark: &mut ParagraphMark) -> bool {
         self.ensure_content(mark.page);
-        let segs = paragraph_segments(self.content(mark.page));
+        let segs = self.page_paragraphs(mark.page);
         if let Some(i) = segs
             .iter()
             .position(|&(s, e)| s <= mark.start_line && mark.start_line <= e)
@@ -1281,7 +1375,7 @@ impl App {
         }
         if let Some(page) = self.next_content_page(mark.page) {
             self.ensure_content(page);
-            if let Some(&(s, e)) = paragraph_segments(self.content(page)).first() {
+            if let Some(&(s, e)) = self.page_paragraphs(page).first() {
                 *mark = ParagraphMark {
                     page,
                     start_line: s,
@@ -1295,7 +1389,7 @@ impl App {
 
     fn paragraph_step_prev(&mut self, mark: &mut ParagraphMark) -> bool {
         self.ensure_content(mark.page);
-        let segs = paragraph_segments(self.content(mark.page));
+        let segs = self.page_paragraphs(mark.page);
         if let Some(i) = segs
             .iter()
             .position(|&(s, e)| s <= mark.start_line && mark.start_line <= e)
@@ -1312,7 +1406,7 @@ impl App {
         }
         if let Some(page) = self.prev_content_page(mark.page) {
             self.ensure_content(page);
-            if let Some(&(s, e)) = paragraph_segments(self.content(page)).last() {
+            if let Some(&(s, e)) = self.page_paragraphs(page).last() {
                 *mark = ParagraphMark {
                     page,
                     start_line: s,
@@ -1362,6 +1456,16 @@ impl App {
     /// is the degenerate case of a selection — both ends at `at` — which is why
     /// one function serves both modes.
     fn scope_span(&mut self, at: Caret, scope: Scope) -> (Caret, Caret) {
+        // A table or an image is one unit at every scope above char, so the
+        // highlight covers all of it however coarse the scope is.
+        if scope != Scope::Char {
+            if let Some(object) = self.object_at(at.page, at.line) {
+                return (
+                    self.object_landing(at.page, object, Landing::Start),
+                    self.object_landing(at.page, object, Landing::End),
+                );
+            }
+        }
         match scope {
             Scope::Char => (at, at),
             Scope::Word => (self.word_run_start(at), self.word_run_end(at)),
@@ -1399,6 +1503,13 @@ impl App {
     /// mid-word or on whitespace. Motion itself does not need this: the
     /// steppers already land on unit starts.
     fn snap_to_scope(&mut self, at: Caret, scope: Scope) -> Caret {
+        // Guard first: the word arm below skips whitespace forward and would
+        // otherwise walk straight out of the object.
+        if scope != Scope::Char {
+            if let Some(object) = self.object_at(at.page, at.line) {
+                return self.object_landing(at.page, object, Landing::Start);
+            }
+        }
         match scope {
             Scope::Char => at,
             Scope::Word => {
@@ -1415,6 +1526,83 @@ impl App {
                 },
                 None => at,
             },
+        }
+    }
+
+    /// Move `caret` one unit of `scope` in `dir`, counting a whole table or
+    /// image as a single unit.
+    ///
+    /// This wraps [`Self::step_scope`] rather than changing it: the per-scope
+    /// table stays the pure description of what a word, line, sentence or
+    /// paragraph is, and atomicity is one rule applied on top of all of them.
+    /// Because it has the same signature, counts (`5w`) and every caller keep
+    /// working unchanged, and a table costs exactly one repetition.
+    ///
+    /// Char scope passes straight through — that is the escape hatch that
+    /// keeps a single number inside a table selectable.
+    fn step_scope_atomic(
+        &mut self,
+        caret: &mut Caret,
+        scope: Scope,
+        dir: Dir,
+        goal_x: f32,
+        goal_y: f32,
+    ) -> bool {
+        if scope == Scope::Char {
+            return self.step_scope(caret, scope, dir, goal_x, goal_y);
+        }
+        let from = self.object_id_at(*caret);
+        if !self.step_scope(caret, scope, dir, goal_x, goal_y) {
+            self.land_on_object(caret, Landing::Start);
+            return false;
+        }
+        // Still inside the object we started in: keep going until we leave it,
+        // so the whole object costs one step rather than one step per line.
+        if from.is_some() {
+            let mut guard = 0;
+            while self.object_id_at(*caret) == from {
+                guard += 1;
+                // `step_scope` returning true does not guarantee document-order
+                // progress (line scope's column jumps move sideways), so the
+                // loop needs a hard bound to be provably terminating.
+                if guard > MAX_ATOMIC_STEPS || !self.step_scope(caret, scope, dir, goal_x, goal_y) {
+                    self.land_on_object(caret, Landing::Start);
+                    return false;
+                }
+            }
+        }
+        self.land_on_object(caret, Landing::Start);
+        true
+    }
+
+    /// `e`, counting a whole table or image as one word.
+    fn step_word_end_atomic(&mut self, caret: &mut Caret) -> bool {
+        let from = self.object_id_at(*caret);
+        if !self.step_word_end(caret) {
+            self.land_on_object(caret, Landing::End);
+            return false;
+        }
+        if from.is_some() {
+            let mut guard = 0;
+            while self.object_id_at(*caret) == from {
+                guard += 1;
+                if guard > MAX_ATOMIC_STEPS || !self.step_word_end(caret) {
+                    self.land_on_object(caret, Landing::End);
+                    return false;
+                }
+            }
+        }
+        // Landing on the object's *end* means the next `e` leaves it, instead
+        // of walking back through the words inside.
+        self.land_on_object(caret, Landing::End);
+        true
+    }
+
+    /// If `caret` sits inside an object, move it to that object's canonical
+    /// position, so a caret never rests part-way through one.
+    fn land_on_object(&mut self, caret: &mut Caret, land: Landing) {
+        if let Some(object) = self.object_at(caret.page, caret.line) {
+            *caret = self.object_landing(caret.page, object, land);
         }
     }
 
@@ -1511,6 +1699,15 @@ impl App {
     /// `scroll_doc_rect_into_view` wants: it scrolls the minimum amount, so a
     /// span taller than the viewport simply pins its top edge.
     fn span_bbox(&mut self, start: Caret, end: Caret) -> Option<Rect> {
+        // A whole table scrolls into view by its own bounds, so its ruling
+        // lines and empty cells come along with the text.
+        if start.page == end.page {
+            if let Some(object) = self.object_at(start.page, start.line) {
+                if start.line == object.start_line && end.line == object.end_line {
+                    return Some(object.bbox);
+                }
+            }
+        }
         let first = self.cell_rect(start.page, start.line, start.cell)?;
         let last = self
             .cell_rect(end.page, end.line, end.cell)
@@ -1556,20 +1753,49 @@ impl App {
             }
             // Content is loaded lazily; a page we have not visited yet simply
             // has nothing to draw.
-            let Some(lines) = session.content.get(&page) else {
+            let Some(content) = session.content.get(&page) else {
                 continue;
             };
+            let lines = &content.lines;
             let first_line = if page == start.page { start.line } else { 0 };
             let last_line = if page == end.page {
                 end.line
             } else {
                 lines.len().saturating_sub(1)
             };
-            for line_idx in first_line..=last_line {
+            let mut line_idx = first_line;
+            while line_idx <= last_line {
+                // A fully covered table or image draws as one rectangle over
+                // its own bounds: per-line boxes would leave its rules and
+                // empty cells unpainted, which reads as a broken highlight.
+                if let Some(object) = content.object_at(line_idx) {
+                    let whole = object.start_line == line_idx
+                        && object.end_line <= last_line
+                        && !(page == start.page && start.line == line_idx && start.cell > 0)
+                        && !(page == end.page
+                            && end.line == object.end_line
+                            && end.cell + 1
+                                < lines.get(object.end_line).map_or(0, |l| l.cells.len()));
+                    if whole {
+                        if let Some(rect) = session.view.page_rect_to_screen(
+                            page,
+                            object.bbox.x0,
+                            object.bbox.y0,
+                            object.bbox.x1,
+                            object.bbox.y1,
+                        ) {
+                            rects.push(rect);
+                        }
+                        line_idx = object.end_line + 1;
+                        continue;
+                    }
+                }
                 let Some(line) = lines.get(line_idx) else {
+                    line_idx += 1;
                     continue;
                 };
                 if line.cells.is_empty() {
+                    line_idx += 1;
                     continue;
                 }
                 let at_start = page == start.page && line_idx == start.line;
@@ -1597,6 +1823,7 @@ impl App {
                 {
                     rects.push(rect);
                 }
+                line_idx += 1;
             }
         }
         if rects.is_empty() {
@@ -1693,7 +1920,7 @@ impl App {
         let goal_y = self.focus_goal_y;
         let scope = self.focus_scope;
         for _ in 0..steps {
-            if !self.step_scope(&mut at, scope, dir, goal_x, goal_y) {
+            if !self.step_scope_atomic(&mut at, scope, dir, goal_x, goal_y) {
                 break; // reached a document edge
             }
         }
@@ -1733,7 +1960,7 @@ impl App {
         let goal_x = self.focus_goal_x;
         let goal_y = self.focus_goal_y;
         for _ in 0..steps {
-            if !self.step_scope(&mut at, scope, dir, goal_x, goal_y) {
+            if !self.step_scope_atomic(&mut at, scope, dir, goal_x, goal_y) {
                 break; // reached a document edge
             }
         }
@@ -1759,7 +1986,7 @@ impl App {
         };
         let steps = count.unwrap_or(1).max(1);
         for _ in 0..steps {
-            if !self.step_word_end(&mut at) {
+            if !self.step_word_end_atomic(&mut at) {
                 break;
             }
         }
@@ -1988,7 +2215,7 @@ impl App {
         let goal_y = self.focus_goal_y;
         let scope = self.focus_scope;
         for _ in 0..steps {
-            if !self.step_scope(&mut head, scope, dir, goal_x, goal_y) {
+            if !self.step_scope_atomic(&mut head, scope, dir, goal_x, goal_y) {
                 break;
             }
         }
@@ -2019,7 +2246,7 @@ impl App {
         let goal_x = self.focus_goal_x;
         let goal_y = self.focus_goal_y;
         for _ in 0..steps {
-            if !self.step_scope(&mut head, scope, dir, goal_x, goal_y) {
+            if !self.step_scope_atomic(&mut head, scope, dir, goal_x, goal_y) {
                 break;
             }
         }
@@ -2038,7 +2265,7 @@ impl App {
         };
         let steps = count.unwrap_or(1).max(1);
         for _ in 0..steps {
-            if !self.step_word_end(&mut head) {
+            if !self.step_word_end_atomic(&mut head) {
                 break;
             }
         }
@@ -2730,6 +2957,308 @@ mod tests {
         assert_caret(&app, 0, 0, 2);
     }
 
+    // ---- Atomic objects (tables and images) ------------------------------
+
+    /// One content line of `text` at `y`, with a 6pt-wide cell per character.
+    fn text_line(y: f32, text: &str) -> ContentLine {
+        let cells: Vec<syodep_pdf::Cell> = text
+            .chars()
+            .enumerate()
+            .map(|(i, ch)| {
+                let x = 100.0 + i as f32 * 6.0;
+                syodep_pdf::Cell {
+                    kind: CellKind::Char(ch),
+                    bbox: Rect {
+                        x0: x,
+                        y0: y,
+                        x1: x + 6.0,
+                        y1: y + 10.0,
+                    },
+                }
+            })
+            .collect();
+        ContentLine {
+            bbox: Rect {
+                x0: 100.0,
+                y0: y,
+                x1: 100.0 + text.chars().count() as f32 * 6.0,
+                y1: y + 10.0,
+            },
+            cells,
+        }
+    }
+
+    /// A page of prose, then a four-line table, then more prose. Lines 2..=5
+    /// are the table; the gaps around it are small enough that the paragraph
+    /// heuristic alone would happily merge it into the prose.
+    fn table_page_content() -> PageContent {
+        let lines = vec![
+            text_line(100.0, "Alpha beta."),
+            text_line(112.0, "Gamma delta."),
+            text_line(126.0, "R1C1 R1C2"),
+            text_line(138.0, "R2C1 R2C2"),
+            text_line(150.0, "R3C1 R3C2"),
+            text_line(162.0, "R4C1 R4C2"),
+            text_line(186.0, "Omega final."),
+            text_line(198.0, "Last one here."),
+        ];
+        let objects = vec![ContentObject {
+            kind: syodep_pdf::ObjectKind::Table,
+            bbox: Rect {
+                x0: 96.0,
+                y0: 122.0,
+                x1: 260.0,
+                y1: 176.0,
+            },
+            start_line: 2,
+            end_line: 5,
+        }];
+        PageContent { lines, objects }
+    }
+
+    fn app_with_table_page(dir: &Path) -> App {
+        let mut app = app_with_text_pages(dir, &["placeholder page"]);
+        app.set_page_content(0, table_page_content());
+        app
+    }
+
+    /// The table occupies lines 2..=5 of [`table_page_content`].
+    fn in_table(caret: Caret) -> bool {
+        (2..=5).contains(&caret.line)
+    }
+
+    /// Repeat `key` until the caret is inside the table, and report how many
+    /// presses it took. Panics rather than looping forever.
+    fn press_into_table(app: &mut App, key: &str) -> usize {
+        for presses in 0..10 {
+            if in_table(app.caret().unwrap()) {
+                return presses;
+            }
+            press(app, key);
+        }
+        panic!("{key} never reached the table");
+    }
+
+    #[test]
+    fn word_motion_treats_a_table_as_one_stop() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_table_page(dir.path());
+        press(&mut app, "cw");
+        press_into_table(&mut app, "w");
+        assert_caret(&app, 0, 2, 0); // the table, as one stop
+        press(&mut app, "w");
+        assert_caret(&app, 0, 6, 0); // straight out the far side
+    }
+
+    #[test]
+    fn word_motion_backwards_lands_on_the_table_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_table_page(dir.path());
+        press(&mut app, "cw");
+        press_into_table(&mut app, "w");
+        press(&mut app, "w");
+        assert_caret(&app, 0, 6, 0);
+        press(&mut app, "b");
+        assert_caret(&app, 0, 2, 0); // its start, never a row in the middle
+    }
+
+    #[test]
+    fn line_motion_steps_over_a_whole_table_with_one_press() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_table_page(dir.path());
+        press(&mut app, "ce");
+        press(&mut app, "jj");
+        assert_caret(&app, 0, 2, 0);
+        press(&mut app, "j");
+        assert_caret(&app, 0, 6, 0);
+        press(&mut app, "k");
+        assert_caret(&app, 0, 2, 0);
+    }
+
+    #[test]
+    fn paragraph_motion_treats_a_table_as_one_paragraph() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_table_page(dir.path());
+        press(&mut app, "cp");
+        assert_caret(&app, 0, 0, 0);
+        press(&mut app, "p");
+        assert_caret(&app, 0, 2, 0);
+        press(&mut app, "p");
+        assert_caret(&app, 0, 6, 0);
+    }
+
+    #[test]
+    fn paragraph_span_stops_at_the_table_edge() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_table_page(dir.path());
+        press(&mut app, "cp");
+        // The prose paragraph above must not reach into the table.
+        let (start, end) = app.focus_span().unwrap();
+        assert_eq!((start.line, end.line), (0, 1));
+    }
+
+    #[test]
+    fn sentence_span_does_not_run_into_a_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_table_page(dir.path());
+        press(&mut app, "cs");
+        press(&mut app, "s"); // second sentence: "Gamma delta."
+        let (_, end) = app.focus_span().unwrap();
+        assert_eq!(end.line, 1, "sentence leaked into the table");
+        press(&mut app, "s");
+        assert_caret(&app, 0, 2, 0);
+    }
+
+    #[test]
+    fn every_coarse_scope_spans_the_whole_table() {
+        let dir = tempfile::tempdir().unwrap();
+        for scope in ["cw", "ce", "cs", "cp"] {
+            let mut app = app_with_table_page(dir.path());
+            press(&mut app, scope);
+            press_into_table(&mut app, "j");
+            let (start, end) = app.focus_span().unwrap();
+            assert_eq!(
+                (start.line, start.cell, end.line),
+                (2, 0, 5),
+                "{scope}: span does not cover the whole table"
+            );
+        }
+    }
+
+    #[test]
+    fn char_scope_still_walks_into_table_characters() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_table_page(dir.path());
+        press(&mut app, "ce");
+        press(&mut app, "jj");
+        assert_caret(&app, 0, 2, 0);
+        // Switching to char scope is the escape hatch into a table's contents.
+        press(&mut app, "cc");
+        press(&mut app, "l");
+        assert_caret(&app, 0, 2, 1);
+        let (start, end) = app.focus_span().unwrap();
+        assert_eq!((start.line, start.cell), (2, 1));
+        assert_eq!((end.line, end.cell), (2, 1));
+    }
+
+    #[test]
+    fn a_count_treats_a_table_as_a_single_unit() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_table_page(dir.path());
+        press(&mut app, "cw");
+        // Five word stops follow the starting one ("beta", ".", "Gamma",
+        // "delta", "."), the sixth step lands on the table, and the seventh
+        // is the prose past it — the table costs exactly one repetition.
+        press(&mut app, "7w");
+        assert_caret(&app, 0, 6, 0);
+    }
+
+    #[test]
+    fn word_end_lands_on_the_table_end_then_leaves() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_table_page(dir.path());
+        press(&mut app, "cw");
+        press_into_table(&mut app, "e");
+        let caret = app.caret().unwrap();
+        assert_eq!(caret.line, 5, "e should rest on the table's last line");
+        press(&mut app, "e");
+        assert_eq!(app.caret().unwrap().line, 6, "next e must leave the table");
+    }
+
+    #[test]
+    fn motion_never_rests_part_way_through_a_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_table_page(dir.path());
+        press(&mut app, "ce");
+        for _ in 0..12 {
+            press(&mut app, "j");
+            let caret = app.caret().unwrap();
+            assert!(
+                !(3..=5).contains(&caret.line),
+                "caret stranded inside the table at {caret:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn visual_selection_covers_a_whole_table_in_one_step() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_table_page(dir.path());
+        press(&mut app, "ce");
+        press(&mut app, "j"); // line 1, the prose above
+        press(&mut app, "v");
+        press(&mut app, "j"); // extend over the table
+        let selection = app.visual_span().unwrap();
+        assert_eq!(selection.0.line, 1);
+        assert_eq!(
+            selection.1.line, 5,
+            "selection stops short of the table end"
+        );
+    }
+
+    #[test]
+    fn a_char_scope_visual_end_inside_a_table_is_not_expanded() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_table_page(dir.path());
+        press(&mut app, "cc");
+        press(&mut app, "jj"); // char scope walks into the table
+        assert_caret(&app, 0, 2, 0);
+        press(&mut app, "v");
+        press(&mut app, "l");
+        let selection = app.visual_span().unwrap();
+        assert_eq!(
+            (
+                selection.0.line,
+                selection.0.cell,
+                selection.1.line,
+                selection.1.cell
+            ),
+            (2, 0, 2, 1),
+            "char scope must stay inside the table"
+        );
+    }
+
+    #[test]
+    fn a_fully_selected_table_draws_as_one_rectangle() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_table_page(dir.path());
+        press(&mut app, "ce");
+        press(&mut app, "jj");
+        let rects = app.focus_screen_rects().unwrap();
+        assert_eq!(rects.len(), 1, "expected one rect for the table: {rects:?}");
+
+        // A partial (char-scope) selection inside it still draws per line.
+        press(&mut app, "cc");
+        let rects = app.focus_screen_rects().unwrap();
+        assert_eq!(rects.len(), 1);
+        assert!(
+            rects[0].width < 20.0,
+            "char highlight should cover one cell, got {rects:?}"
+        );
+    }
+
+    #[test]
+    fn a_paragraph_no_longer_swallows_an_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(Config::default(), Some(Storage::in_memory().unwrap()));
+        app.set_viewport_size(595.0, 600.0);
+        let path = write_pdf_bytes(dir.path(), "image.pdf", pdf_with_image());
+        app.open_document(&path).unwrap();
+
+        press(&mut app, "cp");
+        let (start, end) = app.focus_span().unwrap();
+        let image_line = app.session.as_ref().unwrap().content[&0]
+            .objects
+            .iter()
+            .find(|o| o.kind == syodep_pdf::ObjectKind::Image)
+            .unwrap()
+            .start_line;
+        assert!(
+            !(start.line..=end.line).contains(&image_line),
+            "the caption paragraph swallowed the image"
+        );
+    }
+
     #[test]
     fn caret_word_motion_treats_images_as_single_stops() {
         let dir = tempfile::tempdir().unwrap();
@@ -2742,7 +3271,7 @@ mod tests {
         press(&mut app, "w");
         let image = app.caret().unwrap();
         let cell =
-            &app.session.as_ref().unwrap().content[&image.page][image.line].cells[image.cell];
+            &app.session.as_ref().unwrap().content[&image.page].lines[image.line].cells[image.cell];
         assert_eq!(cell.kind, CellKind::Image);
         press(&mut app, "b");
         assert_caret(&app, 0, 0, 0);

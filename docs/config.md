@@ -40,9 +40,18 @@ bookmarks, highlights, notes, history. That lives in the SQLite database
 | `focus_opacity` | float | `0.4` | opacity of the focus highlight, `0.0`-`1.0` |
 | `visual_color` | string | `"#d3d3d3"` | highlight for the visual-mode selection, `#rrggbb` |
 | `visual_opacity` | float | `0.4` | opacity of the selection highlight, `0.0`-`1.0` |
+| `detect_tables` | bool | `true` | treat each detected table as one stop for focus and selection motions |
 
 Documents with a saved reading position restore their previous scroll and
 zoom instead of applying `default_zoom`/`fit_width_on_open`.
+
+**Table detection.** With `detect_tables = true` a table is a single unit for
+every motion above char scope, the way an image already is: one `w` steps onto
+it, the next steps past it, and selecting it in visual mode takes the whole
+table. Char scope (`cc`) still walks through the characters inside, so a single
+figure in a table stays selectable. Detection is a heuristic and costs a second
+text-extraction pass per page; set it to `false` to navigate tables line by line
+as before. Images are unaffected — they are always single stops.
 
 **Overlay colours.** All five focus modes (caret, line, word, sentence,
 paragraph) share `focus_color`: the highlight tells you that focus is active,

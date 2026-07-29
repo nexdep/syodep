@@ -7,6 +7,74 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-07-29 — Tables and images are single navigation units
+
+Moving through a paper used to mean crawling through its tables: a table was
+just many short lines, so `w`, `s` and `p` stepped through it cell by cell and
+a selection could only ever grab a fragment of it. Now a table or an image is
+**one unit** at every scope above char — one motion lands on it, the next lands
+past it — and selecting it takes the whole thing, drawn as a single rectangle.
+
+Char scope is deliberately left raw: `cc` then `h`/`l` still walks a table's
+individual characters, so a single number in a cell stays selectable. That is
+the escape hatch, and it is also why the split is at char rather than making
+tables opaque everywhere.
+
+### How it is built
+
+- `syodep-pdf` gained `ContentObject` (a run of lines that behaves as one unit)
+  and `PageContent { lines, objects }`. `page_content` now takes
+  `ContentOptions`.
+- Tables come from a **second** structured-text pass with
+  `TABLE_HUNT | COLLECT_VECTORS`, from which only the bounding boxes are taken.
+  Two passes are needed because the detection pass rewrites the page: it moves a
+  table's text into a structure node the Rust bindings cannot walk into, and
+  splits lines while filling cells. Its geometry is therefore unusable for text,
+  and the text pass is left exactly as it was.
+- `COLLECT_VECTORS` is load-bearing, not a nicety. MuPDF hunts for tables among
+  a page's ruled rectangles; with no vectors collected that list is empty and it
+  falls back to hunting the whole page at a loose threshold. Measured on a real
+  spec document: with `TABLE_HUNT` alone, two prose pages came back as one
+  page-sized "table" and nothing else was found; adding `COLLECT_VECTORS` found
+  six real tables with tight boxes and left the prose pages as the only false
+  positives.
+- Those remaining false positives are killed by one guard: a box whose lines are
+  *every* line on the page is discarded. On the same document that guard was
+  exactly precise — it rejected both bad pages and no good ones. Boxes mapping
+  to a non-contiguous set of lines are dropped too. Degrading to line-by-line
+  navigation is always safe; a wrong atomic unit is a very visible bug.
+- Cost is ~2 ms per page for the second pass, and content is already cached per
+  page for the session. `view.detect_tables` (default `true`) turns it off.
+
+### Why the motion table was not touched
+
+`step_scope` remains the pure per-scope description of what a word, line,
+sentence or paragraph is. Atomicity is one wrapper over it — `step_scope_atomic`
+— which after a step keeps stepping while the caret is still inside the object
+it started in, and snaps to an object's start when it lands in a new one.
+Because the wrapper has the same signature, counts (`5w`) and all six call sites
+work unchanged and a table costs exactly one repetition. `e` is the exception,
+landing on the object's *end* so a following `e` leaves rather than walking back
+through it.
+
+Two things the wrapper cannot fix, because they are about how far a span
+*reaches* rather than where a step *lands*, and both needed their own change:
+paragraph segments are cut at object boundaries afterwards
+(`split_segments_at_objects`), and sentence runs stop expanding at an object
+edge — a table cell rarely ends in `.`, so a sentence would otherwise run
+straight through the table. Searching for the next sentence still crosses
+freely, which is what makes a table simply become a sentence of its own.
+
+### Tests
+
+19 new tests, 249 total. The mapping from boxes to line ranges is a pure
+function tested directly (including every discard rule), and the motion tests
+inject a hand-built `PageContent` instead of relying on the heuristic — so a
+future change in MuPDF's detection can only fail the one detection test rather
+than the behavioural suite. New fixture: `pdf_with_table`.
+
+---
+
 ## 2026-07-29 — 0.8.0
 
 Since 0.7.0. **Existing configs keep working** — unlike 0.7.0, nothing was

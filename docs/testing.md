@@ -19,7 +19,15 @@ real files. The strategy, in descending order of coverage:
 4. **PDF smoke tests** against *generated* fixtures: a programmatic,
    spec-conforming PDF builder (`syodep-pdf/src/test_support.rs`, feature
    `test-support`) creates multi-page documents with known text, so no
-   binary fixtures live in the repository.
+   binary fixtures live in the repository. Alongside `pdf_with_pages` there
+   are `pdf_two_column_page`, `pdf_with_image` and `pdf_with_table` (a ruled
+   grid between a heading and a caption, for table detection).
+
+   Navigation over tables is tested two ways on purpose. The mapping from
+   detected boxes to line ranges (`content_objects`) is a pure function tested
+   directly, and the motion tests inject a hand-built `PageContent` rather than
+   relying on MuPDF's heuristic — so a change in that heuristic can only ever
+   fail the one detection test, never the behavioural suite.
 5. **Shell smoke test** in CI: `syodep --smoke-test file.pdf` with
    `QT_QPA_PLATFORM=offscreen` constructs the real window, opens a document
    through the FFI, renders a page and paints one frame.

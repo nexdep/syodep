@@ -49,9 +49,12 @@ them, and is the seam highlighting builds on. See the development log.
 
 - ✅ Text objects: word / sentence / paragraph over the text layer
   (focus modes, and as visual-mode selection scopes)
+- ✅ Tables and images as atomic units: detected in the content layer and
+  treated as one stop by every scope above char, in focus and visual mode
 - ⬜ Text-object selection, highlighting, annotation (`viw`-style
   composability on top of the existing command/count system)
-- ⬜ Smart jump to references, figures, tables, equations
+- ⬜ Smart jump to references, figures, tables, equations (the table/image
+  primitive now exists in the content layer; the jump motion does not)
 - ⬜ Overview popup for jump targets; candidate navigation for ambiguous
   targets
 - ⬜ Bibliography/reference detection

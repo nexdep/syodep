@@ -1,6 +1,7 @@
 # Visual mode commands
 
-**Visual mode** selects a *range* of content. It is entered with `v` from
+**Visual mode** selects a *range* of content — text, images and tables. It is
+entered with `v` from
 normal mode or from focus mode, and unlike focus mode it has two ends:
 an **anchor** that stays put and a **head** that motions move. The status bar
 shows `-- VISUAL (scope) --` with the selected line range.
@@ -65,6 +66,17 @@ grows the selection by a sentence while keeping word-granular edges.
 The ends may cross freely: the selection always runs from the earlier end to
 the later one, so passing the anchor and coming back leaves the selection
 exactly as it was.
+
+### Tables and images
+
+A table or an image is one unit here too: at any scope above char, a single
+motion extends the selection across the whole of it, and a selection that
+covers it entirely is drawn as one rectangle over the table rather than a
+ragged stack of row boxes.
+
+Because scope is per end, this is decided independently at each edge. An end at
+char scope sitting inside a table is *not* expanded — that is how you select a
+single figure from a table while the other end selects whole paragraphs.
 
 ## Choosing the end and its scope
 

@@ -14,7 +14,7 @@
 //! page boundaries, scrolling the caret into view) lives in [`crate::app`],
 //! which holds the document and the layout.
 
-use syodep_pdf::{Cell, CellKind, ContentLine};
+use syodep_pdf::{Cell, CellKind, ContentLine, ContentObject};
 
 /// Whether `hjkl` scroll the page, move a focus highlight, or grow a selection.
 ///
@@ -155,6 +155,79 @@ pub struct Caret {
     pub page: usize,
     pub line: usize,
     pub cell: usize,
+}
+
+/// Identity of an atomic object (a table or an image), used to tell "am I
+/// still inside the object I started in" without holding a borrow on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ObjectId {
+    pub page: usize,
+    pub start_line: usize,
+}
+
+/// Which end of an atomic object a motion should land on.
+///
+/// Every scope stepper lands on unit *starts*, so [`Landing::Start`] is the
+/// rule; `e` is the one motion that lands on a unit end, and uses
+/// [`Landing::End`] so a following `e` leaves the object instead of walking
+/// back through it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Landing {
+    Start,
+    End,
+}
+
+/// Index of the object containing `line`, if any.
+///
+/// `objects` is sorted by `start_line` with disjoint ranges (an invariant of
+/// `syodep_pdf::PageContent`), so a linear scan is both correct and, at the
+/// handful of objects a page has, faster than a search.
+pub fn object_index_at(objects: &[ContentObject], line: usize) -> Option<usize> {
+    objects
+        .iter()
+        .position(|o| line >= o.start_line && line <= o.end_line)
+}
+
+/// Cut paragraph segments so no segment straddles an atomic object, and every
+/// object is a segment of its own.
+///
+/// [`paragraph_segments`] groups lines by vertical gaps, which can merge a
+/// figure or a table into the prose next to it. Splitting afterwards keeps
+/// that heuristic (and its tests) untouched while making paragraph scope
+/// respect object boundaries.
+pub fn split_segments_at_objects(
+    segments: &[(usize, usize)],
+    objects: &[ContentObject],
+) -> Vec<(usize, usize)> {
+    if objects.is_empty() {
+        return segments.to_vec();
+    }
+    let mut out = Vec::with_capacity(segments.len());
+    for &(start, end) in segments {
+        let mut cur = start;
+        while cur <= end {
+            match object_index_at(objects, cur) {
+                Some(i) => {
+                    let stop = objects[i].end_line.min(end);
+                    out.push((cur, stop));
+                    cur = stop + 1;
+                }
+                None => {
+                    // Run to just before the next object that starts inside
+                    // this segment, or to the segment's end.
+                    let next = objects
+                        .iter()
+                        .filter(|o| o.start_line > cur && o.start_line <= end)
+                        .map(|o| o.start_line)
+                        .min();
+                    let stop = next.map_or(end, |n| n - 1);
+                    out.push((cur, stop));
+                    cur = stop + 1;
+                }
+            }
+        }
+    }
+    out
 }
 
 /// A movement direction for the caret.
@@ -588,5 +661,64 @@ mod tests {
         // Right column lines are indices 1 and 2; goal_y 25 -> index 2.
         assert_eq!(nearest_line_in_column(&lines, &[1, 2], 25.0), 2);
         assert_eq!(nearest_line_in_column(&lines, &[1, 2], 3.0), 1);
+    }
+
+    fn object(start_line: usize, end_line: usize) -> ContentObject {
+        ContentObject {
+            kind: syodep_pdf::ObjectKind::Table,
+            bbox: Rect {
+                x0: 0.0,
+                y0: 0.0,
+                x1: 100.0,
+                y1: 100.0,
+            },
+            start_line,
+            end_line,
+        }
+    }
+
+    #[test]
+    fn object_index_at_finds_the_containing_object() {
+        let objects = [object(2, 5), object(8, 8)];
+        assert_eq!(object_index_at(&objects, 1), None);
+        assert_eq!(object_index_at(&objects, 2), Some(0));
+        assert_eq!(object_index_at(&objects, 4), Some(0));
+        assert_eq!(object_index_at(&objects, 5), Some(0));
+        assert_eq!(object_index_at(&objects, 6), None);
+        assert_eq!(object_index_at(&objects, 8), Some(1));
+        assert_eq!(object_index_at(&[], 0), None);
+    }
+
+    #[test]
+    fn split_segments_cuts_a_paragraph_that_straddles_an_object() {
+        // One paragraph swallowing a figure becomes prose / figure / prose.
+        let segments = [(0, 9)];
+        assert_eq!(
+            split_segments_at_objects(&segments, &[object(4, 6)]),
+            vec![(0, 3), (4, 6), (7, 9)]
+        );
+    }
+
+    #[test]
+    fn split_segments_handles_an_object_at_either_edge() {
+        assert_eq!(
+            split_segments_at_objects(&[(0, 5)], &[object(0, 2)]),
+            vec![(0, 2), (3, 5)]
+        );
+        assert_eq!(
+            split_segments_at_objects(&[(0, 5)], &[object(3, 5)]),
+            vec![(0, 2), (3, 5)]
+        );
+    }
+
+    #[test]
+    fn split_segments_leaves_object_free_pages_untouched() {
+        let segments = [(0, 3), (5, 9)];
+        assert_eq!(split_segments_at_objects(&segments, &[]), segments.to_vec());
+        // An object that is already its own segment is preserved as-is.
+        assert_eq!(
+            split_segments_at_objects(&segments, &[object(5, 9)]),
+            segments.to_vec()
+        );
     }
 }

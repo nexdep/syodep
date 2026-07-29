@@ -108,6 +108,10 @@ pub struct ViewConfig {
     pub visual_color: String,
     /// Opacity of the selection highlight, 0.0 (invisible) to 1.0 (opaque).
     pub visual_opacity: f32,
+    /// Detect tables so each one is a single stop for focus and selection
+    /// motions above char scope. Costs a second text-extraction pass per page
+    /// and relies on a heuristic, so it can be turned off.
+    pub detect_tables: bool,
 }
 
 impl Default for ViewConfig {
@@ -124,6 +128,7 @@ impl Default for ViewConfig {
             focus_opacity: 0.4,
             visual_color: "#d3d3d3".to_owned(),
             visual_opacity: 0.4,
+            detect_tables: true,
         }
     }
 }
@@ -447,6 +452,13 @@ pub fn default_config_doc() -> String {
     let _ = writeln!(out, "visual_color = \"{}\"", view.visual_color);
     out.push_str("# Opacity of the selection highlight, 0.0 to 1.0.\n");
     let _ = writeln!(out, "visual_opacity = {}", float(view.visual_opacity));
+    out.push_str(
+        "# Treat each detected table as one stop for focus and selection\n\
+         # motions (char scope still steps through a table's characters).\n\
+         # Images are always single stops; this only controls table detection,\n\
+         # which costs a second text pass per page.\n",
+    );
+    let _ = writeln!(out, "detect_tables = {}", view.detect_tables);
     out.push('\n');
 
     out.push_str(

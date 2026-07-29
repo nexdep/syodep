@@ -22,7 +22,7 @@ pub mod test_support;
 
 use std::path::Path;
 
-use mupdf::{Colorspace, Matrix, TextPageFlags};
+use mupdf::{text_page::TextBlockType, Colorspace, Matrix, TextPageFlags};
 
 /// Errors surfaced by the PDF backend.
 #[derive(Debug, thiserror::Error)]
@@ -59,6 +59,32 @@ pub struct Rect {
     pub y1: f32,
 }
 
+impl Rect {
+    pub fn area(self) -> f32 {
+        (self.x1 - self.x0).max(0.0) * (self.y1 - self.y0).max(0.0)
+    }
+
+    pub fn union(self, other: Rect) -> Rect {
+        Rect {
+            x0: self.x0.min(other.x0),
+            y0: self.y0.min(other.y0),
+            x1: self.x1.max(other.x1),
+            y1: self.y1.max(other.y1),
+        }
+    }
+
+    /// Whether the centre of `other` lies within this rectangle.
+    ///
+    /// Centre containment (rather than overlap or full containment) is the
+    /// rule MuPDF itself uses when assigning characters to table cells, and it
+    /// tolerates a table box drawn slightly wider than its contents.
+    pub fn contains_center_of(self, other: Rect) -> bool {
+        let cx = (other.x0 + other.x1) / 2.0;
+        let cy = (other.y0 + other.y1) / 2.0;
+        cx >= self.x0 && cx <= self.x1 && cy >= self.y0 && cy <= self.y1
+    }
+}
+
 /// What a single caret stop represents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CellKind {
@@ -82,6 +108,62 @@ pub struct Cell {
 pub struct ContentLine {
     pub bbox: Rect,
     pub cells: Vec<Cell>,
+}
+
+/// What kind of thing a [`ContentObject`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObjectKind {
+    Image,
+    Table,
+}
+
+/// A run of content lines that navigation treats as a single unit.
+///
+/// `start_line..=end_line` is inclusive and indexes [`PageContent::lines`].
+/// An image is always a one-line object; a table covers every line inside it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ContentObject {
+    pub kind: ObjectKind,
+    pub bbox: Rect,
+    pub start_line: usize,
+    pub end_line: usize,
+}
+
+/// The navigable content of one page: its lines, plus the runs of lines that
+/// behave as a single unit.
+///
+/// Invariant established by [`Document::page_content`] and relied on by the
+/// caret: `objects` is sorted by `start_line`, the ranges are disjoint, every
+/// member line exists, and at least one member line is non-empty.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PageContent {
+    pub lines: Vec<ContentLine>,
+    pub objects: Vec<ContentObject>,
+}
+
+impl PageContent {
+    /// The object containing `line`, if any.
+    pub fn object_at(&self, line: usize) -> Option<&ContentObject> {
+        self.objects
+            .iter()
+            .find(|o| line >= o.start_line && line <= o.end_line)
+    }
+}
+
+/// Knobs for [`Document::page_content`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContentOptions {
+    /// Run MuPDF's table detection so tables become single navigable units.
+    /// Costs a second structured-text pass per page.
+    pub detect_tables: bool,
+}
+
+impl Default for ContentOptions {
+    fn default() -> Self {
+        Self {
+            detect_tables: true,
+        }
+    }
 }
 
 /// An RGBA8 image, tightly packed (`stride == width * 4`).
@@ -231,17 +313,20 @@ impl Document {
     ///
     /// `PRESERVE_IMAGES` is required for image blocks to appear in the
     /// structured-text output at all; the default flags drop them.
-    pub fn page_content(&self, page: usize) -> Result<Vec<ContentLine>, PdfError> {
+    ///
+    /// Tables come from a **second** structured-text pass (see
+    /// [`Document::table_bboxes`]), because the pass that finds them cannot
+    /// also yield their text.
+    pub fn page_content(&self, page: usize, opts: ContentOptions) -> Result<PageContent, PdfError> {
         self.check_page(page)?;
         let mupdf_page = self.inner.load_page(page as i32)?;
         let text_page = mupdf_page.to_text_page(TextPageFlags::PRESERVE_IMAGES)?;
         let mut lines = Vec::new();
+        let mut image_lines = Vec::new();
         for block in text_page.blocks() {
-            // An image block reports `Some` here; `lines()` is empty for it
-            // (and for any non-text block), so this also discriminates blocks
-            // without needing the non-exported `TextBlockType`.
-            if block.image().is_some() {
+            if matches!(block.r#type(), TextBlockType::Image) {
                 let bbox = rect_from_mupdf(block.bounds());
+                image_lines.push(lines.len());
                 lines.push(ContentLine {
                     bbox,
                     cells: vec![Cell {
@@ -269,7 +354,45 @@ impl Document {
                 }
             }
         }
-        Ok(lines)
+
+        // A single line can never form a table, so skip the second pass.
+        let tables = if opts.detect_tables && lines.len() > 1 {
+            self.table_bboxes(&mupdf_page)?
+        } else {
+            Vec::new()
+        };
+
+        let objects = content_objects(&lines, &image_lines, &tables);
+        Ok(PageContent { lines, objects })
+    }
+
+    /// Bounding boxes of the tables MuPDF detects on `page`.
+    ///
+    /// Only the boxes are taken from this pass, never its lines: `TABLE_HUNT`
+    /// rewrites the page, moving a table's text into a structure node and
+    /// splitting lines as it redistributes characters into cells. The Rust
+    /// bindings expose no accessor for a structure node's children, so that
+    /// text is unreachable here — which is exactly why the text comes from a
+    /// separate pass and only the geometry comes from this one.
+    ///
+    /// `COLLECT_VECTORS` is not optional. MuPDF's table hunt looks for ruled
+    /// regions among the page's vector rectangles; with no vectors collected
+    /// that list is empty and it falls back to hunting the *whole page* at a
+    /// loose threshold, which reports ordinary prose pages as one giant table.
+    /// `SEGMENT` is deliberately not set: it would wrap the page in region
+    /// structure nodes and hide the tables behind them.
+    fn table_bboxes(&self, page: &mupdf::Page) -> Result<Vec<Rect>, PdfError> {
+        let hunted = page.to_text_page(
+            TextPageFlags::TABLE_HUNT
+                | TextPageFlags::COLLECT_VECTORS
+                | TextPageFlags::PRESERVE_IMAGES,
+        )?;
+        Ok(hunted
+            .blocks()
+            .filter(|b| matches!(b.r#type(), TextBlockType::Struct))
+            .map(|b| rect_from_mupdf(b.bounds()))
+            .filter(|r| r.x1 > r.x0 && r.y1 > r.y0)
+            .collect())
     }
 
     /// The document outline (table of contents), possibly empty.
@@ -277,6 +400,80 @@ impl Document {
         let outlines = self.inner.outlines()?;
         Ok(outlines.into_iter().map(convert_outline).collect())
     }
+}
+
+/// Turn detected table boxes and image lines into the page's atomic objects.
+///
+/// Pure so that every heuristic below is unit-testable without MuPDF — which
+/// matters, because MuPDF's table detection is a heuristic itself and these
+/// guards are what keep its mistakes from reaching the caret.
+fn content_objects(
+    lines: &[ContentLine],
+    image_lines: &[usize],
+    tables: &[Rect],
+) -> Vec<ContentObject> {
+    let non_empty = lines.iter().filter(|l| !l.cells.is_empty()).count();
+    let content_area = lines
+        .iter()
+        .map(|l| l.bbox)
+        .reduce(|a, b| a.union(b))
+        .map_or(0.0, |r| r.area());
+
+    let mut objects: Vec<ContentObject> = Vec::new();
+    for table in tables {
+        let members: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| table.contains_center_of(l.bbox))
+            .map(|(i, _)| i)
+            .collect();
+        let (Some(&first), Some(&last)) = (members.first(), members.last()) else {
+            continue;
+        };
+        // A one-line table is no better than a line, and a table nobody can
+        // see through is almost always MuPDF's whole-page fallback firing on
+        // ordinary prose — the one false positive observed in practice.
+        let contiguous = last - first + 1 == members.len();
+        let claims_everything = members.len() >= non_empty || table.area() >= 0.9 * content_area;
+        let has_content = members.iter().any(|&i| !lines[i].cells.is_empty());
+        if members.len() < 2 || !contiguous || claims_everything || !has_content {
+            continue;
+        }
+        objects.push(ContentObject {
+            kind: ObjectKind::Table,
+            bbox: *table,
+            start_line: first,
+            end_line: last,
+        });
+    }
+
+    // Two boxes for the same table, or a nested one: keep the wider span.
+    objects.sort_by_key(|o| (o.start_line, std::cmp::Reverse(o.end_line)));
+    let mut kept: Vec<ContentObject> = Vec::new();
+    for object in objects {
+        match kept.last() {
+            Some(prev) if object.start_line <= prev.end_line => continue,
+            _ => kept.push(object),
+        }
+    }
+
+    // An image inside a table is part of that table, not a unit of its own.
+    for &line in image_lines {
+        if kept
+            .iter()
+            .any(|o| line >= o.start_line && line <= o.end_line)
+        {
+            continue;
+        }
+        kept.push(ContentObject {
+            kind: ObjectKind::Image,
+            bbox: lines[line].bbox,
+            start_line: line,
+            end_line: line,
+        });
+    }
+    kept.sort_by_key(|o| o.start_line);
+    kept
 }
 
 fn rect_from_mupdf(r: mupdf::Rect) -> Rect {
@@ -424,7 +621,10 @@ mod tests {
     #[test]
     fn page_content_extracts_chars_in_reading_order() {
         let doc = three_page_doc();
-        let lines = doc.page_content(0).unwrap();
+        let lines = doc
+            .page_content(0, ContentOptions::default())
+            .unwrap()
+            .lines;
         assert!(!lines.is_empty());
         assert!(cell_text(&lines).contains("Hello syodep page one"));
         for line in &lines {
@@ -456,7 +656,7 @@ mod tests {
     fn page_content_out_of_range_fails() {
         let doc = three_page_doc();
         assert!(matches!(
-            doc.page_content(3),
+            doc.page_content(3, ContentOptions::default()),
             Err(PdfError::PageOutOfRange { .. })
         ));
     }
@@ -464,7 +664,10 @@ mod tests {
     #[test]
     fn page_content_includes_one_cell_per_image() {
         let doc = Document::from_bytes(&crate::test_support::pdf_with_image()).unwrap();
-        let lines = doc.page_content(0).unwrap();
+        let lines = doc
+            .page_content(0, ContentOptions::default())
+            .unwrap()
+            .lines;
         let images: Vec<Cell> = lines
             .iter()
             .flat_map(|l| l.cells.iter())
@@ -478,5 +681,215 @@ mod tests {
         assert!((b.y1 - b.y0 - 90.0).abs() < 5.0, "image height: {b:?}");
         // The caption text coexists with the image.
         assert!(cell_text(&lines).contains("Caption"));
+    }
+
+    // ---- Atomic objects -------------------------------------------------
+
+    /// A page of `count` stacked lines, each 10pt tall at x 100..200, with the
+    /// given text length so `cells` is non-empty.
+    fn stacked_lines(count: usize) -> Vec<ContentLine> {
+        (0..count)
+            .map(|i| {
+                let y = 100.0 + i as f32 * 12.0;
+                let bbox = Rect {
+                    x0: 100.0,
+                    y0: y,
+                    x1: 200.0,
+                    y1: y + 10.0,
+                };
+                ContentLine {
+                    bbox,
+                    cells: vec![Cell {
+                        kind: CellKind::Char('x'),
+                        bbox,
+                    }],
+                }
+            })
+            .collect()
+    }
+
+    /// A box covering `lines[range]` exactly.
+    fn box_over(lines: &[ContentLine], range: std::ops::RangeInclusive<usize>) -> Rect {
+        lines[*range.start()..=*range.end()]
+            .iter()
+            .map(|l| l.bbox)
+            .reduce(|a, b| a.union(b))
+            .unwrap()
+    }
+
+    #[test]
+    fn object_ranges_cover_the_lines_inside_a_table_box() {
+        let lines = stacked_lines(10);
+        let objects = content_objects(&lines, &[], &[box_over(&lines, 3..=6)]);
+        assert_eq!(objects.len(), 1);
+        assert_eq!(objects[0].kind, ObjectKind::Table);
+        assert_eq!((objects[0].start_line, objects[0].end_line), (3, 6));
+    }
+
+    #[test]
+    fn object_ranges_reject_a_single_line_table() {
+        let lines = stacked_lines(10);
+        let objects = content_objects(&lines, &[], &[box_over(&lines, 4..=4)]);
+        assert_eq!(objects, vec![], "a one-line table is just a line");
+    }
+
+    #[test]
+    fn object_ranges_reject_a_table_claiming_every_line() {
+        // MuPDF's whole-page fallback fires on ordinary prose; this guard is
+        // the only thing standing between it and unnavigable pages.
+        let lines = stacked_lines(10);
+        let objects = content_objects(&lines, &[], &[box_over(&lines, 0..=9)]);
+        assert_eq!(objects, vec![]);
+    }
+
+    #[test]
+    fn object_ranges_reject_a_non_contiguous_member_set() {
+        let mut lines = stacked_lines(6);
+        // Push line 3 far to the right so a tall, narrow box skips it.
+        lines[3].bbox.x0 = 400.0;
+        lines[3].bbox.x1 = 500.0;
+        let table = Rect {
+            x0: 90.0,
+            y0: 100.0,
+            x1: 210.0,
+            y1: 172.0,
+        };
+        let objects = content_objects(&lines, &[], &[table]);
+        assert_eq!(objects, vec![], "a gapped table must degrade, not guess");
+    }
+
+    #[test]
+    fn object_ranges_keep_the_wider_of_two_overlapping_tables() {
+        let lines = stacked_lines(12);
+        let objects = content_objects(
+            &lines,
+            &[],
+            &[box_over(&lines, 2..=8), box_over(&lines, 4..=6)],
+        );
+        assert_eq!(objects.len(), 1);
+        assert_eq!((objects[0].start_line, objects[0].end_line), (2, 8));
+    }
+
+    #[test]
+    fn object_ranges_make_each_image_its_own_object() {
+        let lines = stacked_lines(6);
+        let objects = content_objects(&lines, &[1, 4], &[]);
+        assert_eq!(objects.len(), 2);
+        assert!(objects.iter().all(|o| o.kind == ObjectKind::Image));
+        assert_eq!((objects[0].start_line, objects[0].end_line), (1, 1));
+        assert_eq!((objects[1].start_line, objects[1].end_line), (4, 4));
+    }
+
+    #[test]
+    fn object_ranges_absorb_an_image_inside_a_table() {
+        let lines = stacked_lines(10);
+        let objects = content_objects(&lines, &[5], &[box_over(&lines, 3..=6)]);
+        assert_eq!(objects.len(), 1, "the table is the enclosing unit");
+        assert_eq!(objects[0].kind, ObjectKind::Table);
+    }
+
+    #[test]
+    fn object_ranges_are_sorted_and_disjoint() {
+        let lines = stacked_lines(20);
+        let objects = content_objects(
+            &lines,
+            &[0, 15],
+            &[box_over(&lines, 8..=11), box_over(&lines, 3..=5)],
+        );
+        for pair in objects.windows(2) {
+            assert!(
+                pair[0].end_line < pair[1].start_line,
+                "objects overlap or are unsorted: {objects:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn page_content_reports_no_table_on_plain_prose() {
+        // The failure that hurts users is a false positive, so this is a
+        // load-bearing test rather than a nicety.
+        let doc = three_page_doc();
+        let content = doc.page_content(0, ContentOptions::default()).unwrap();
+        assert!(
+            !content.objects.iter().any(|o| o.kind == ObjectKind::Table),
+            "prose reported as a table: {:?}",
+            content.objects
+        );
+    }
+
+    #[test]
+    fn page_content_reports_no_table_on_a_two_column_page() {
+        let doc = Document::from_bytes(&crate::test_support::pdf_two_column_page(6)).unwrap();
+        let content = doc.page_content(0, ContentOptions::default()).unwrap();
+        assert!(
+            !content.objects.iter().any(|o| o.kind == ObjectKind::Table),
+            "columns reported as a table: {:?}",
+            content.objects
+        );
+    }
+
+    #[test]
+    fn page_content_reports_an_image_as_a_one_line_object() {
+        let doc = Document::from_bytes(&crate::test_support::pdf_with_image()).unwrap();
+        let content = doc.page_content(0, ContentOptions::default()).unwrap();
+        let images: Vec<_> = content
+            .objects
+            .iter()
+            .filter(|o| o.kind == ObjectKind::Image)
+            .collect();
+        assert_eq!(images.len(), 1, "objects: {:?}", content.objects);
+        assert_eq!(images[0].start_line, images[0].end_line);
+        assert!(matches!(
+            content.lines[images[0].start_line].cells[0].kind,
+            CellKind::Image
+        ));
+    }
+
+    #[test]
+    fn page_content_detects_a_ruled_grid_as_one_table() {
+        let doc = Document::from_bytes(&crate::test_support::pdf_with_table(4, 5)).unwrap();
+        let content = doc.page_content(0, ContentOptions::default()).unwrap();
+        let tables: Vec<_> = content
+            .objects
+            .iter()
+            .filter(|o| o.kind == ObjectKind::Table)
+            .collect();
+        assert_eq!(tables.len(), 1, "objects: {:?}", content.objects);
+        let table = tables[0];
+        // The heading above and the caption below stay outside the table.
+        let text_of = |i: usize| -> String {
+            content.lines[i]
+                .cells
+                .iter()
+                .filter_map(|c| match c.kind {
+                    CellKind::Char(ch) => Some(ch),
+                    CellKind::Image => None,
+                })
+                .collect()
+        };
+        assert!(table.start_line > 0, "heading swallowed by the table");
+        assert!(
+            text_of(table.start_line).contains("R1C1"),
+            "table starts at {:?}",
+            text_of(table.start_line)
+        );
+        assert!(
+            (0..content.lines.len()).any(|i| text_of(i).contains("Caption") && i > table.end_line),
+            "caption swallowed by the table"
+        );
+    }
+
+    #[test]
+    fn page_content_without_table_detection_reports_no_tables() {
+        let doc = Document::from_bytes(&crate::test_support::pdf_with_table(4, 5)).unwrap();
+        let content = doc
+            .page_content(
+                0,
+                ContentOptions {
+                    detect_tables: false,
+                },
+            )
+            .unwrap();
+        assert!(content.objects.iter().all(|o| o.kind != ObjectKind::Table));
     }
 }
