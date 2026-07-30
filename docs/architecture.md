@@ -181,10 +181,11 @@ box (the union of its lines) and an image's, it is bounded by the page's own
 content.
 
 **Decision — page furniture is removed from the content layer, not skipped by
-motion:** running heads, folios and text that does not run in the page's
-direction never enter `PageContent::lines`, so every motion, span and overlay
-ignores them without a single change to the caret. The removed lines are kept in
-`PageContent::furniture` rather than discarded. Two independent rules find them.
+motion:** running heads, folios, margin line numbers and text that does not run
+in the page's direction never enter `PageContent::lines`, so every motion, span
+and overlay ignores them without a single change to the caret. The removed
+lines are kept in `PageContent::furniture` rather than discarded. Three
+independent rules find them.
 *Rotation* flags a line more than 10&deg; off the page's **dominant** direction —
 dominant rather than absolute horizontal, which is what lets a page laid out
 sideways keep everything, and what makes the rule provably unable to empty a
@@ -194,15 +195,30 @@ across sampled pages; position alone is never evidence, so a title that appears
 once survives. Sampling takes four anchors of *two consecutive pages*, because
 evenly spaced single pages land on one parity and would miss the recto running
 head of any book that alternates. Baselines, not bounding boxes, are the
-position key — a descender moves a box by points. Filtering happens *before*
-table and heading detection, which also improves both: a full-width running
-header inflated the heading rule's widest-line comparison and an 8pt folio
-dragged its body-size vote. Consequently `content_objects` must judge its
-"claims the whole page" guards against lines *plus* furniture, or a full-page
-table starts tripping its own guard once the header is gone. The profile is
-document-scoped and owned by `syodep-core`'s session, built lazily on first
-content need, so `Document` keeps no interior mutability and merely reading a
-document never pays for it.
+position key — a descender moves a box by points. A line's characters are
+further split into `text_segments` wherever a gap exceeds `SEGMENT_GAP_POINTS`
+(20pt, comfortably past any word gap): a header and a folio sharing one
+baseline — a facing-page layout where the pair swaps sides between recto and
+verso is the case this exists for — are then two segments the vote can accept
+independently, rather than one string whose order depends on which side either
+field is on. *Line numbering* flags a run of purely numeric lines (at least
+`MIN_LINE_NUMBERS`) forming their own column left of the body text, separated
+from it by at least `LINE_NUMBER_GAP` — manuscript line-numbering, which
+restarts every page and so has no cross-page profile to learn from; it needs
+none, since the pattern (a narrow numeric column beside a wider body column) is
+visible on a single page. Its safety net is the same shape as rotation's: the
+gap is measured against the body text's own left edge, so a page that is
+*entirely* numeric — a table of figures, with no body column to compare
+against — is left alone rather than guessed at, and the rule can no more empty
+a page than rotation can.
+Filtering happens *before* table and heading detection, which also improves
+both: a full-width running header inflated the heading rule's widest-line
+comparison and an 8pt folio dragged its body-size vote. Consequently
+`content_objects` must judge its "claims the whole page" guards against lines
+*plus* furniture, or a full-page table starts tripping its own guard once the
+header is gone. The profile is document-scoped and owned by `syodep-core`'s
+session, built lazily on first content need, so `Document` keeps no interior
+mutability and merely reading a document never pays for it.
 
 **Decision — regions form a chain of decreasing coarseness:** every
 `ContentObject` bounds a sentence, which is what being a region means; three

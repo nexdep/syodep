@@ -89,20 +89,34 @@ it. Detection costs nothing extra to extract; set it to `false` if the heuristic
 misjudges a document.
 
 **Page furniture.** With `skip_page_furniture = true` the caret never traverses
-a running header, a page number, a sideways stamp down a margin, or an inclined
-watermark: they are dropped from the navigable content layer entirely, at every
-scope, and no selection can cover them. They are still drawn on the page, and
-still extracted — only navigation ignores them. There is no key to toggle this
-mid-document by design; it is a setting.
+a running header, a page number, a manuscript line-numbering column, a
+sideways stamp down a margin, or an inclined watermark: they are dropped from
+the navigable content layer entirely, at every scope, and no selection can
+cover them. They are still drawn on the page, and still extracted — only
+navigation ignores them. There is no key to toggle this mid-document by
+design; it is a setting.
 
-Headers and footers are recognised by **repeating across pages**, never by
-position alone. A line counts only when the same text — with digit runs masked,
-so page numbers and `Chapter 7 of 9` still match themselves — appears at the
-same height on other pages. That is why a paper's title, which appears once, is
-never mistaken for a running head. Sideways text is anything not running in the
-page's own dominant direction, so a page laid out entirely sideways keeps all of
-it; **rotated column labels inside a table are skipped too**, which is the one
-case where this removes something you might have wanted.
+Three independent rules find them:
+
+- **Repetition** — a margin-band line whose text (with digit runs masked, so
+  page numbers and `Chapter 7 of 9` still match themselves) and baseline recur
+  across pages. That is why a paper's title, which appears once, is never
+  mistaken for a running head. A header and a folio sharing one baseline —
+  common in facing-page layouts, where the pair swaps sides between recto and
+  verso — are matched independently of which side either one is on or which
+  one a page happens to put first.
+- **Line numbering** — a run of short, purely numeric lines forming their own
+  column at the page's left margin, clearly separated from the body text
+  beside them: the manuscript line-numbering of a submission or review draft,
+  where every body line is numbered and the count restarts each page. Unlike
+  repetition this needs no cross-page evidence — the pattern is visible on a
+  single page — and it is never confused with a genuinely numeric page (a
+  table of figures), since there is then no body-text left edge to measure the
+  gutter against.
+- **Rotation** — anything not running in the page's own dominant direction, so
+  a page laid out entirely sideways keeps all of it; **rotated column labels
+  inside a table are skipped too**, which is the one case where this removes
+  something you might have wanted.
 
 Set it to `false` to walk every extracted line as before. Note that `Ln 1` in
 the status line then means the page's first *content* line rather than its first

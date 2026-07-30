@@ -28,8 +28,11 @@ real files. The strategy, in descending order of coverage:
    inclined watermark, or a page laid out entirely sideways), `pdf_with_list`
    (a colon lead-in, three bulleted items, a closing sentence),
    `pdf_with_table_gap` (a table with its caption held back by a configurable
-   gap, for the edge-trimming rule) and `pdf_with_equation` (a display formula
-   set apart from body prose, for equation detection).
+   gap, for the edge-trimming rule), `pdf_with_equation` (a display formula
+   set apart from body prose, for equation detection), `pdf_with_line_numbers`
+   (body lines each preceded by a left-margin number that restarts every page)
+   and `pdf_with_alternating_margin_fields` (a running head and a folio
+   sharing one footer baseline, swapping sides every page).
 
    Navigation over tables is tested two ways on purpose. The mapping from
    detected boxes to line ranges (`content_objects`) is a pure function tested
@@ -90,5 +93,5 @@ Release pipeline: see `docs/packaging.md`.
 
 ## Current coverage snapshot
 
-452 Rust tests: 30 config, 275 core, 119 pdf, 15 storage, 13 ffi — plus the CI
+461 Rust tests: 30 config, 275 core, 128 pdf, 15 storage, 13 ffi — plus the CI
 smoke test and docs checks.

@@ -331,6 +331,24 @@ const MIN_LINES_FOR_SHARE_CAP: usize = 12;
 /// Pages are sampled as this many anchors, each a *pair* of facing pages.
 const SAMPLE_ANCHORS: usize = 4;
 
+/// A gap this wide between two characters on the same baseline almost never
+/// occurs within one field of text (word spacing is a few points even at
+/// large sizes), but comfortably separates two fields sharing a margin line —
+/// a running head on one side and a folio on the other, say. Splitting on it
+/// is what keeps the repetition rule from caring which side either one is
+/// printed on, or which one comes first in reading order.
+const SEGMENT_GAP_POINTS: f32 = 20.0;
+
+/// A margin column of line numbers must show at least this many purely
+/// numeric lines before it counts as manuscript line-numbering rather than a
+/// coincidental stray number (a footnote marker, an equation number, ...).
+const MIN_LINE_NUMBERS: usize = 3;
+
+/// How far a numeric column's right edge must sit from the body text's own
+/// left edge to count as a separate column rather than part of the body — a
+/// real gutter, not ordinary letter-spacing.
+const LINE_NUMBER_GAP: f32 = 6.0;
+
 /// An RGBA8 image, tightly packed (`stride == width * 4`).
 #[derive(Debug, Clone)]
 pub struct Bitmap {
@@ -698,6 +716,13 @@ impl Document {
     }
 
     /// One page's margin-band lines, summarised for the repetition vote.
+    ///
+    /// A physical line contributes one [`BandLine`] per [`text_segments`]
+    /// segment rather than one for its whole concatenated text: a running
+    /// head and a folio sharing one baseline (common in facing-page layouts,
+    /// where the pair swaps sides between recto and verso) must be votable
+    /// independently of which side either one is on, or of which one a
+    /// left-to-right character walk happens to read first.
     fn band_lines(&self, page: usize) -> Result<Vec<BandLine>, PdfError> {
         let height = self.page_size(page)?.height;
         let mupdf_page = self.inner.load_page(page as i32)?;
@@ -711,13 +736,13 @@ impl Document {
             }
             for line in block.lines() {
                 let mut origins = Vec::new();
-                let mut text = String::new();
+                let mut chars = Vec::new();
                 for ch in line.chars() {
                     let Some(c) = ch.char() else { continue };
-                    text.push(c);
                     if !c.is_whitespace() {
                         origins.push(ch.origin().y);
                     }
+                    chars.push((ch.origin().x, c));
                 }
                 if origins.is_empty() {
                     continue;
@@ -727,11 +752,13 @@ impl Document {
                 let Some((edge, offset)) = band_of(baseline, height) else {
                     continue;
                 };
-                let text = normalise_furniture_text(&text);
-                if text.is_empty() {
-                    continue;
+                for segment in text_segments(chars.iter().copied()) {
+                    let text = normalise_furniture_text(&segment);
+                    if text.is_empty() {
+                        continue;
+                    }
+                    out.push(BandLine { text, edge, offset });
                 }
-                out.push(BandLine { text, edge, offset });
             }
         }
         Ok(out)
@@ -947,13 +974,17 @@ fn build_profile(samples: &[Vec<BandLine>]) -> FurnitureProfile {
 
 /// Which of a page's lines are furniture rather than reading material.
 ///
-/// Two independent rules. **Rotation**: a line more than
+/// Three independent rules. **Rotation**: a line more than
 /// [`ANGLE_TOLERANCE_DEG`] off the page's dominant direction. This one needs no
 /// cap and provably cannot empty a page — the dominant cluster is by
 /// construction the majority of the page's characters and is never flagged, so
-/// a wholly sideways page keeps everything. **Repetition**: a margin-band line
-/// whose normalised text and baseline recur across the document. That one is
-/// capped, because its evidence comes from elsewhere.
+/// a wholly sideways page keeps everything. **Margin line numbers**: a run of
+/// purely numeric lines forming their own column left of the body text (see
+/// [`line_number_mask`]) — also uncapped, and also provably safe, since it
+/// never flags the very body-text line whose left edge it measures against.
+/// **Repetition**: a margin-band line whose normalised text and baseline
+/// recur across the document. That one is capped, because its evidence comes
+/// from elsewhere.
 fn furniture_mask(
     lines: &[ContentLine],
     styles: &[LineStyle],
@@ -980,6 +1011,12 @@ fn furniture_mask(
         }
     }
 
+    for (i, numbered) in line_number_mask(lines).into_iter().enumerate() {
+        if numbered {
+            mask[i] = true;
+        }
+    }
+
     let Some(profile) = profile.filter(|p| !p.is_empty()) else {
         return mask;
     };
@@ -991,12 +1028,21 @@ fn furniture_mask(
         let Some((edge, offset)) = band_of(styles[i].baseline, page_height) else {
             continue;
         };
-        let text = normalise_furniture_text(&line_text(line));
-        if text.is_empty() {
-            continue;
-        }
-        let matched = profile.entries.iter().any(|e| {
-            e.text == text && e.edge == edge && (e.offset - offset).abs() <= BASELINE_TOLERANCE
+        // Segmented the same way `band_lines` segmented it to build the
+        // profile: a header and a folio sharing this baseline must each be
+        // matchable on their own, whichever side either sits on here.
+        let chars = line.cells.iter().filter_map(|cell| match cell.kind {
+            CellKind::Char(c) => Some((cell.bbox.x0, c)),
+            CellKind::Image => None,
+        });
+        let matched = text_segments(chars).into_iter().any(|segment| {
+            let text = normalise_furniture_text(&segment);
+            if text.is_empty() {
+                return false;
+            }
+            profile.entries.iter().any(|e| {
+                e.text == text && e.edge == edge && (e.offset - offset).abs() <= BASELINE_TOLERANCE
+            })
         });
         if matched {
             repeated.push(i);
@@ -1040,6 +1086,74 @@ fn line_text(line: &ContentLine) -> String {
             CellKind::Image => None,
         })
         .collect()
+}
+
+/// Split one baseline's characters, given in reading order as `(x, char)`
+/// pairs, into runs separated by a gap wider than [`SEGMENT_GAP_POINTS`].
+///
+/// Comparing origin-to-origin distance rather than true edge-to-edge gap is a
+/// deliberate simplification: at the scale this threshold works at (tens of
+/// points), a single character's own width is noise, and the function never
+/// has more than an origin to work with for MuPDF's raw text-page characters
+/// (see [`Document::band_lines`]) — [`furniture_mask`] uses it identically on
+/// [`Cell`] origins so the two call sites can never disagree about where a
+/// line splits.
+fn text_segments<I: IntoIterator<Item = (f32, char)>>(chars: I) -> Vec<String> {
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut last_x: Option<f32> = None;
+    for (x, c) in chars {
+        if let Some(prev_x) = last_x {
+            if x - prev_x > SEGMENT_GAP_POINTS {
+                segments.push(std::mem::take(&mut current));
+            }
+        }
+        current.push(c);
+        last_x = Some(x);
+    }
+    if !current.is_empty() {
+        segments.push(current);
+    }
+    segments
+}
+
+/// Detect manuscript-style line numbering: a run of short, purely numeric
+/// lines forming their own column at the page's left margin, clearly
+/// separated from the body text that runs beside them. Common in
+/// submission/review drafts, where every body line is numbered and the count
+/// restarts each page.
+///
+/// Unlike the repetition rule this needs no cross-document profile — the
+/// pattern (a narrow numeric column beside a wider text column) is visible on
+/// a single page. The safety net is `body_left`: if every line on the page is
+/// purely numeric there is no body column to measure the gap against, so
+/// nothing is masked. That is also what makes the rule provably unable to
+/// empty a page, the same guarantee the rotation rule has: the line that
+/// defines `body_left` is by construction never one of the ones flagged.
+fn line_number_mask(lines: &[ContentLine]) -> Vec<bool> {
+    let mut mask = vec![false; lines.len()];
+    let is_number: Vec<bool> = lines
+        .iter()
+        .map(|l| normalise_furniture_text(&line_text(l)) == "#")
+        .collect();
+    if is_number.iter().filter(|&&n| n).count() < MIN_LINE_NUMBERS {
+        return mask;
+    }
+    let body_left = lines
+        .iter()
+        .zip(&is_number)
+        .filter(|(_, &n)| !n)
+        .map(|(l, _)| l.bbox.x0)
+        .fold(f32::INFINITY, f32::min);
+    if !body_left.is_finite() {
+        return mask;
+    }
+    for (i, (line, &n)) in lines.iter().zip(&is_number).enumerate() {
+        if n && line.bbox.x1 + LINE_NUMBER_GAP <= body_left {
+            mask[i] = true;
+        }
+    }
+    mask
 }
 
 /// How close two markers' left edges must be to belong to the same list.
@@ -3369,6 +3483,34 @@ mod tests {
         assert_eq!(normalise_furniture_text("---"), "");
     }
 
+    #[test]
+    fn text_segments_keeps_ordinary_word_spacing_together() {
+        let chars = [(100.0, 'a'), (106.0, 'b'), (115.0, 'c')];
+        assert_eq!(text_segments(chars), vec!["abc".to_owned()]);
+    }
+
+    #[test]
+    fn text_segments_splits_on_a_wide_gap() {
+        // A running head and a folio sharing one baseline, far enough apart
+        // that no word gap could explain the distance.
+        let chars = [
+            (72.0, 'A'),
+            (78.0, 'B'),
+            (84.0, 'C'),
+            (400.0, 'X'),
+            (406.0, 'Y'),
+        ];
+        assert_eq!(
+            text_segments(chars),
+            vec!["ABC".to_owned(), "XY".to_owned()]
+        );
+    }
+
+    #[test]
+    fn text_segments_of_nothing_is_empty() {
+        assert!(text_segments(std::iter::empty::<(f32, char)>()).is_empty());
+    }
+
     fn band(text: &str, edge: Edge, offset: f32) -> BandLine {
         BandLine {
             text: text.to_owned(),
@@ -3614,6 +3756,82 @@ mod tests {
         assert!(mask.iter().all(|m| !m), "mask: {mask:?}");
     }
 
+    /// A line at a given left edge, otherwise like [`text_line_at`].
+    fn text_line_at_x(x0: f32, y: f32, text: &str) -> ContentLine {
+        let cells: Vec<Cell> = text
+            .chars()
+            .enumerate()
+            .map(|(i, ch)| Cell {
+                kind: CellKind::Char(ch),
+                bbox: Rect {
+                    x0: x0 + i as f32 * 6.0,
+                    y0: y - 8.0,
+                    x1: x0 + 6.0 + i as f32 * 6.0,
+                    y1: y,
+                },
+            })
+            .collect();
+        ContentLine {
+            bbox: Rect {
+                x0,
+                y0: y - 8.0,
+                x1: x0 + text.chars().count() as f32 * 6.0,
+                y1: y,
+            },
+            cells,
+        }
+    }
+
+    #[test]
+    fn line_number_mask_flags_a_narrow_numeric_margin_column() {
+        let mut lines = Vec::new();
+        for i in 1..=5 {
+            let y = 100.0 + i as f32 * 20.0;
+            lines.push(text_line_at_x(40.0, y, &i.to_string()));
+            lines.push(text_line_at_x(100.0, y, "a body line right here"));
+        }
+        let mask = line_number_mask(&lines);
+        for (i, line) in lines.iter().enumerate() {
+            let is_number_line = i % 2 == 0;
+            assert_eq!(mask[i], is_number_line, "line {i}: {:?}", line_text(line));
+        }
+    }
+
+    #[test]
+    fn line_number_mask_ignores_a_lone_stray_number() {
+        // Below MIN_LINE_NUMBERS: a single number could be a footnote marker
+        // or an equation number, not a margin column.
+        let mut lines = vec![text_line_at_x(40.0, 120.0, "1")];
+        for i in 0..5 {
+            lines.push(text_line_at_x(100.0, 140.0 + i as f32 * 16.0, "body text"));
+        }
+        assert!(line_number_mask(&lines).iter().all(|&m| !m));
+    }
+
+    #[test]
+    fn line_number_mask_leaves_an_all_numeric_page_alone() {
+        // No body line means no left edge to measure the gap against, so a
+        // genuinely numeric page (a table of figures) is left alone rather
+        // than guessed at.
+        let lines: Vec<ContentLine> = (1..=6)
+            .map(|i| text_line_at_x(40.0, 100.0 + i as f32 * 20.0, &i.to_string()))
+            .collect();
+        assert!(line_number_mask(&lines).iter().all(|&m| !m));
+    }
+
+    #[test]
+    fn line_number_mask_requires_a_real_gap_from_the_body() {
+        // A number sitting inside the body's own left margin (no gutter) is
+        // not a separate column -- it could be a numbered list.
+        let mut lines = Vec::new();
+        for i in 1..=5 {
+            let y = 100.0 + i as f32 * 20.0;
+            lines.push(text_line_at_x(100.0, y, &i.to_string()));
+            lines.push(text_line_at_x(100.0, y + 8.0, "body text here"));
+        }
+        assert!(line_number_mask(&lines).iter().all(|&m| !m));
+    }
+
     #[test]
     fn image_line_indices_survive_furniture_removal() {
         // Regression: image indices point into the unfiltered vector. Dropping
@@ -3748,6 +3966,62 @@ mod tests {
         let profile = doc.furniture_profile().unwrap();
         assert!(profile.is_empty());
         assert_eq!(profile.pages_sampled(), 0);
+    }
+
+    #[test]
+    fn page_content_skips_a_manuscript_line_number_column() {
+        let doc = Document::from_bytes(&crate::test_support::pdf_with_line_numbers(3, 6)).unwrap();
+        for page in 0..3 {
+            let content = doc
+                .page_content(page, ContentOptions::default(), None)
+                .unwrap();
+            let body: String = content.lines.iter().map(line_text).collect();
+            assert!(
+                !body.chars().any(|c| c.is_ascii_digit()),
+                "a line number reached the body text: {body:?}"
+            );
+            assert!(body.contains("continues here"), "body was removed");
+            assert_eq!(
+                content.furniture.len(),
+                6,
+                "all six line numbers should be furniture on page {page}"
+            );
+        }
+    }
+
+    #[test]
+    fn page_content_skips_a_running_head_and_folio_that_swap_sides() {
+        // A facing-page layout where the two fields on one footer line trade
+        // places between recto and verso -- the repetition rule must not
+        // care which side either one is on, or which one a page happens to
+        // put first.
+        let doc = Document::from_bytes(&crate::test_support::pdf_with_alternating_margin_fields(8))
+            .unwrap();
+        let profile = doc.furniture_profile().unwrap();
+        assert!(!profile.is_empty(), "nothing repeated: {profile:?}");
+        for page in 0..8 {
+            let content = doc
+                .page_content(page, ContentOptions::default(), Some(&profile))
+                .unwrap();
+            let body: String = content.lines.iter().map(line_text).collect();
+            assert!(
+                !body.contains("AUTHOR SUBMITTED"),
+                "header survived on page {page}: {body:?}"
+            );
+            assert!(
+                body.contains("The database is a set"),
+                "real body text was removed on page {page}"
+            );
+            let removed: String = content.furniture.iter().map(line_text).collect();
+            assert!(
+                removed.contains("AUTHOR SUBMITTED"),
+                "header not caught on page {page}"
+            );
+            assert!(
+                removed.contains("Page") && removed.contains("of 8"),
+                "folio not caught on page {page}: {removed:?}"
+            );
+        }
     }
 
     #[test]

@@ -672,6 +672,230 @@ pub fn pdf_with_running_header(pages: usize, repeat_header: bool) -> Vec<u8> {
     buf
 }
 
+/// Build a document whose footer carries two independent fields on one
+/// baseline -- a manuscript running head and a "Page N of M" folio -- that
+/// swap sides on alternating pages, the way a facing-page layout keeps a
+/// running head on the outer edge of both recto and verso. Used to exercise
+/// margin-repetition detection when two fields share a physical line and
+/// which one reads first therefore differs page to page.
+pub fn pdf_with_alternating_margin_fields(pages: usize) -> Vec<u8> {
+    let body = [
+        "The database is a set of directories that each contain a copy of",
+        "the same layout, so applications may add to it independently.",
+        "Every entry is resolved in order until one of them matches.",
+        "A later directory may override what an earlier one provided.",
+    ];
+    let header = "AUTHOR SUBMITTED MANUSCRIPT - NF-108620.R1";
+    let mut streams = Vec::new();
+    for p in 0..pages {
+        let mut content = String::new();
+        for (i, text) in body.iter().enumerate() {
+            let y = 700.0 - i as f32 * 16.0;
+            content.push_str(&format!("BT /F1 11 Tf 100 {y} Td ({text}) Tj ET\n"));
+        }
+        let folio = format!("Page {} of {pages}", p + 1);
+        // One BT/ET, one shared baseline: the two fields are two `Tj` calls
+        // in the same text object, positioned by a relative `Td` jump between
+        // them, so a naive whole-line read sees one string with the fields in
+        // whichever order this page put them.
+        if p % 2 == 0 {
+            content.push_str(&format!(
+                "BT /F1 9 Tf 72 40 Td ({header}) Tj 320 0 Td ({folio}) Tj ET\n"
+            ));
+        } else {
+            content.push_str(&format!(
+                "BT /F1 9 Tf 72 40 Td ({folio}) Tj 320 0 Td ({header}) Tj ET\n"
+            ));
+        }
+        streams.push(content);
+    }
+
+    // Object numbering: 1 catalog, 2 pages, 3 font, then per page 4+2i / 5+2i.
+    let total_objects = 3 + 2 * pages;
+    let mut buf: Vec<u8> = b"%PDF-1.4\n".to_vec();
+    let mut offsets: Vec<usize> = vec![0; total_objects + 1];
+    let write_obj = |buf: &mut Vec<u8>, offsets: &mut Vec<usize>, num: usize, body: &[u8]| {
+        offsets[num] = buf.len();
+        buf.extend_from_slice(format!("{num} 0 obj\n").as_bytes());
+        buf.extend_from_slice(body);
+        buf.extend_from_slice(b"\nendobj\n");
+    };
+    write_obj(
+        &mut buf,
+        &mut offsets,
+        1,
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+    );
+    let kids: Vec<String> = (0..pages).map(|i| format!("{} 0 R", 4 + 2 * i)).collect();
+    write_obj(
+        &mut buf,
+        &mut offsets,
+        2,
+        format!(
+            "<< /Type /Pages /Kids [{}] /Count {pages} >>",
+            kids.join(" ")
+        )
+        .as_bytes(),
+    );
+    write_obj(
+        &mut buf,
+        &mut offsets,
+        3,
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    );
+    for (i, content) in streams.iter().enumerate() {
+        let page_num = 4 + 2 * i;
+        let content_num = 5 + 2 * i;
+        write_obj(
+            &mut buf,
+            &mut offsets,
+            page_num,
+            format!(
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] \
+                 /Resources << /Font << /F1 3 0 R >> >> /Contents {content_num} 0 R >>"
+            )
+            .as_bytes(),
+        );
+        write_obj(
+            &mut buf,
+            &mut offsets,
+            content_num,
+            format!(
+                "<< /Length {} >>\nstream\n{content}\nendstream",
+                content.len()
+            )
+            .as_bytes(),
+        );
+    }
+    let xref_offset = buf.len();
+    buf.extend_from_slice(format!("xref\n0 {}\n", total_objects + 1).as_bytes());
+    buf.extend_from_slice(b"0000000000 65535 f \n");
+    for offset in &offsets[1..] {
+        buf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    buf.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n",
+            total_objects + 1
+        )
+        .as_bytes(),
+    );
+    buf
+}
+
+/// Build a document whose body lines are each preceded by a line number in
+/// the left margin, restarting at 1 on every page -- the manuscript
+/// line-numbering common in submission and review drafts. Each number and its
+/// body line are separate text objects (as a real line-numbering package
+/// typically emits them), positioned with a clear gap between the number
+/// column and the body's left edge.
+pub fn pdf_with_line_numbers(pages: usize, lines_per_page: usize) -> Vec<u8> {
+    let words = [
+        "Every",
+        "entry",
+        "in",
+        "the",
+        "database",
+        "is",
+        "resolved",
+        "before",
+        "the",
+        "next",
+        "one",
+        "is",
+        "considered",
+        "at",
+        "all",
+        "here",
+    ];
+    let mut streams = Vec::new();
+    for _ in 0..pages {
+        let mut content = String::new();
+        for i in 0..lines_per_page {
+            let y = 780.0 - i as f32 * 16.0;
+            let number = i + 1;
+            let text = words[i % words.len()];
+            content.push_str(&format!("BT /F1 9 Tf 50 {y} Td ({number}) Tj ET\n"));
+            content.push_str(&format!(
+                "BT /F1 11 Tf 100 {y} Td ({text} continues here) Tj ET\n"
+            ));
+        }
+        streams.push(content);
+    }
+
+    // Object numbering: 1 catalog, 2 pages, 3 font, then per page 4+2i / 5+2i.
+    let total_objects = 3 + 2 * pages;
+    let mut buf: Vec<u8> = b"%PDF-1.4\n".to_vec();
+    let mut offsets: Vec<usize> = vec![0; total_objects + 1];
+    let write_obj = |buf: &mut Vec<u8>, offsets: &mut Vec<usize>, num: usize, body: &[u8]| {
+        offsets[num] = buf.len();
+        buf.extend_from_slice(format!("{num} 0 obj\n").as_bytes());
+        buf.extend_from_slice(body);
+        buf.extend_from_slice(b"\nendobj\n");
+    };
+    write_obj(
+        &mut buf,
+        &mut offsets,
+        1,
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+    );
+    let kids: Vec<String> = (0..pages).map(|i| format!("{} 0 R", 4 + 2 * i)).collect();
+    write_obj(
+        &mut buf,
+        &mut offsets,
+        2,
+        format!(
+            "<< /Type /Pages /Kids [{}] /Count {pages} >>",
+            kids.join(" ")
+        )
+        .as_bytes(),
+    );
+    write_obj(
+        &mut buf,
+        &mut offsets,
+        3,
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    );
+    for (i, content) in streams.iter().enumerate() {
+        let page_num = 4 + 2 * i;
+        let content_num = 5 + 2 * i;
+        write_obj(
+            &mut buf,
+            &mut offsets,
+            page_num,
+            format!(
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] \
+                 /Resources << /Font << /F1 3 0 R >> >> /Contents {content_num} 0 R >>"
+            )
+            .as_bytes(),
+        );
+        write_obj(
+            &mut buf,
+            &mut offsets,
+            content_num,
+            format!(
+                "<< /Length {} >>\nstream\n{content}\nendstream",
+                content.len()
+            )
+            .as_bytes(),
+        );
+    }
+    let xref_offset = buf.len();
+    buf.extend_from_slice(format!("xref\n0 {}\n", total_objects + 1).as_bytes());
+    buf.extend_from_slice(b"0000000000 65535 f \n");
+    for offset in &offsets[1..] {
+        buf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    buf.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n",
+            total_objects + 1
+        )
+        .as_bytes(),
+    );
+    buf
+}
+
 /// Build a single A4 page with a lead-in line ending in a colon, a bulleted
 /// list of three items, and a closing sentence. Used to exercise list
 /// detection, where items carry no terminating full stop.

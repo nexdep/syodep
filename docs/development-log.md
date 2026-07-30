@@ -7,6 +7,75 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-07-30 — Margin line numbers, and headers that swap sides
+
+Two more kinds of page furniture, prompted by a real manuscript-review PDF:
+a left-margin line-number column (restarting each page), and a running
+head/folio pair sharing one footer baseline that traded sides between
+pages — a facing-page layout where the pair sits on the *outer* edge of
+both recto and verso.
+
+### Line numbering needs no cross-page profile
+
+Unlike a running head, manuscript line numbers don't recur across pages —
+they restart at 1 every time — so the repetition rule's whole machinery
+(a document-scoped profile, multi-page sampling) doesn't apply. But
+`normalise_furniture_text` already collapses any run of digits to a single
+`#`, so a line that is *nothing but* a number always normalises to exactly
+`"#"` — a cheap, exact test for "this line is a bare number", usable on one
+page alone. `line_number_mask` finds a run of at least `MIN_LINE_NUMBERS`
+such lines separated from the body text's own left edge by at least
+`LINE_NUMBER_GAP`, and needs nothing else: no rows-per-page assumption, no
+alignment check against a corresponding body line.
+
+Its safety net mirrors the rotation rule's, deliberately: `body_left` is
+computed only from *non*-numeric lines, so a genuinely all-numeric page (a
+table of figures, with nothing to call "the body") has no left edge to
+compare against and nothing gets masked — the rule can no more empty a page
+than rotation can, by the same kind of construction, not a cap bolted on
+after the fact.
+
+### The repetition rule now matches segments, not whole lines
+
+The swapping-sides header/folio turned out to already work end-to-end
+without any change — MuPDF's own text extraction kept them as two separate
+`ContentLine`s even sharing a baseline, so the existing per-line match (text
++ edge + baseline, x never considered) already found each one regardless of
+which side it was printed on. But that was empirically true for this
+fixture's PDF producer, not guaranteed by anything in the code: a producer
+that emits both fields as one text run on one physical line, with a big
+`Td` jump between them, would concatenate into a single string whose
+left-to-right order depends on which field is on which side that page —
+defeating the exact-string match even though neither field's *identity*
+should depend on where it sits.
+
+`band_lines` (profile building) and `furniture_mask`'s repetition check
+(matching) now both run a line's characters through `text_segments` first,
+splitting on any horizontal gap wider than `SEGMENT_GAP_POINTS` (20pt,
+comfortably past any word gap at any plausible font size) before
+normalising and voting. A line with one segment — the overwhelmingly common
+case — behaves exactly as before; a line with two becomes two independent
+candidates, so which one is on which side, or which one a left-to-right
+walk reads first, can no longer change either one's identity. Masking stays
+per *line*: if any segment matches, the whole physical line is furniture,
+which is safe here because a margin line carrying recognised furniture
+segments has nothing else worth keeping.
+
+### Tests
+
+`syodep-pdf` 128 tests, up from 119: `text_segments` pinned directly (word
+spacing stays one segment, a wide gap splits, empty input is empty);
+`line_number_mask` pinned directly (flags a real margin column, ignores a
+lone stray number below the minimum, leaves an all-numeric page alone,
+requires a real gutter rather than ordinary indentation); two integration
+tests against new fixtures — `pdf_with_line_numbers` (numbers restart each
+page, land in `content.furniture`, body text keeps reading) and
+`pdf_with_alternating_margin_fields` (header and folio share one baseline
+and swap sides every page; both are caught on every page regardless of
+which side either is on).
+
+---
+
 ## 2026-07-30 — `e` moves to the next line instead of a word's end
 
 `e` used to be the odd one out: every scope-entry letter names a granularity
