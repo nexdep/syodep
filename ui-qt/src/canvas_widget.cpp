@@ -172,8 +172,59 @@ void CanvasWidget::paintGL()
             painter.fillPath(path.simplified(), color);
     };
 
-    // Highlights first, so a selection drawn over one still reads as a selection.
-    fillOverlay(syo_app_highlights(m_app), m_highlightColor);
+    // Highlights are painted differently from focus/visual: a saved highlight
+    // is always rendered with Multiply blending (every PDF reader does this
+    // for a Highlight annotation, and the core writes the same opacity into
+    // the saved `/CA` -- see `syo_app_highlight_color`), so previewing it with
+    // plain alpha blending, as focus/visual use, would make it look paler on
+    // screen than it does once saved.
+    //
+    // `QPainter::CompositionMode_Multiply` is not used directly on this
+    // widget's own painter: `QOpenGLWidget` paints through the GL paint
+    // engine, where the advanced (SVG/PDF-spec) blend modes depend on an
+    // OpenGL blend-equation extension that is not universal -- confirmed by
+    // testing, where a GPU/driver without it silently painted solid black
+    // instead of blending at all. Compositing on a `QImage` first uses the
+    // raster paint engine instead, where these blend modes are unconditionally
+    // correct, and the already-blended pixels are then just drawn like a page
+    // image -- no blend mode needed for that part.
+    {
+        SyoOverlay highlights = syo_app_highlights(m_app);
+        for (uintptr_t i = 0; i < highlights.rect_count; ++i) {
+            const SyoRect r = highlights.rects[i];
+            // The page whose image this rectangle was drawn over: overlay
+            // rects and visible-page rects share one coordinate space (canvas
+            // pixels), so containment is a direct comparison.
+            for (size_t j = 0; j < qMin<size_t>(count, 64); ++j) {
+                const SyoVisiblePage &vp = pages[j];
+                if (r.x < vp.x || r.y < vp.y || r.x + r.width > vp.x + vp.width
+                    || r.y + r.height > vp.y + vp.height) {
+                    continue;
+                }
+                const QImage page = pageImage(vp.page);
+                if (page.isNull())
+                    break;
+                QRect local(
+                    qRound(r.x - vp.x), qRound(r.y - vp.y),
+                    qMax(1, qRound(r.width)), qMax(1, qRound(r.height)));
+                local = local.intersected(page.rect());
+                if (local.isEmpty())
+                    break;
+                QImage patch = page.copy(local);
+                QPainter patchPainter(&patch);
+                patchPainter.setCompositionMode(QPainter::CompositionMode_Multiply);
+                patchPainter.fillRect(patch.rect(), m_highlightColor);
+                patchPainter.end();
+                const QRectF target(
+                    (vp.x + local.x()) / dpr, (vp.y + local.y()) / dpr,
+                    local.width() / dpr, local.height() / dpr);
+                painter.drawImage(target, patch);
+                break;
+            }
+        }
+        syo_overlay_free(highlights);
+    }
+
     fillOverlay(syo_app_focus(m_app), m_focusColor);
     fillOverlay(syo_app_selection(m_app), m_visualColor);
 }

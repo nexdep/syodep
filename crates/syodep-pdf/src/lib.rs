@@ -1965,16 +1965,24 @@ fn convert_outline(item: mupdf::Outline) -> OutlineItem {
 
 /// A highlight to embed in a PDF: the rectangles it covers on one page, in page
 /// points with the origin at the top left (the same space [`Cell::bbox`] uses),
-/// and its colour.
+/// its colour, and its opacity.
 ///
 /// One value per page: PDF highlight annotations belong to a page, so a
 /// selection spanning several pages becomes several of these.
+///
+/// `opacity` matters more here than it would look: a PDF reader always paints
+/// a highlight with Multiply blending, so leaving `/CA` at its default (fully
+/// opaque) makes a saved highlight noticeably more saturated than the same
+/// colour previewed at less than full opacity before saving. Writing the same
+/// opacity the app previewed with is what keeps the two in agreement.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HighlightAnnotation {
     pub page: usize,
     pub rects: Vec<Rect>,
     /// Colour as 8-bit RGB.
     pub color: (u8, u8, u8),
+    /// Constant alpha (`/CA`), 0.0 (invisible) to 1.0 (opaque).
+    pub opacity: f32,
 }
 
 /// Copy the PDF at `src` to `out`, adding `highlights` as PDF `Highlight`
@@ -2097,6 +2105,13 @@ fn add_highlight_annotation(
         });
     }
     dict.dict_put("QuadPoints", quads)?;
+
+    // `mupdf` 0.7 exposes no opacity setter either (`pdf_set_annot_opacity`
+    // exists only in C), and the default `/CA` — fully opaque — is exactly
+    // what would make a saved highlight look stronger than the same colour
+    // previewed at less than full opacity, since every reader paints a
+    // highlight with Multiply blending regardless of what wrote it.
+    dict.dict_put("CA", doc.new_real(highlight.opacity.clamp(0.0, 1.0))?)?;
 
     // MuPDF derives a highlight's /Rect from its quads when it synthesises the
     // appearance, but a reader that does not synthesise still needs a /Rect that
@@ -4239,6 +4254,7 @@ mod tests {
                 page: 0,
                 rects: vec![bbox],
                 color: YELLOW,
+                opacity: 1.0,
             }],
         )
         .unwrap();
@@ -4265,11 +4281,13 @@ mod tests {
                     page: 0,
                     rects: vec![bbox, second],
                     color: YELLOW,
+                    opacity: 1.0,
                 },
                 HighlightAnnotation {
                     page: 1,
                     rects: vec![bbox],
                     color: YELLOW,
+                    opacity: 1.0,
                 },
             ],
         )
@@ -4292,6 +4310,55 @@ mod tests {
             }
         }
         assert_eq!(page_highlights(&out, 1).unwrap().len(), 1);
+    }
+
+    /// The `/CA` (constant alpha) of the first `Highlight` annotation on
+    /// `page`, read the same way [`page_highlights`] reads `/QuadPoints`.
+    ///
+    /// Test-only: opacity isn't part of `page_highlights`'s public return
+    /// value because nothing outside this module needs it yet.
+    fn saved_highlight_opacity(path: &Path, page: usize) -> f32 {
+        let path_str = path.to_string_lossy();
+        let doc = mupdf::Document::open(path_str.as_ref()).unwrap();
+        let pdf = mupdf::pdf::PdfDocument::try_from(doc).unwrap();
+        let loaded = pdf.load_page(page as i32).unwrap();
+        let pdf_page = mupdf::pdf::PdfPage::try_from(loaded).unwrap();
+        let annots = resolved_annots(&pdf_page).unwrap().unwrap();
+        for index in 0..annots.len().unwrap_or(0) {
+            let dict = annot_dict(&pdf_page, index).unwrap();
+            let is_highlight = dict
+                .get_dict("Subtype")
+                .unwrap()
+                .and_then(|s| s.as_name().ok().map(|n| n == b"Highlight"))
+                .unwrap_or(false);
+            if is_highlight {
+                return dict.get_dict("CA").unwrap().unwrap().as_float().unwrap();
+            }
+        }
+        panic!("no highlight annotation on page {page}");
+    }
+
+    #[test]
+    fn a_highlights_opacity_is_written_as_constant_alpha() {
+        // A reader always paints a highlight with Multiply blending, so this
+        // is what keeps a saved highlight from looking stronger than the same
+        // colour previewed at less than full opacity: the app's opacity has
+        // to reach the PDF, not just the colour.
+        let dir = tempfile::tempdir().unwrap();
+        let (src, bbox) = highlight_fixture(dir.path());
+        let out = dir.path().join("out.pdf");
+        write_highlights(
+            &src,
+            &out,
+            &[HighlightAnnotation {
+                page: 0,
+                rects: vec![bbox],
+                color: YELLOW,
+                opacity: 0.55,
+            }],
+        )
+        .unwrap();
+        assert!((saved_highlight_opacity(&out, 0) - 0.55).abs() < 0.01);
     }
 
     #[test]
@@ -4320,6 +4387,7 @@ mod tests {
                 page: 0,
                 rects: vec![bbox],
                 color: YELLOW,
+                opacity: 1.0,
             }],
         )
         .unwrap();
@@ -4353,6 +4421,7 @@ mod tests {
                 page: 0,
                 rects: vec![bbox],
                 color: YELLOW,
+                opacity: 1.0,
             }],
         )
         .unwrap();
@@ -4403,6 +4472,7 @@ mod tests {
                 page: 9,
                 rects: vec![bbox],
                 color: YELLOW,
+                opacity: 1.0,
             }],
         )
         .unwrap_err();

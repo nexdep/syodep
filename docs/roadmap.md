@@ -15,7 +15,7 @@ Status legend: ✅ done · 🚧 in progress · ⬜ planned
 - ✅ SQLite database with versioned migrations
 - ✅ Save/restore last reading position (fingerprint-keyed)
 - ✅ Render cache (byte-bounded LRU)
-- ✅ Tests (461), CI (lint, Linux+Windows tests, Qt build, smoke test,
+- ✅ Tests (462), CI (lint, Linux+Windows tests, Qt build, smoke test,
   docs checks), documentation set
 
 ## Phase 2 — selection, annotation, search ⬜

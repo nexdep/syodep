@@ -499,7 +499,17 @@ impl App {
     }
 
     /// The stored highlights as one annotation per (highlight, page).
+    ///
+    /// Opacity comes from the *current* `[view] highlight_opacity`, the same
+    /// place the live overlay reads it from, rather than being captured per
+    /// highlight the way colour is: a PDF reader always paints a highlight
+    /// with Multiply blending, so matching both blend mode and opacity
+    /// between the overlay and the saved `/CA` is what keeps a highlight
+    /// looking the same before and after saving. Config has no hot-reload
+    /// yet, so within one session this is indistinguishable from capturing
+    /// it at creation time.
     fn highlight_annotations(&self) -> Vec<HighlightAnnotation> {
+        let opacity = self.config.view.highlight_opacity.clamp(0.0, 1.0);
         let mut out = Vec::new();
         for highlight in &self.highlights {
             let color = syodep_config::parse_hex_color(&highlight.color)
@@ -524,6 +534,7 @@ impl App {
                             page: rect.page,
                             rects: vec![rect_out],
                             color,
+                            opacity,
                         });
                     }
                 }

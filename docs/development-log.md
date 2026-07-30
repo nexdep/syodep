@@ -7,6 +7,74 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-07-30 — A saved highlight now looks the same as its preview
+
+The 0.11.0 release notes flagged this as a known, accepted gap: "a saved
+highlight will not look pixel-identical to the alpha-blended overlay it
+replaces," because a PDF reader always paints a `Highlight` annotation with
+Multiply blending while the live overlay used plain alpha blending at
+`highlight_opacity`. Multiply alone has no way to fade a colour, so the
+saved version came out stronger than whatever the overlay had previewed.
+Closing that gap turned out to need two independent fixes, one on each side.
+
+### The PDF side: opacity was never being written at all
+
+`mupdf` 0.7 exposes no `/CA` (constant alpha) setter — `pdf_set_annot_opacity`
+exists only in the C API — and a missing `/CA` defaults to fully opaque. So
+every highlight was saved at full strength regardless of `highlight_opacity`,
+the same gap `/QuadPoints` had before it was written by hand into the
+annotation dictionary. `HighlightAnnotation` gained an `opacity` field, and
+`add_highlight_annotation` now writes it into `/CA` the same way it already
+writes the quads — before `page.update()` synthesises the appearance stream,
+so the generated appearance actually picks it up (`pdf_write_highlight_appearance`
+reads opacity from the annotation, same as it reads the blend mode). Opacity
+comes from the *current* config rather than being captured per highlight the
+way colour is, since config has no hot-reload yet; the two are indistinguishable
+within one session, and this avoids a schema migration for a preview-matching
+fix.
+
+### The screen side: `QOpenGLWidget` cannot be trusted with Multiply
+
+Making the live overlay preview the same blend seemed like the obvious other
+half — `painter.setCompositionMode(QPainter::CompositionMode_Multiply)` before
+filling the highlight path. It compiled, and it painted the highlighted word
+solid **black**. `QOpenGLWidget` paints through the GL paint engine, and the
+SVG/PDF-spec blend modes beyond `SourceOver` depend on an OpenGL
+blend-equation extension that is not universal; where it's missing, Qt does
+not fall back to a correct result. This was caught before it shipped by
+testing in this environment, but the underlying risk (driver/GPU dependent
+correctness) would exist on real hardware too, not just here.
+
+The fix composites highlights differently from focus/visual: for each
+highlighted rectangle, copy the covered region of the already-rendered page
+image, run `QPainter::CompositionMode_Multiply` on *that* — a `QImage`, so
+the always-correct raster paint engine handles it — then draw the composited
+result like an ordinary image. No GL-side blend mode is ever used. Verified
+directly: a raster `QImage` probe filling `highlight_color` at `0.55` opacity
+with Multiply over white paper produces exactly `(255, 238, 171)` (matching
+the closed-form blend-mode-with-alpha formula by hand), and over a black
+pixel produces pure black unchanged — a highlighter that tints the page but
+never obscures the text under it. Comparing actual screenshots before and
+after a save, the same background pixel came out `(255, 238, 171)` live and
+`(255, 237, 170)` once saved and reloaded — a one-unit rounding difference,
+not a colour mismatch.
+
+### Tests
+
+`syodep-pdf`: `a_highlights_opacity_is_written_as_constant_alpha`, reading
+`/CA` back the same way `page_highlights` reads `/QuadPoints`. The six
+existing `HighlightAnnotation` literals across `write_highlights`'s tests
+gained an explicit `opacity` field (129 pdf tests, up from 128; 462 total,
+up from 461). The Qt-side fix has no automated test — there is no headless
+harness for pixel output in this repo — and was instead verified by hand:
+built a minimal standalone `QOpenGLWidget` reproduction of the black-fill bug
+to confirm the cause, then a `QImage`-only probe (no GL context needed) to
+confirm the raster compositing math before wiring it into the real widget,
+then drove the actual app under Xvfb to compare a live preview screenshot
+against a saved-and-reloaded one pixel by pixel.
+
+---
+
 ## 2026-07-30 — Margin line numbers, and headers that swap sides
 
 Two more kinds of page furniture, prompted by a real manuscript-review PDF:

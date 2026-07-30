@@ -262,11 +262,12 @@ carrying it. Cost is nothing extra — both signals come from the extraction pas
 as headings' do.
 
 **Decision — highlight annotations are written through a second, short-lived
-document handle, and their geometry goes in by hand:** `write_highlights(src,
-out, …)` is a free function that opens its own `PdfDocument`, so it never touches
-the caller's live document (which is busy rendering, and which
-`PdfDocument::try_from` would consume by value) and a failed write cannot leave
-that document half-annotated. Two things about the geometry are not obvious.
+document handle, and their geometry and opacity go in by hand:**
+`write_highlights(src, out, …)` is a free function that opens its own
+`PdfDocument`, so it never touches the caller's live document (which is busy
+rendering, and which `PdfDocument::try_from` would consume by value) and a
+failed write cannot leave that document half-annotated. Three things about the
+annotation dictionary are not obvious.
 `PdfAnnotation::set_rect` *raises* for a highlight — MuPDF lists the subtypes
 whose `/Rect` is settable and computes a quad-point annotation's rect from its
 `/QuadPoints` instead — and the `mupdf` crate exposes no quad-point setter at all.
@@ -274,10 +275,18 @@ So the quads are written straight into the annotation's dictionary, reached
 through the page's `/Annots` at the index recorded *before* the annotation was
 created (rather than assuming it is the last one). They are transformed by the
 inverse page CTM, which is what `pdf_set_annot_quad_points` does internally and
-what keeps rotated pages correct, where a bare `height - y` would not. Finally
-`page.update()` must come *after* the dictionary edit: it synthesises the
-appearance stream, which is what makes the highlight visible in every reader,
-including our own renderer (`render_page` runs annotations).
+what keeps rotated pages correct, where a bare `height - y` would not.
+Opacity has the identical gap: `mupdf` exposes no `/CA` setter either
+(`pdf_set_annot_opacity` exists only in C, and a missing `/CA` defaults to
+fully opaque), so `HighlightAnnotation::opacity` is written the same way the
+quads are — straight into the dictionary — using the *current*
+`[view] highlight_opacity` rather than a value captured per highlight the way
+colour is: a PDF reader always paints a highlight with Multiply blending, so
+without this every saved highlight would be full-strength regardless of what
+the overlay previewed, since Multiply alone has no notion of fading a colour.
+Finally `page.update()` must come *after* both dictionary edits: it
+synthesises the appearance stream, which is what makes the highlight visible
+in every reader, including our own renderer (`render_page` runs annotations).
 
 Embedded highlights cannot disturb the content layer: text extraction goes
 through `fz_new_stext_page_from_page`, which calls `fz_run_page_contents` and so
@@ -343,11 +352,18 @@ Five small components; intentionally boring:
   GL-backed surface, and fills the overlay rectangles the core reports —
   `syo_app_focus`, `syo_app_selection`, `syo_app_highlights`, each a set of
   screen rects in canvas pixels, at most one of the first two ever valid at
-  once — on top, one `QPainterPath` per overlay so overlapping rects blend
-  once. It keeps a tiny per-page `QImage` cache only to avoid re-copying
-  bitmaps across the FFI every repaint (cleared on a save's `reload` effect,
-  or on opening a different document); the real cache is in the core. Tiled
-  GL texture rendering is planned for phase 3 (roadmap).
+  once — on top. Focus and visual go into one `QPainterPath` each so
+  overlapping rects blend once, then a single plain-alpha fill. Highlights are
+  different: each rectangle is composited with Multiply blending onto a copy
+  of the page pixels it covers (a `QImage`, so the always-correct raster paint
+  engine does the blending) before being drawn, because `QOpenGLWidget`'s own
+  GL paint engine cannot be trusted with that composition mode — confirmed by
+  testing, where a GPU/driver without the needed blend-equation extension
+  painted solid black instead of blending at all. It keeps a tiny per-page
+  `QImage` cache only to avoid re-copying bitmaps across the FFI every repaint
+  (cleared on a save's `reload` effect, or on opening a different document);
+  the real cache is in the core. Tiled GL texture rendering is planned for
+  phase 3 (roadmap).
 - `MainWindow` owns the `SyoApp*` handle, the status label and the native
   file dialog, and accepts PDFs dropped onto the window. The canvas fills the
   window but leaves `acceptDrops()` false, so Qt delivers drag events to the

@@ -134,9 +134,16 @@ The defaults are mid-tone colours at `0.55` opacity, which over a white page
 blend to about `#a5c8e8` (focus) and `#bfbfbf` (selection) — clearly visible at
 a glance while leaving the text under them fully legible. The highlight
 default is the classic highlighter yellow, `#ffe066`. Lower the opacity for a
-fainter tint, or raise it towards `1.0` for a solid block. `highlight_opacity`
-only affects syodep's own overlay — a highlight saved into the PDF is painted
-by the reader with Multiply blending, which has no opacity of its own.
+fainter tint, or raise it towards `1.0` for a solid block.
+
+`highlight_opacity` also carries over into a saved PDF: a highlight
+annotation is always painted with Multiply blending (every reader does this,
+not just syodep's own overlay), so the same opacity is written into the
+annotation's constant alpha (`/CA`) — otherwise a highlight previewed at less
+than full opacity would come out stronger once saved, since Multiply blending
+alone does not fade a colour, only opacity does. The live overlay previews
+this faithfully by compositing with the same blend before drawing, rather
+than the plain alpha blend `focus_color`/`visual_color` use.
 
 An unparseable colour falls back to its default and reports the problem in the
 status line rather than leaving the overlay invisible. Only `#rrggbb` is
