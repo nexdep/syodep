@@ -74,7 +74,7 @@ focused.
 |---|---|
 | `open_file` | open the native file picker and load the chosen PDF |
 | `save_document` | overwrite the open PDF with its highlights embedded |
-| `quit` | save the reading position and quit |
+| `quit` | save the reading position and quit; asks first if there are highlights not yet saved to the PDF |
 | `cancel` | clear pending count/sequence input (bound to `<Esc>`; Esc also clears pending input implicitly mid-sequence) |
 
 ### `save_document`
@@ -96,11 +96,30 @@ Two consequences worth knowing:
   hash as part of the save, so the reading position carries over.
 - Once the highlights are in the PDF, syodep stops drawing them as an overlay and
   its own records of them are dropped — the renderer draws the annotations
-  themselves, and drawing both would paint them twice. They will look slightly
-  different afterwards, because a PDF highlight is painted with Multiply
-  blending rather than syodep's `highlight_opacity`.
+  themselves, and drawing both would paint them twice. They keep the same
+  colour and opacity: `highlight_opacity` is written into the saved
+  annotation, and the live overlay already previews it with the same Multiply
+  blending every reader uses for a highlight, so a highlight looks the same
+  before and after saving.
 
 Saving with nothing to save leaves the file completely alone.
+
+### `quit`
+
+Bound to `<leader>q` — bare `q` does nothing, so a single careless keystroke
+cannot lose anything. Like `save_document`, a highlight still being placed is
+kept first, as `a` would.
+
+If quitting would leave any highlight not yet embedded in the PDF — one just
+committed, or one still being placed — the shell asks first: **Save & Quit**,
+**Discard & Quit**, or **Cancel**. "Discard" does not delete anything: the
+highlight is already recorded in the database, independently of the PDF file,
+and simply comes back as a pending overlay the next time this document is
+opened. A failed save chosen from this dialog behaves exactly like a failed
+`save_document` — the document stays open and the error appears in the status
+bar.
+
+The window's own close button (and Alt+F4) is protected the same way.
 
 ## Planned (not yet implemented)
 

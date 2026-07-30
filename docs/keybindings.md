@@ -121,7 +121,7 @@ Application:
 |---|---|
 | `<leader>o` | `open_file` — open the native file picker |
 | `<leader>w` | `save_document` — overwrite the PDF with the highlights embedded |
-| `q` | `quit` |
+| `<leader>q` | `quit` — save the reading position and quit; asks first if there are highlights not yet saved to the PDF |
 | `<Esc>` | `cancel` |
 
 The mouse wheel (and horizontal trackpad scrolling) also scrolls the view;
@@ -183,8 +183,9 @@ already focused on a word highlights the line you are on — it does not move
 you. There is one position and the scope reinterprets it.
 
 The view scrolls to keep the highlight visible, and counts work (`5l`, `3j`,
-`2w`). Every other binding (page scroll, page navigation, zoom, `q`, `o`, …)
-still works in focus mode — only `hjkl`/`w`/`e`/`b`/`<Esc>` change meaning.
+`2w`). Every other binding (page scroll, page navigation, zoom, `<leader>q`,
+`<leader>o`, …) still works in focus mode — only `hjkl`/`w`/`e`/`b`/`<Esc>`
+change meaning.
 Scroll and page-jump commands additionally carry the highlight to the top of
 the newly visible content; zoom leaves it in place. The status bar shows
 `-- FOCUS (word) --` with the highlighted line and column. See

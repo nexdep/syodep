@@ -44,6 +44,9 @@ signals:
     void coreStateChanged();
     void quitRequested();
     void openFileRequested();
+    // Quitting would lose highlights not yet embedded in the PDF; the shell
+    // should ask before actually quitting.
+    void confirmQuitRequested();
 
 protected:
     void paintGL() override;

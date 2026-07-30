@@ -264,7 +264,13 @@ pub fn default_keybindings() -> BTreeMap<String, String> {
         // `w` for write, as in `:w`. On the normal table so it is inherited by
         // every mode: saving is not a modal operation.
         ("<leader>w", "save_document"),
-        ("q", "quit"),
+        // `q` for quit, on the leader like `o`/`w` above: one careless bare
+        // keystroke used to quit immediately and could lose highlights not
+        // yet embedded in the PDF with no chance to notice. Quitting now
+        // confirms first if it would lose any; moving the binding to the
+        // leader gives it the same "deliberate" cost as the other leader
+        // bindings.
+        ("<leader>q", "quit"),
         ("<Esc>", "cancel"),
     ]
     .into_iter()

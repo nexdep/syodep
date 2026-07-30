@@ -56,6 +56,11 @@ pub struct Effects {
     /// holding are stale even though the layout and zoom did not change. Only a
     /// save sets this today.
     pub reload: bool,
+    /// Quitting would lose highlights not yet embedded in the PDF. The shell
+    /// should ask (Save & Quit / Discard & Quit / Cancel) and call
+    /// [`App::save_and_quit`] or [`App::quit_discarding_highlights`] with the
+    /// answer, rather than quitting outright.
+    pub confirm_quit: bool,
 }
 
 impl Effects {
@@ -74,6 +79,7 @@ impl Effects {
             quit: self.quit || other.quit,
             open_file_dialog: self.open_file_dialog || other.open_file_dialog,
             reload: self.reload || other.reload,
+            confirm_quit: self.confirm_quit || other.confirm_quit,
             // Not a request like the others: it describes the state left
             // behind, so the later value wins rather than OR-ing.
             pending_input: other.pending_input,
@@ -410,6 +416,45 @@ impl App {
         }
     }
 
+    /// Whether quitting now would leave highlights not yet embedded in the
+    /// PDF — either already committed (`self.highlights`) or still being
+    /// placed. Read-only, unlike [`Command::Quit`]: never commits an
+    /// in-progress highlight, so a caller (the window-close path) can ask
+    /// "should I warn?" with no side effects.
+    pub fn has_unsaved_highlights(&self) -> bool {
+        !self.highlights.is_empty() || self.has_pending_highlight()
+    }
+
+    /// Quit without embedding unsaved highlights into the PDF. Nothing is
+    /// deleted — they are already rows in `highlights`/SQLite, persisted as
+    /// they were committed — so they simply reappear as pending overlays next
+    /// time this document is opened. Used both when [`Command::Quit`] finds
+    /// nothing to confirm, and as the "Discard & Quit" dialog answer.
+    pub fn quit_discarding_highlights(&mut self) -> Effects {
+        self.save_position();
+        Effects {
+            quit: true,
+            ..Effects::default()
+        }
+    }
+
+    /// Embed unsaved highlights into the PDF, then quit — but only if the
+    /// save succeeds ([`App::save_document`]'s `reload: true` is the existing
+    /// success signal). On failure this returns exactly what a failed save
+    /// returns: `quit` stays false, the document stays open, `last_error` is
+    /// set.
+    pub fn save_and_quit(&mut self) -> Effects {
+        let effects = self.save_document();
+        if effects.reload {
+            self.save_position();
+            return Effects {
+                quit: true,
+                ..effects
+            };
+        }
+        effects
+    }
+
     /// Overwrite the open PDF with its highlights embedded as PDF annotations.
     ///
     /// The file is rewritten beside itself and renamed over the original, so an
@@ -643,7 +688,7 @@ impl App {
                 KeyOutcome::Unmatched => Effects::redraw(),
                 KeyOutcome::Command { command, count } => self.execute(command, count),
             });
-            if effects.quit {
+            if effects.quit || effects.confirm_quit {
                 break;
             }
             // Re-select the keymap each pass: the command just run may have
@@ -680,10 +725,16 @@ impl App {
 
         match command {
             Command::Quit => {
-                self.save_position();
+                self.store_pending_highlight();
+                if self.mode == Mode::Highlight {
+                    self.mode = Mode::Visual;
+                }
+                if self.highlights.is_empty() {
+                    return self.quit_discarding_highlights();
+                }
                 return Effects {
-                    quit: true,
-                    ..Effects::default()
+                    confirm_quit: true,
+                    ..Effects::redraw()
                 };
             }
             Command::OpenFile => {
@@ -3382,7 +3433,7 @@ mod tests {
     }
 
     #[test]
-    fn scroll_commands_move_and_quit_reports_effect() {
+    fn scroll_commands_move() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_doc(dir.path(), 3);
         let y0 = 0.0;
@@ -3391,9 +3442,6 @@ mod tests {
         assert!(scrolled > y0);
         press(&mut app, "5k");
         assert_eq!(app.session.as_ref().unwrap().view.scroll().1, 0.0);
-
-        let effects = press(&mut app, "q");
-        assert!(effects.quit);
     }
 
     #[test]
@@ -6676,5 +6724,99 @@ mod tests {
             warnings.iter().any(|w| w.contains("leader")),
             "{warnings:?}"
         );
+    }
+
+    // ---- Quit -------------------------------------------------------------
+
+    #[test]
+    fn quit_with_no_highlights_quits_immediately() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_doc(dir.path(), 1);
+        let effects = press(&mut app, "<Space>q");
+        assert!(effects.quit);
+        assert!(!effects.confirm_quit);
+    }
+
+    #[test]
+    fn quit_with_unsaved_highlights_asks_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma"]);
+        press(&mut app, "cw");
+        press(&mut app, "aa");
+        assert_eq!(app.highlights().len(), 1);
+
+        let effects = press(&mut app, "<Space>q");
+        assert!(!effects.quit);
+        assert!(effects.confirm_quit);
+        assert!(app.has_document(), "still open");
+        assert_eq!(app.highlights().len(), 1, "nothing discarded");
+    }
+
+    #[test]
+    fn quit_commits_a_pending_highlight_before_deciding() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma"]);
+        press(&mut app, "cw");
+        press(&mut app, "a"); // enter highlight mode, do not commit yet
+        assert!(app.has_pending_highlight());
+
+        let effects = press(&mut app, "<Space>q");
+        assert!(effects.confirm_quit);
+        assert_eq!(app.mode(), Mode::Visual, "the mode fixup ran");
+        assert!(!app.has_pending_highlight(), "the highlight was committed");
+        assert_eq!(app.highlights().len(), 1);
+    }
+
+    #[test]
+    fn quit_discarding_highlights_always_quits_and_leaves_highlights_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma"]);
+        press(&mut app, "cw");
+        press(&mut app, "aa");
+        assert_eq!(app.highlights().len(), 1);
+
+        let effects = app.quit_discarding_highlights();
+        assert!(effects.quit);
+        assert_eq!(
+            app.highlights().len(),
+            1,
+            "discarding does not delete the highlight, only skips embedding it"
+        );
+    }
+
+    #[test]
+    fn save_and_quit_quits_when_the_save_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma"]);
+        let path = app.document_path().unwrap().to_owned();
+        press(&mut app, "cw");
+        press(&mut app, "aa");
+
+        let effects = app.save_and_quit();
+        assert!(effects.quit);
+        assert!(effects.reload);
+        assert!(app.highlights().is_empty());
+        assert_eq!(syodep_pdf::page_highlights(&path, 0).unwrap().len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_and_quit_does_not_quit_when_the_save_fails() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma"]);
+        press(&mut app, "cw");
+        press(&mut app, "aa");
+
+        let original = std::fs::metadata(dir.path()).unwrap().permissions();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+        let effects = app.save_and_quit();
+        std::fs::set_permissions(dir.path(), original).unwrap();
+
+        assert!(!effects.quit);
+        assert!(app.last_error().is_some());
+        assert_eq!(app.highlights().len(), 1, "the highlight is still there");
+        assert!(app.has_document(), "still open");
     }
 }

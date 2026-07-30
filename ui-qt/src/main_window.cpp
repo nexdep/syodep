@@ -1,10 +1,13 @@
 #include "main_window.h"
 
+#include <QCloseEvent>
 #include <QDragEnterEvent>
 #include <QDropEvent>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QMessageBox>
 #include <QMimeData>
+#include <QPushButton>
 #include <QStatusBar>
 #include <QUrl>
 
@@ -75,6 +78,7 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_canvas, &CanvasWidget::coreStateChanged, this, &MainWindow::refreshStatus);
     connect(m_canvas, &CanvasWidget::quitRequested, this, &MainWindow::close);
     connect(m_canvas, &CanvasWidget::openFileRequested, this, &MainWindow::showOpenDialog);
+    connect(m_canvas, &CanvasWidget::confirmQuitRequested, this, &MainWindow::onConfirmQuitRequested);
 
     const QString warnings = takeSyoString(syo_app_startup_warnings(m_app));
     if (!warnings.isEmpty())
@@ -134,6 +138,64 @@ void MainWindow::dropEvent(QDropEvent *event)
 void MainWindow::refreshStatus()
 {
     m_status->setText(takeSyoString(syo_app_status_text(m_app)));
+}
+
+bool MainWindow::confirmQuit()
+{
+    if (m_closeConfirmed)
+        return true;
+
+    if (!syo_app_has_unsaved_highlights(m_app)) {
+        // Nothing to discard, but this still saves the reading position
+        // eagerly rather than relying on an implicit save elsewhere.
+        syo_app_quit_discard(m_app);
+        m_closeConfirmed = true;
+        return true;
+    }
+
+    QMessageBox box(this);
+    box.setIcon(QMessageBox::Warning);
+    box.setWindowTitle(tr("Quit"));
+    box.setText(tr("This document has highlights that have not been saved "
+                    "into the PDF yet."));
+    QPushButton *saveBtn = box.addButton(tr("Save && Quit"), QMessageBox::AcceptRole);
+    QPushButton *discardBtn = box.addButton(tr("Discard && Quit"), QMessageBox::DestructiveRole);
+    box.addButton(QMessageBox::Cancel);
+    box.setDefaultButton(saveBtn);
+    box.exec();
+
+    uint32_t bits = 0;
+    if (box.clickedButton() == saveBtn)
+        bits = syo_app_quit_save(m_app);
+    else if (box.clickedButton() == discardBtn)
+        bits = syo_app_quit_discard(m_app);
+    else
+        return false; // Cancel
+
+    if (!(bits & SYO_EFFECT_QUIT)) {
+        // Save failed: surface it like openDocument() does. Not via
+        // CanvasWidget::applyEffects (private, and its QUIT branch would be
+        // wrong here since bits never has it set on this path).
+        m_canvas->update();
+        refreshStatus();
+        return false;
+    }
+    m_closeConfirmed = true;
+    return true;
+}
+
+void MainWindow::closeEvent(QCloseEvent *event)
+{
+    if (confirmQuit())
+        event->accept();
+    else
+        event->ignore();
+}
+
+void MainWindow::onConfirmQuitRequested()
+{
+    if (confirmQuit())
+        close(); // re-enters closeEvent, short-circuited by m_closeConfirmed
 }
 
 void MainWindow::showOpenDialog()

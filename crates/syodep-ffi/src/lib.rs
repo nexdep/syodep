@@ -144,6 +144,11 @@ pub const SYO_EFFECT_PENDING_INPUT: u32 = 8;
 /// shell is caching are stale even though the layout and zoom are unchanged, so
 /// it must drop them.
 pub const SYO_EFFECT_RELOAD: u32 = 16;
+/// Quitting would lose highlights not yet embedded in the PDF. The shell
+/// should ask (Save & Quit / Discard & Quit / Cancel) and call
+/// `syo_app_quit_save` or `syo_app_quit_discard` with the answer, rather than
+/// quitting outright.
+pub const SYO_EFFECT_CONFIRM_QUIT: u32 = 32;
 
 fn effects_to_bits(effects: Effects) -> u32 {
     let mut bits = 0;
@@ -161,6 +166,9 @@ fn effects_to_bits(effects: Effects) -> u32 {
     }
     if effects.reload {
         bits |= SYO_EFFECT_RELOAD;
+    }
+    if effects.confirm_quit {
+        bits |= SYO_EFFECT_CONFIRM_QUIT;
     }
     bits
 }
@@ -397,6 +405,53 @@ pub unsafe extern "C" fn syo_app_key_event(app: *mut SyoApp, key: *const c_char)
             Ok([chord]) => effects_to_bits(app.app.handle_key(*chord)),
             _ => 0,
         }
+    }))
+    .unwrap_or(0)
+}
+
+/// Whether closing now would lose highlights not yet embedded in the PDF.
+/// Read-only: used by the window-close path to decide whether to ask at all,
+/// without the side effects a real quit-key press has (it never commits an
+/// in-progress highlight).
+///
+/// # Safety
+/// `app` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn syo_app_has_unsaved_highlights(app: *const SyoApp) -> bool {
+    unsafe { app.as_ref() }
+        .map(|a| a.app.has_unsaved_highlights())
+        .unwrap_or(false)
+}
+
+/// "Discard & Quit": quit without embedding unsaved highlights into the PDF.
+/// Returns SYO_EFFECT_* bits (always includes SYO_EFFECT_QUIT).
+///
+/// # Safety
+/// `app` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn syo_app_quit_discard(app: *mut SyoApp) -> u32 {
+    let Some(app) = (unsafe { app.as_mut() }) else {
+        return 0;
+    };
+    catch_unwind(AssertUnwindSafe(|| {
+        effects_to_bits(app.app.quit_discarding_highlights())
+    }))
+    .unwrap_or(0)
+}
+
+/// "Save & Quit": embed unsaved highlights into the PDF, then quit. Returns
+/// SYO_EFFECT_* bits — check SYO_EFFECT_QUIT: on failure the document stays
+/// open and `syo_app_status_text` explains why.
+///
+/// # Safety
+/// `app` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn syo_app_quit_save(app: *mut SyoApp) -> u32 {
+    let Some(app) = (unsafe { app.as_mut() }) else {
+        return 0;
+    };
+    catch_unwind(AssertUnwindSafe(|| {
+        effects_to_bits(app.app.save_and_quit())
     }))
     .unwrap_or(0)
 }
@@ -886,14 +941,16 @@ mod tests {
             assert!(text.contains("doc.pdf"), "{text}");
             assert!(text.contains("[1/2]"), "{text}");
 
-            // Key events: scroll, then quit.
+            // Key events: scroll, then quit (`<leader>q`, a two-key sequence:
+            // no highlights, so it quits immediately with no confirmation).
             let j = CString::new("j").unwrap();
             assert_eq!(syo_app_key_event(app, j.as_ptr()), SYO_EFFECT_REDRAW);
+            let leader = CString::new("<Space>").unwrap();
             let q = CString::new("q").unwrap();
-            assert_eq!(
-                syo_app_key_event(app, q.as_ptr()) & SYO_EFFECT_QUIT,
-                SYO_EFFECT_QUIT
-            );
+            syo_app_key_event(app, leader.as_ptr());
+            let quit_bits = syo_app_key_event(app, q.as_ptr());
+            assert_eq!(quit_bits & SYO_EFFECT_QUIT, SYO_EFFECT_QUIT);
+            assert_eq!(quit_bits & SYO_EFFECT_CONFIRM_QUIT, 0);
 
             // Visible pages.
             let mut pages = [SyoVisiblePage {
@@ -989,6 +1046,58 @@ mod tests {
             let bad = syo_app_render_page(app, 99);
             assert!(bad.is_null());
 
+            syo_app_free(app);
+        }
+    }
+
+    /// The quit-confirmation surface: the query flips true once a highlight
+    /// is committed, and each answer function does what it says.
+    #[test]
+    fn quit_confirmation_surface() {
+        let dir = tempfile::tempdir().unwrap();
+        let pdf_path = dir.path().join("doc.pdf");
+        std::fs::write(
+            &pdf_path,
+            syodep_pdf::test_support::pdf_with_pages(&["alpha beta gamma"]),
+        )
+        .unwrap();
+        let commit_highlight = |app: *mut SyoApp| unsafe {
+            for key in ["c", "w", "a", "a"] {
+                let c_key = CString::new(key).unwrap();
+                syo_app_key_event(app, c_key.as_ptr());
+            }
+        };
+
+        unsafe {
+            // Discard & Quit.
+            let db_path =
+                CString::new(dir.path().join("discard.sqlite3").display().to_string()).unwrap();
+            let app = syo_app_new(std::ptr::null(), db_path.as_ptr());
+            syo_app_set_viewport(app, 595.0, 600.0);
+            let c_pdf = CString::new(pdf_path.display().to_string()).unwrap();
+            assert!(syo_app_open_document(app, c_pdf.as_ptr()));
+
+            assert!(!syo_app_has_unsaved_highlights(app));
+            commit_highlight(app);
+            assert!(syo_app_has_unsaved_highlights(app));
+
+            let bits = syo_app_quit_discard(app);
+            assert_eq!(bits & SYO_EFFECT_QUIT, SYO_EFFECT_QUIT);
+            syo_app_free(app);
+
+            // Save & Quit.
+            let db_path =
+                CString::new(dir.path().join("save.sqlite3").display().to_string()).unwrap();
+            let app = syo_app_new(std::ptr::null(), db_path.as_ptr());
+            syo_app_set_viewport(app, 595.0, 600.0);
+            assert!(syo_app_open_document(app, c_pdf.as_ptr()));
+
+            commit_highlight(app);
+            assert!(syo_app_has_unsaved_highlights(app));
+
+            let bits = syo_app_quit_save(app);
+            assert_eq!(bits & SYO_EFFECT_QUIT, SYO_EFFECT_QUIT);
+            assert!(!syo_app_has_unsaved_highlights(app));
             syo_app_free(app);
         }
     }

@@ -7,6 +7,97 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-07-30 — Quitting now confirms unsaved highlights, and moves to `<leader>q`
+
+Highlight mode lets a highlight live in the session and the SQLite
+`highlights` table without ever being embedded into the PDF bytes — only
+`save_document` (`<leader>w`) does that. Bare `q` quit immediately regardless,
+discarding any such highlight with no warning, and the window's own close
+button (or Alt+F4) was worse: `MainWindow` had no `closeEvent` override at
+all, so it didn't even call `save_position()`. Both are fixed together, since
+protecting only the keyboard path would leave the feature trivially bypassed
+by clicking the window chrome.
+
+### `q` moved behind the leader
+
+Bare `q` is now unbound; `<leader>q` (`<Space>q` by default) is the only way
+to quit, matching `<leader>o`/`<leader>w` — a deliberate two-key cost instead
+of one careless keystroke that could lose unsaved work.
+
+### `Effects::confirm_quit`, not a new `Command`
+
+`Command::Quit` now commits any pending highlight first (the same
+`store_pending_highlight` + mode-fixup pair `save_document` already runs, so
+cancelling the resulting prompt can't strand the app in `Mode::Highlight`
+with nothing pending), then checks `self.highlights`: nothing unsaved quits
+immediately via the new `App::quit_discarding_highlights`; otherwise it
+returns a new `Effects::confirm_quit` bit instead of quitting.
+
+The two dialog answers — `App::save_and_quit` and
+`App::quit_discarding_highlights` — are plain `pub fn`s, not `Command`
+variants. Every existing `Command` has some default binding; these two are
+only ever produced by clicking a dialog button after the core has already
+decided to ask, so they don't fit the keybinding-driven registry, and adding
+them there would obligate a per-mode doc-page entry for something that isn't
+actually rebindable. `App::has_unsaved_highlights` is the read-only query
+behind both entry points; it deliberately never commits an in-progress
+highlight, unlike `Command::Quit` itself, so a caller can ask "should I warn?"
+with no side effects — a real query, not a peek that changes what it's
+looking at.
+
+"Discard" does not delete anything: a highlight is persisted to SQLite as
+soon as it's committed, independent of the PDF file. Discarding only skips
+embedding it this time; it reappears as a pending overlay next time the
+document is opened. That's what makes offering "Discard & Quit" as a
+low-friction default-adjacent option safe.
+
+### The Qt side: `closeEvent`, and a reentrancy trap
+
+`CanvasWidget::applyEffects` falls through on `SYO_EFFECT_CONFIRM_QUIT` rather
+than returning early like it does for `SYO_EFFECT_QUIT` — the confirm branch
+always sets `redraw` (the mode may have just flipped `Highlight → Visual`),
+and the status bar should show that before the modal dialog blocks input.
+
+`MainWindow` gained its first `closeEvent` override and its first
+`QMessageBox` (Save & Quit / Discard & Quit / Cancel), sharing one
+`confirmQuit()` helper with the new `<leader>q` signal path. The window-close
+path is deliberately read-only where the keyboard path is not: pressing
+`<leader>q` is a command invocation and is allowed to auto-commit
+in-progress work (like `save_document` already does), but the X button isn't
+a command the core knows about, so the query it asks must not mutate state as
+a side effect of the OS asking "are you sure" — Cancel has to leave everything
+untouched. The asymmetry is intentional: cancelling a `<leader>q` prompt
+leaves an in-progress highlight already promoted into `self.highlights`
+(mode already flipped to `Visual`), while cancelling a window-close prompt
+leaves it fully untouched, still `Mode::Highlight`.
+
+The nonobvious bug this design avoids: "Discard & Quit" does not clear
+`self.highlights` in the core, so `onConfirmQuitRequested()` calling `close()`
+would re-enter `closeEvent`, see unsaved highlights again, and show the
+dialog a second time — forever, on every Discard. A `m_closeConfirmed` flag
+set once either path resolves short-circuits the second pass.
+
+### Tests
+
+Core: `quit_with_no_highlights_quits_immediately`,
+`quit_with_unsaved_highlights_asks_first`,
+`quit_commits_a_pending_highlight_before_deciding`,
+`quit_discarding_highlights_always_quits_and_leaves_highlights_recorded`,
+`save_and_quit_quits_when_the_save_succeeds`,
+`save_and_quit_does_not_quit_when_the_save_fails` (281 core tests, up from
+275; the old bare-`q` assertion moved out of `scroll_commands_move_and_quit_reports_effect`,
+renamed `scroll_commands_move`, since `q` alone no longer does anything).
+FFI: `quit_confirmation_surface` drives `syo_app_has_unsaved_highlights` /
+`syo_app_quit_discard` / `syo_app_quit_save` through a committed highlight
+(14 ffi tests, up from 13; 469 total, up from 462). No automated coverage for
+the Qt dialog itself — no `QMessageBox` usage or headless dialog harness
+exists in this repo — verified by hand under Xvfb: `<leader>q` and the window
+X button each show the dialog and every button behaves correctly, both quit
+immediately with nothing unsaved, and the Discard path specifically does not
+loop on a second close.
+
+---
+
 ## 2026-07-30 — A saved highlight now looks the same as its preview
 
 The 0.11.0 release notes flagged this as a known, accepted gap: "a saved

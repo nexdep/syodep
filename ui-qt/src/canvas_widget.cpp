@@ -80,6 +80,8 @@ void CanvasWidget::applyEffects(uint32_t effects)
     if (effects & SYO_EFFECT_REDRAW)
         update();
     emit coreStateChanged();
+    if (effects & SYO_EFFECT_CONFIRM_QUIT)
+        emit confirmQuitRequested();
 }
 
 QImage CanvasWidget::pageImage(size_t page)

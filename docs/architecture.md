@@ -405,6 +405,7 @@ Five small components; intentionally boring:
 | 10 | cbindgen-generated header, checked into neither repo nor docs | single source of truth in Rust | ABI freeze for plugins (not planned) |
 | 11 | Modal caret over content geometry (mode-selected keymap) | Vim-like `hjkl` caret without losing `hjkl` scrolling; one stop per image; goal-column vertical motion | always-on caret, or richer text objects (phase 3) |
 | 14 | Atomicity is a property of the content, layered over the motion table rather than built into it | `step_scope` stays the pure per-scope description of a word/line/sentence/paragraph; one wrapper makes every scope treat a table or image as one unit, so counts and all six call sites keep working unchanged | a unit needs per-scope behaviour (then the wrapper becomes a scope arm) |
+| 18 | Quitting with unsaved highlights asks (Save & Quit / Discard & Quit / Cancel) instead of quitting silently or refusing outright | highlights already outlive the session in the database, so "unsaved" only means "not yet embedded in the PDF bytes"; losing that silently on one careless keystroke (or window-manager Alt+F4) was the bug being fixed, and the existing `save_document`/`quit_discarding_highlights` split made the confirm-then-branch trivial to add without a new `Command` | a command palette or scripting API needs to trigger Save & Quit / Discard & Quit outside of the dialog flow (then promote them to `Command` variants) |
 
 ## Sioyek: conceptual inspirations (clean-room)
 
