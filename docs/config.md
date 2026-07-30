@@ -40,6 +40,8 @@ bookmarks, highlights, notes, history. That lives in the SQLite database
 | `focus_opacity` | float | `0.55` | opacity of the focus highlight, `0.0`-`1.0` |
 | `visual_color` | string | `"#8a8a8a"` | highlight for the visual-mode selection, `#rrggbb` |
 | `visual_opacity` | float | `0.55` | opacity of the selection highlight, `0.0`-`1.0` |
+| `highlight_color` | string | `"#ffe066"` | colour of a highlight, `#rrggbb` — also what is written into the PDF on save |
+| `highlight_opacity` | float | `0.55` | opacity of the highlight overlay, `0.0`-`1.0` |
 | `detect_tables` | bool | `true` | treat each detected table as one stop for focus and selection motions |
 | `detect_headings` | bool | `true` | treat each detected heading as one step at sentence and paragraph scope |
 | `detect_equations` | bool | `true` | treat each detected display equation as one step at sentence and paragraph scope |
@@ -148,6 +150,7 @@ open_dir = "/home/me/papers"
 | Option | Type | Default | Meaning |
 |---|---|---|---|
 | `timeout_ms` | integer (ms) | `500` | how long a half-typed key sequence waits before acting on its own; `0` disables the pause |
+| `leader` | string | `"<Space>"` | the key sequence `<leader>` stands for in bindings |
 
 Some keys are both a command and the start of a longer sequence — `c`, `v`, and
 `o` while selecting. Rather than firing eagerly, syodep waits to see whether
@@ -162,9 +165,19 @@ is also a prefix can then only be reached by following it with an unrelated key.
 
 See `docs/keybindings.md` for the full disambiguation rule.
 
+**The leader.** `leader` is the sequence `<leader>` expands to in a binding —
+`<leader>w` is `save_document` by default, so `<Space>` then `w` saves. Expansion
+happens when the config is read, so a leader binding is an ordinary sequence
+afterwards and follows the same prefix and pause rules as `gg`. Any sequence
+works, though a single otherwise-unbound key is the point. An unparseable value
+falls back to `<Space>` with a warning in the status bar, rather than costing you
+every `<leader>` binding you have. `<leader>` itself is not accepted here, so a
+leader cannot refer to itself.
+
 ```toml
 [input]
 timeout_ms = 500
+leader = "<Space>"
 ```
 
 ## `[keys]`
@@ -220,6 +233,27 @@ names.
 ```toml
 [visual_keys]
 "y" = "visual_exit"            # extra binding, only in visual mode
+```
+
+## `[highlight_keys]`
+
+Keybindings that apply only while a **highlight** is pending (entered with `a`
+from focus or visual mode). They overlay the normal `[keys]`.
+
+The defaults are the visual-mode motions bound to *the same commands* —
+`hjkl`/arrows, `w`/`b`/`e`/`s`/`p`, `o`, `oo` and `oc`/`oe`/`ow`/`os`/`op` — since
+a pending highlight is a selection and reshaping it must not be a second
+implementation of reshaping a selection. Only three keys are specific to it: `a`
+(`highlight_commit`) keeps the highlight, and `<Esc>` or `<BS>`
+(`highlight_discard`) throws it away.
+
+`v` and `c` are deliberately absent, so they fall through to `[keys]` and store
+the highlight on the way into the mode they name. See `docs/keybindings.md` and
+`docs/commands-highlight-mode.md`.
+
+```toml
+[highlight_keys]
+"y" = "highlight_commit"       # extra binding, only while highlighting
 ```
 
 ## Planned config sections

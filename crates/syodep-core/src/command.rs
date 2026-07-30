@@ -126,8 +126,22 @@ pub enum Command {
     VisualOtherSentence,
     /// Switch to the other end and set its granularity to paragraphs.
     VisualOtherParagraph,
+    // Highlight mode (a selection on its way to becoming a highlight).
+    //
+    // There is no `highlight_left` and there never will be: reshaping a pending
+    // highlight *is* reshaping a selection, so highlight mode binds the
+    // `visual_*` motions rather than duplicating them.
+    /// Turn the focus highlight or selection into a pending highlight.
+    HighlightEnter,
+    /// Store the pending highlight and return to visual mode, still selected.
+    HighlightCommit,
+    /// Throw the pending highlight away, restoring the mode and selection that
+    /// were in effect when it was started.
+    HighlightDiscard,
     // Application.
     OpenFile,
+    /// Overwrite the open PDF with the highlights embedded in it.
+    SaveDocument,
     Quit,
     /// Clears pending input. Reserved to also dismiss UI state later.
     Cancel,
@@ -195,7 +209,11 @@ pub const ALL_COMMANDS: &[(&str, Command)] = &[
     ("visual_other_line", Command::VisualOtherLine),
     ("visual_other_sentence", Command::VisualOtherSentence),
     ("visual_other_paragraph", Command::VisualOtherParagraph),
+    ("highlight_enter", Command::HighlightEnter),
+    ("highlight_commit", Command::HighlightCommit),
+    ("highlight_discard", Command::HighlightDiscard),
     ("open_file", Command::OpenFile),
+    ("save_document", Command::SaveDocument),
     ("quit", Command::Quit),
     ("cancel", Command::Cancel),
 ];

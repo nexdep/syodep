@@ -34,6 +34,14 @@ focus_opacity = 0.55
 visual_color = "#8a8a8a"
 # Opacity of the selection highlight, 0.0 to 1.0.
 visual_opacity = 0.55
+# Colour of a highlight (#rrggbb), while you place it and once it is
+# stored. This is also the colour written into the PDF by the save
+# command, so it is what other readers show too.
+highlight_color = "#ffe066"
+# Opacity of the highlight overlay, 0.0 to 1.0. Applies to syodep's own
+# overlay only: a highlight saved into the PDF is painted by the reader
+# with Multiply blending, which has no opacity of its own.
+highlight_opacity = 0.55
 # Treat each detected table as one stop for focus and selection
 # motions (char scope still steps through a table's characters).
 # Images are always single stops; this only controls table detection,
@@ -70,6 +78,10 @@ skip_page_furniture = true
 # speed never reach the pause. Set to 0 to switch it off, so only the
 # next key press ever ends the wait.
 timeout_ms = 500
+# The key sequence "<leader>" stands for in keybindings below. It is
+# expanded when the config is loaded, so "<leader>w" is just the leader
+# key followed by "w" as far as everything else is concerned.
+leader = "<Space>"
 
 # Keybindings: "key sequence" = "command". The entries below are the
 # built-in defaults; in your own config you only need to list changes,
@@ -94,6 +106,7 @@ timeout_ms = 500
 "<PageUp>" = "prev_page"
 "<Right>" = "scroll_right"
 "<Up>" = "scroll_up"
+"<leader>w" = "save_document"
 "=" = "zoom_in"
 "G" = "goto_last_page"
 "J" = "next_page"
@@ -132,6 +145,7 @@ timeout_ms = 500
 "<Left>" = "focus_left"
 "<Right>" = "focus_right"
 "<Up>" = "focus_up"
+"a" = "highlight_enter"
 "b" = "focus_prev_word"
 "e" = "focus_end_word"
 "h" = "focus_left"
@@ -152,6 +166,7 @@ timeout_ms = 500
 "<Left>" = "visual_left"
 "<Right>" = "visual_right"
 "<Up>" = "visual_up"
+"a" = "highlight_enter"
 "b" = "visual_prev_word"
 "e" = "visual_end_word"
 "h" = "visual_left"
@@ -173,4 +188,37 @@ timeout_ms = 500
 "vp" = "visual_scope_paragraph"
 "vs" = "visual_scope_sentence"
 "vw" = "visual_scope_word"
+"w" = "visual_next_word"
+
+# Highlight-mode keybindings (active after pressing "a" while focused or
+# selecting). The motions are the visual-mode ones bound to the very same
+# commands, because a pending highlight is a selection: hjkl/arrows and
+# w/e/b/s/p reshape it, "o" switches ends, "o" plus a scope letter does
+# both. "a" again keeps the highlight and returns to selecting; <Esc> or
+# <BS> throws it away and restores what you had. "v" and "c" are not
+# listed because they fall through to [keys], where they keep the
+# highlight on the way into the mode they name.
+[highlight_keys]
+"<BS>" = "highlight_discard"
+"<Down>" = "visual_down"
+"<Esc>" = "highlight_discard"
+"<Left>" = "visual_left"
+"<Right>" = "visual_right"
+"<Up>" = "visual_up"
+"a" = "highlight_commit"
+"b" = "visual_prev_word"
+"e" = "visual_end_word"
+"h" = "visual_left"
+"j" = "visual_down"
+"k" = "visual_up"
+"l" = "visual_right"
+"o" = "visual_swap_ends"
+"oc" = "visual_other_char"
+"oe" = "visual_other_line"
+"oo" = "visual_swap_ends"
+"op" = "visual_other_paragraph"
+"os" = "visual_other_sentence"
+"ow" = "visual_other_word"
+"p" = "visual_next_paragraph"
+"s" = "visual_next_sentence"
 "w" = "visual_next_word"

@@ -16,19 +16,19 @@ use std::path::{Path, PathBuf};
 use syodep_config::keys::Chord;
 use syodep_config::Config;
 use syodep_pdf::{
-    Bitmap, CellKind, ContentLine, ContentObject, ContentOptions, FurnitureProfile, ObjectKind,
-    PageContent, Rect,
+    Bitmap, CellKind, ContentLine, ContentObject, ContentOptions, FurnitureProfile,
+    HighlightAnnotation, ObjectKind, PageContent, Rect,
 };
-use syodep_storage::{Position, Storage};
+use syodep_storage::{HighlightRect, Position, Storage};
 
 use crate::caret::{
     column_index_of, column_ranges, continues_word_run, is_abbreviation, is_attached_number_suffix,
     is_exponent_sign, is_inside_hyphenated_word, is_inside_number, is_inside_scientific_exponent,
     is_number_suffix, is_numeric_separator, is_sentence_terminator, is_sentence_trailer,
     is_word_hyphen, is_word_target, link_span, nearest_cell_in_line, nearest_line_in_column,
-    opens_a_sentence, paragraph_segments, split_segments_at_objects, word_class, Caret, Dir,
-    Landing, LineMark, Mode, ObjectId, ParagraphMark, Scope, SentenceMark, VisualAnchor,
-    VisualSelection, WordClass, WordMark,
+    opens_a_sentence, page_span_rects, paragraph_segments, split_segments_at_objects, word_class,
+    Caret, Dir, Landing, LineMark, Mode, ObjectId, ParagraphMark, PendingHighlight, Scope,
+    SentenceMark, VisualAnchor, VisualSelection, WordClass, WordMark,
 };
 use crate::command::Command;
 use crate::input::{InputState, KeyOutcome, Keymap, KeymapError};
@@ -52,6 +52,10 @@ pub struct Effects {
     /// timer and call [`App::handle_timeout`] when it fires; when this is
     /// false it should cancel any armed timer.
     pub pending_input: bool,
+    /// The document was reloaded from disk, so any page bitmaps the shell is
+    /// holding are stale even though the layout and zoom did not change. Only a
+    /// save sets this today.
+    pub reload: bool,
 }
 
 impl Effects {
@@ -69,6 +73,7 @@ impl Effects {
             redraw: self.redraw || other.redraw,
             quit: self.quit || other.quit,
             open_file_dialog: self.open_file_dialog || other.open_file_dialog,
+            reload: self.reload || other.reload,
             // Not a request like the others: it describes the state left
             // behind, so the later value wins rather than OR-ing.
             pending_input: other.pending_input,
@@ -83,12 +88,57 @@ pub struct VisiblePage {
     pub rect: ScreenRect,
 }
 
+/// Where the reader was, carried across the reopen a save performs.
+#[derive(Debug, Clone, Copy)]
+struct SelectionState {
+    mode: Mode,
+    focus: Option<Caret>,
+    focus_scope: Scope,
+    visual: Option<VisualAnchor>,
+    scroll: Option<(f32, f32)>,
+    zoom: Option<f32>,
+}
+
+/// The built-in highlight colour, for the one case where the configured value
+/// cannot be parsed. Unreachable in practice — the FFI validates the colour at
+/// startup and warns — but a highlight must still get written on save.
+fn default_highlight_rgb() -> (u8, u8, u8) {
+    syodep_config::parse_hex_color(&syodep_config::ViewConfig::default().highlight_color)
+        .expect("the built-in highlight colour is valid")
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
     #[error(transparent)]
     Pdf(#[from] syodep_pdf::PdfError),
     #[error(transparent)]
     Storage(#[from] syodep_storage::StorageError),
+    #[error("no document is open")]
+    NoDocument,
+    #[error("cannot write {path}: {source}")]
+    Write {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+/// A stored highlight, held for the open document.
+///
+/// Geometry rather than a caret span, for the reason spelled out on
+/// [`syodep_storage::StoredHighlight`]: rectangles are what the overlay, the PDF
+/// writer and any future export all need, and they survive a reload without the
+/// content layer being re-extracted.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Highlight {
+    /// Row id in the database; `None` when persistence is disabled.
+    pub id: Option<i64>,
+    /// `#rrggbb`.
+    pub color: String,
+    /// The characters the highlight covers, for notes and export.
+    pub text: String,
+    /// One rectangle per covered line, in page points with the origin top left.
+    pub rects: Vec<HighlightRect>,
 }
 
 struct Session {
@@ -119,6 +169,10 @@ pub struct App {
     /// Keymap used while in visual mode: the normal keymap plus the
     /// `[visual_keys]` overrides.
     visual_keymap: Keymap,
+    /// Keymap used while placing a highlight: the normal keymap plus the
+    /// `[highlight_keys]` overrides. Its motions are bound to the *visual*
+    /// commands, so there is one implementation of reshaping a selection.
+    highlight_keymap: Keymap,
     input: InputState,
     storage: Option<Storage>,
     session: Option<Session>,
@@ -153,9 +207,19 @@ pub struct App {
     /// content (`&mut self`) while the overlay getter the shell calls is
     /// `&self`.
     visual_span: Option<(Caret, Caret)>,
+    /// The highlight being placed, present only in [`Mode::Highlight`]. Its
+    /// *extent* is not stored here — that is `visual_span`, because a pending
+    /// highlight is a selection; this holds only what discarding must restore.
+    pending: Option<PendingHighlight>,
+    /// Highlights stored for the open document but not yet written into the PDF.
+    /// Emptied by a successful save, after which the PDF renders them itself.
+    highlights: Vec<Highlight>,
     /// Config/keymap problems collected at startup, for the UI to surface.
     startup_warnings: Vec<String>,
     last_error: Option<String>,
+    /// One-off feedback for the status line (what a save did). Cleared by the
+    /// next command, so it reads as a reply to the key just pressed.
+    status_message: Option<String>,
 }
 
 impl App {
@@ -163,8 +227,23 @@ impl App {
     /// handle. `storage = None` disables persistence (used by some tests and
     /// as graceful degradation when the database cannot be opened).
     pub fn new(config: Config, storage: Option<Storage>) -> Self {
+        // The leader is parsed first, because every table below may use it. A
+        // bad value degrades to the default plus a warning rather than costing
+        // the user every `<leader>` binding they have.
+        let mut leader_warning = None;
+        let leader = match syodep_config::keys::parse_sequence(&config.input.leader) {
+            Ok(chords) => chords,
+            Err(e) => {
+                let fallback = syodep_config::InputConfig::default().leader;
+                leader_warning = Some(format!(
+                    "invalid [input] leader: {e}; using the default {fallback:?}"
+                ));
+                syodep_config::keys::parse_sequence(&fallback)
+                    .expect("the built-in default leader is valid")
+            }
+        };
         let entries = config.keys.iter().map(|(k, v)| (k.as_str(), v.as_str()));
-        let (keymap, mut keymap_errors) = Keymap::from_entries(entries);
+        let (keymap, mut keymap_errors) = Keymap::from_entries(entries, &leader);
         // The focus keymap is the normal keymap with the focus overrides
         // applied, so every normal binding still works in focus mode and only
         // the overridden keys (hjkl/<Esc>) change meaning. Cloning then
@@ -182,12 +261,24 @@ impl App {
             .iter()
             .map(|(k, v)| (k.as_str(), v.as_str()));
         keymap_errors.extend(visual_keymap.overlay(visual_entries));
-        let startup_warnings = keymap_errors.iter().map(KeymapError::to_string).collect();
+        // Highlight mode's keymap, from `[highlight_keys]`. Built the same way as
+        // the other two, so `v`/`c` and every normal binding still reach it.
+        let mut highlight_keymap = keymap.clone();
+        let highlight_entries = config
+            .highlight_keys
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()));
+        keymap_errors.extend(highlight_keymap.overlay(highlight_entries));
+        let startup_warnings = leader_warning
+            .into_iter()
+            .chain(keymap_errors.iter().map(KeymapError::to_string))
+            .collect();
         Self {
             config,
             keymap,
             focus_keymap,
             visual_keymap,
+            highlight_keymap,
             input: InputState::new(),
             storage,
             session: None,
@@ -200,8 +291,11 @@ impl App {
             focus_goal_y: 0.0,
             visual: None,
             visual_span: None,
+            pending: None,
+            highlights: Vec::new(),
             startup_warnings,
             last_error: None,
+            status_message: None,
         }
     }
 
@@ -278,7 +372,11 @@ impl App {
         self.focus_goal_y = 0.0;
         self.visual = None;
         self.visual_span = None;
+        self.pending = None;
         self.last_error = None;
+        // Stored highlights are geometry, so they can be drawn immediately —
+        // nothing has to be extracted or resolved first.
+        self.load_highlights();
         Ok(())
     }
 
@@ -310,6 +408,157 @@ impl App {
         if let Err(e) = result {
             self.last_error = Some(format!("could not save position: {e}"));
         }
+    }
+
+    /// Overwrite the open PDF with its highlights embedded as PDF annotations.
+    ///
+    /// The file is rewritten beside itself and renamed over the original, so an
+    /// interrupted write can never leave a half-written PDF where the document
+    /// was. Afterwards the document is reopened: its content hash has changed, so
+    /// the annotations MuPDF now renders into the page bitmaps are the highlights
+    /// and the overlay must stop drawing them.
+    fn save_document(&mut self) -> Effects {
+        // Saving keeps a highlight in progress rather than losing it, the same
+        // way `a`, `v` and `c` do.
+        self.store_pending_highlight();
+        if self.mode == Mode::Highlight {
+            self.mode = Mode::Visual;
+        }
+        match self.write_document() {
+            Ok(count) => {
+                self.status_message = Some(match count {
+                    1 => "saved 1 highlight".to_owned(),
+                    n => format!("saved {n} highlights"),
+                });
+                Effects {
+                    reload: true,
+                    ..Effects::redraw()
+                }
+            }
+            Err(e) => {
+                self.last_error = Some(format!("could not save: {e}"));
+                Effects::redraw()
+            }
+        }
+    }
+
+    /// The save itself, split out so every failure path is one `?` away from
+    /// leaving the document exactly as it was.
+    fn write_document(&mut self) -> Result<usize, AppError> {
+        let Some(session) = &self.session else {
+            return Err(AppError::NoDocument);
+        };
+        let path = session.path.clone();
+        let document_id = session.document_id;
+        if self.highlights.is_empty() {
+            return Ok(0);
+        }
+        let annotations = self.highlight_annotations();
+        let count = self.highlights.len();
+
+        // Beside the original, so the rename below stays within one filesystem
+        // and is therefore atomic. A fixed name rather than a random one: a
+        // leftover from a crashed save is then obvious, and simply overwritten.
+        let temp = path.with_extension("pdf.syodep-tmp");
+        if let Err(e) = syodep_pdf::write_highlights(&path, &temp, &annotations) {
+            let _ = std::fs::remove_file(&temp);
+            return Err(e.into());
+        }
+
+        // Close the document *before* the rename: on Windows, replacing a file
+        // MuPDF still holds open fails with a sharing violation.
+        let restore = self.take_selection_state();
+        self.session = None;
+        if let Err(source) = std::fs::rename(&temp, &path) {
+            let _ = std::fs::remove_file(&temp);
+            // The original is untouched, so reopening restores the status quo.
+            let _ = self.open_document(&path);
+            self.restore_selection_state(restore);
+            return Err(AppError::Write {
+                path: path.display().to_string(),
+                source,
+            });
+        }
+
+        // The rewritten file hashes differently, so move the document row to the
+        // new fingerprint before reopening — otherwise every save orphans the
+        // reading position. Then forget the highlight rows: they live in the PDF
+        // now, and drawing them as well would paint them twice.
+        if let (Some(storage), Some(id)) = (&self.storage, document_id) {
+            let outcome = Storage::fingerprint_file(&path).and_then(|fingerprint| {
+                storage.rekey_document(id, &fingerprint, &path.display().to_string())?;
+                storage.delete_highlights(id)
+            });
+            if let Err(e) = outcome {
+                self.last_error = Some(format!("saved, but could not update the database: {e}"));
+            }
+        }
+        self.open_document(&path)?;
+        self.restore_selection_state(restore);
+        Ok(count)
+    }
+
+    /// The stored highlights as one annotation per (highlight, page).
+    fn highlight_annotations(&self) -> Vec<HighlightAnnotation> {
+        let mut out = Vec::new();
+        for highlight in &self.highlights {
+            let color = syodep_config::parse_hex_color(&highlight.color)
+                .unwrap_or_else(default_highlight_rgb);
+            // Grouped by page in one pass over rectangles that are already in
+            // document order, so no sorting is needed.
+            let mut current: Option<HighlightAnnotation> = None;
+            for rect in &highlight.rects {
+                let rect_out = Rect {
+                    x0: rect.x0,
+                    y0: rect.y0,
+                    x1: rect.x1,
+                    y1: rect.y1,
+                };
+                match &mut current {
+                    Some(annotation) if annotation.page == rect.page => {
+                        annotation.rects.push(rect_out)
+                    }
+                    _ => {
+                        out.extend(current.take());
+                        current = Some(HighlightAnnotation {
+                            page: rect.page,
+                            rects: vec![rect_out],
+                            color,
+                        });
+                    }
+                }
+            }
+            out.extend(current);
+        }
+        out
+    }
+
+    /// Everything a reload must put back: reopening a document resets the mode
+    /// and position by design, which is right for opening a *different* file and
+    /// wrong for reopening the same one.
+    fn take_selection_state(&mut self) -> SelectionState {
+        SelectionState {
+            mode: self.mode,
+            focus: self.focus,
+            focus_scope: self.focus_scope,
+            visual: self.visual,
+            scroll: self.session.as_ref().map(|s| s.view.scroll()),
+            zoom: self.session.as_ref().map(|s| s.view.zoom()),
+        }
+    }
+
+    fn restore_selection_state(&mut self, state: SelectionState) {
+        if let (Some(session), Some((x, y)), Some(zoom)) =
+            (&mut self.session, state.scroll, state.zoom)
+        {
+            session.view.restore(x, y, zoom);
+        }
+        self.mode = state.mode;
+        self.focus = state.focus;
+        self.focus_scope = state.focus_scope;
+        self.visual = state.visual;
+        self.refresh_focus_span();
+        self.refresh_visual_span();
     }
 
     pub fn set_viewport_size(&mut self, width: f32, height: f32) {
@@ -345,6 +594,7 @@ impl App {
                 Mode::Normal => &self.keymap,
                 Mode::Focus => &self.focus_keymap,
                 Mode::Visual => &self.visual_keymap,
+                Mode::Highlight => &self.highlight_keymap,
             };
             self.input.handle(keymap, chord)
         };
@@ -361,6 +611,7 @@ impl App {
                 Mode::Normal => &self.keymap,
                 Mode::Focus => &self.focus_keymap,
                 Mode::Visual => &self.visual_keymap,
+                Mode::Highlight => &self.highlight_keymap,
             };
             self.input.timeout(keymap)
         };
@@ -392,6 +643,7 @@ impl App {
                         Mode::Normal => &self.keymap,
                         Mode::Focus => &self.focus_keymap,
                         Mode::Visual => &self.visual_keymap,
+                        Mode::Highlight => &self.highlight_keymap,
                     };
                     Some(self.input.handle(keymap, chord))
                 }
@@ -406,6 +658,10 @@ impl App {
 
     /// Execute a command. Public so a future command palette can reuse it.
     pub fn execute(&mut self, command: Command, count: Option<u32>) -> Effects {
+        // Feedback belongs to the key that produced it, so the next command
+        // clears it rather than leaving a stale "saved" sitting on the status
+        // line.
+        self.status_message = None;
         let n = count.unwrap_or(1).max(1);
         let step = self.config.view.scroll_step * n as f32;
         let hstep = self.config.view.horizontal_scroll_step * n as f32;
@@ -489,6 +745,10 @@ impl App {
             Command::VisualOtherLine => return self.set_head_scope(Scope::Line, true),
             Command::VisualOtherSentence => return self.set_head_scope(Scope::Sentence, true),
             Command::VisualOtherParagraph => return self.set_head_scope(Scope::Paragraph, true),
+            Command::HighlightEnter => return self.enter_highlight(),
+            Command::HighlightCommit => return self.commit_highlight(),
+            Command::HighlightDiscard => return self.discard_highlight(),
+            Command::SaveDocument => return self.save_document(),
             _ => {}
         }
 
@@ -566,7 +826,11 @@ impl App {
             | Command::VisualOtherWord
             | Command::VisualOtherLine
             | Command::VisualOtherSentence
-            | Command::VisualOtherParagraph => unreachable!("handled above"),
+            | Command::VisualOtherParagraph
+            | Command::HighlightEnter
+            | Command::HighlightCommit
+            | Command::HighlightDiscard
+            | Command::SaveDocument => unreachable!("handled above"),
         }
         // In focus mode, scroll and page jumps carry the highlight to the newly
         // visible content; zoom commands leave it where it is.
@@ -2103,87 +2367,25 @@ impl App {
     ///
     /// Walking the viewport rather than the span keeps this O(visible lines)
     /// however long the span is, and avoids forcing content extraction for
-    /// pages the reader cannot see.
+    /// pages the reader cannot see. The per-line geometry itself is
+    /// [`page_span_rects`], shared with [`Self::span_page_rects`] so drawing a
+    /// span and storing one cannot disagree about its shape.
     fn span_screen_rects(&self, start: Caret, end: Caret) -> Option<Vec<ScreenRect>> {
         let session = self.session.as_ref()?;
         let mut rects = Vec::new();
         for (page, _) in session.view.visible_pages() {
-            if page < start.page || page > end.page {
-                continue;
-            }
             // Content is loaded lazily; a page we have not visited yet simply
             // has nothing to draw.
             let Some(content) = session.content.get(&page) else {
                 continue;
             };
-            let lines = &content.lines;
-            let first_line = if page == start.page { start.line } else { 0 };
-            let last_line = if page == end.page {
-                end.line
-            } else {
-                lines.len().saturating_sub(1)
-            };
-            let mut line_idx = first_line;
-            while line_idx <= last_line {
-                // A fully covered table or image draws as one rectangle over
-                // its own bounds: per-line boxes would leave its rules and
-                // empty cells unpainted, which reads as a broken highlight.
-                if let Some(object) = content.atomic_object_at(line_idx) {
-                    let whole = object.start_line == line_idx
-                        && object.end_line <= last_line
-                        && !(page == start.page && start.line == line_idx && start.cell > 0)
-                        && !(page == end.page
-                            && end.line == object.end_line
-                            && end.cell + 1
-                                < lines.get(object.end_line).map_or(0, |l| l.cells.len()));
-                    if whole {
-                        if let Some(rect) = session.view.page_rect_to_screen(
-                            page,
-                            object.bbox.x0,
-                            object.bbox.y0,
-                            object.bbox.x1,
-                            object.bbox.y1,
-                        ) {
-                            rects.push(rect);
-                        }
-                        line_idx = object.end_line + 1;
-                        continue;
-                    }
-                }
-                let Some(line) = lines.get(line_idx) else {
-                    line_idx += 1;
-                    continue;
-                };
-                if line.cells.is_empty() {
-                    line_idx += 1;
-                    continue;
-                }
-                let at_start = page == start.page && line_idx == start.line;
-                let at_end = page == end.page && line_idx == end.line;
-                let (x0, x1) = match (at_start, at_end) {
-                    (true, true) => {
-                        let s = line.cells.get(start.cell)?.bbox;
-                        let e = line.cells.get(end.cell).map_or(s, |c| c.bbox);
-                        (s.x0.min(e.x0), s.x1.max(e.x1))
-                    }
-                    (true, false) => {
-                        let s = line.cells.get(start.cell)?.bbox;
-                        (s.x0, line.bbox.x1)
-                    }
-                    (false, true) => {
-                        let e = line.cells.get(end.cell)?.bbox;
-                        (line.bbox.x0, e.x1)
-                    }
-                    (false, false) => (line.bbox.x0, line.bbox.x1),
-                };
-                if let Some(rect) =
-                    session
-                        .view
-                        .page_rect_to_screen(page, x0, line.bbox.y0, x1, line.bbox.y1)
+            for rect in page_span_rects(content, page, start, end) {
+                if let Some(rect) = session
+                    .view
+                    .page_rect_to_screen(page, rect.x0, rect.y0, rect.x1, rect.y1)
                 {
                     rects.push(rect);
                 }
-                line_idx += 1;
             }
         }
         if rects.is_empty() {
@@ -2191,6 +2393,72 @@ impl App {
         } else {
             Some(rects)
         }
+    }
+
+    /// An inclusive cell range as page-space rectangles, for *every* page it
+    /// covers — extracting content where it has not been visited yet.
+    ///
+    /// The counterpart to [`Self::span_screen_rects`]: storing a highlight has to
+    /// resolve the whole span, not just the part on screen, which is exactly the
+    /// case decision 13 in `docs/architecture.md` left open.
+    fn span_page_rects(&mut self, start: Caret, end: Caret) -> Vec<(usize, Vec<Rect>)> {
+        let mut out = Vec::new();
+        for page in start.page..=end.page {
+            self.ensure_content(page);
+            let Some(session) = self.session.as_ref() else {
+                break;
+            };
+            let Some(content) = session.content.get(&page) else {
+                continue;
+            };
+            let rects = page_span_rects(content, page, start, end);
+            if !rects.is_empty() {
+                out.push((page, rects));
+            }
+        }
+        out
+    }
+
+    /// The characters an inclusive cell range covers.
+    ///
+    /// Images and table rules contribute nothing, so a highlight over a figure
+    /// has empty text rather than a placeholder — the geometry is what makes it
+    /// visible, and the text is only there for notes and export.
+    fn span_text(&mut self, start: Caret, end: Caret) -> String {
+        let mut out = String::new();
+        for page in start.page..=end.page {
+            self.ensure_content(page);
+            let Some(session) = self.session.as_ref() else {
+                break;
+            };
+            let Some(content) = session.content.get(&page) else {
+                continue;
+            };
+            for (line_idx, line) in content.lines.iter().enumerate() {
+                if page == start.page && line_idx < start.line {
+                    continue;
+                }
+                if page == end.page && line_idx > end.line {
+                    break;
+                }
+                let first = if page == start.page && line_idx == start.line {
+                    start.cell
+                } else {
+                    0
+                };
+                let last = if page == end.page && line_idx == end.line {
+                    end.cell
+                } else {
+                    line.cells.len().saturating_sub(1)
+                };
+                for cell in line.cells.iter().take(last + 1).skip(first) {
+                    if let CellKind::Char(c) = cell.kind {
+                        out.push(c);
+                    }
+                }
+            }
+        }
+        out
     }
 
     // ---- Focus mode -----------------------------------------------------
@@ -2245,6 +2513,9 @@ impl App {
         if self.session.is_none() {
             return Effects::default();
         }
+        // A `c` chord out of highlight mode keeps the highlight, the same way `a`
+        // and `v` do: the only way to throw one away is to ask for that.
+        self.store_pending_highlight();
         self.mode = Mode::Focus;
         self.focus_scope = scope;
         // A focus highlight and a selection are mutually exclusive.
@@ -2453,6 +2724,21 @@ impl App {
         if self.session.is_none() {
             return Effects::default();
         }
+        // From highlight mode, `v` keeps the highlight and changes nothing else:
+        // the two ends are the ones the user just shaped, so the collapse below
+        // would throw the selection away. A scope specifier still applies, which
+        // is what makes `vw` "keep it, carry on selecting by word".
+        if self.mode == Mode::Highlight {
+            self.store_pending_highlight();
+            self.mode = Mode::Visual;
+            return match scope {
+                Some(scope) => self.set_head_scope(scope, false),
+                None => {
+                    self.refresh_visual_span();
+                    Effects::redraw()
+                }
+            };
+        }
         // Re-entering visual mode collapses the selection onto the head.
         let live = self.visual.filter(|_| self.mode == Mode::Visual);
         if let (Some(mut a), Some(head)) = (live, self.focus) {
@@ -2659,6 +2945,200 @@ impl App {
         self.span_screen_rects(start, end)
     }
 
+    // ---- Highlight mode -------------------------------------------------
+
+    /// The highlights stored for the open document.
+    pub fn highlights(&self) -> &[Highlight] {
+        &self.highlights
+    }
+
+    /// Whether a highlight is being placed.
+    pub fn has_pending_highlight(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    /// `a`: turn the focus highlight or the selection into a pending highlight.
+    ///
+    /// Coming from focus mode, the second end is *synthesised* here — anchor and
+    /// head coincide — which is what lets every visual motion reshape a highlight
+    /// that started from a single focused word.
+    fn enter_highlight(&mut self) -> Effects {
+        if self.session.is_none() || self.mode == Mode::Highlight {
+            return Effects::default();
+        }
+        if !matches!(self.mode, Mode::Focus | Mode::Visual) {
+            return Effects::default();
+        }
+        let Some(focus) = self.focus else {
+            return Effects::default();
+        };
+        self.pending = Some(PendingHighlight {
+            return_mode: self.mode,
+            return_focus: focus,
+            return_scope: self.focus_scope,
+            return_visual: self.visual,
+            color: self.config.view.highlight_color.clone(),
+        });
+        if self.visual.is_none() {
+            self.visual = Some(VisualAnchor {
+                anchor: focus,
+                anchor_scope: self.focus_scope,
+                // Only consulted by `visual_exit`, which highlight mode never
+                // reaches: `<Esc>` here discards instead. Recording where we came
+                // from keeps it honest anyway.
+                return_mode: self.mode,
+            });
+        }
+        self.mode = Mode::Highlight;
+        self.refresh_visual_span();
+        Effects::redraw()
+    }
+
+    /// `a` again: keep the highlight and go back to selecting the same text.
+    fn commit_highlight(&mut self) -> Effects {
+        if self.pending.is_none() {
+            return Effects::default();
+        }
+        self.store_pending_highlight();
+        self.mode = Mode::Visual;
+        self.refresh_visual_span();
+        Effects::redraw()
+    }
+
+    /// `<Esc>` / `<BS>`: throw the highlight away and put back the mode and
+    /// selection that were in effect when `a` was pressed.
+    fn discard_highlight(&mut self) -> Effects {
+        let Some(pending) = self.pending.take() else {
+            return Effects::default();
+        };
+        self.mode = pending.return_mode;
+        self.focus = Some(pending.return_focus);
+        self.focus_scope = pending.return_scope;
+        self.visual = pending.return_visual;
+        self.refresh_focus_span();
+        self.refresh_visual_span();
+        Effects::redraw()
+    }
+
+    /// Store the pending highlight, if there is one, leaving the mode and the
+    /// selection alone.
+    ///
+    /// Shared by every way out of highlight mode that keeps the highlight — `a`,
+    /// `v`, `c`, and saving — so "which exits keep it" is one list in the
+    /// bindings rather than a condition repeated in four places.
+    fn store_pending_highlight(&mut self) {
+        let Some(pending) = self.pending.take() else {
+            return;
+        };
+        let Some((start, end)) = self.visual_span else {
+            return;
+        };
+        let rects: Vec<HighlightRect> = self
+            .span_page_rects(start, end)
+            .into_iter()
+            .flat_map(|(page, rects)| {
+                rects.into_iter().map(move |r| HighlightRect {
+                    page,
+                    x0: r.x0,
+                    y0: r.y0,
+                    x1: r.x1,
+                    y1: r.y1,
+                })
+            })
+            .collect();
+        if rects.is_empty() {
+            return;
+        }
+        let text = self.span_text(start, end);
+        let id = self.persist_highlight(&pending.color, &text, &rects);
+        self.highlights.push(Highlight {
+            id,
+            color: pending.color,
+            text,
+            rects,
+        });
+    }
+
+    /// Write a highlight to the database, returning its row id.
+    ///
+    /// Failure is reported and otherwise ignored: the highlight still exists for
+    /// this session and can still be saved into the PDF, which is a far better
+    /// outcome than refusing to highlight because the database is unwritable.
+    fn persist_highlight(
+        &mut self,
+        color: &str,
+        text: &str,
+        rects: &[HighlightRect],
+    ) -> Option<i64> {
+        let document_id = self.session.as_ref()?.document_id?;
+        let storage = self.storage.as_ref()?;
+        match storage.insert_highlight(document_id, color, text, rects) {
+            Ok(id) => Some(id),
+            Err(e) => {
+                self.last_error = Some(format!("could not save highlight: {e}"));
+                None
+            }
+        }
+    }
+
+    /// Load the document's stored highlights. Called on open, so highlights made
+    /// in an earlier session are on screen before any page content is extracted.
+    fn load_highlights(&mut self) {
+        self.highlights.clear();
+        let Some(document_id) = self.session.as_ref().and_then(|s| s.document_id) else {
+            return;
+        };
+        let Some(storage) = self.storage.as_ref() else {
+            return;
+        };
+        match storage.load_highlights(document_id) {
+            Ok(stored) => {
+                self.highlights = stored
+                    .into_iter()
+                    .map(|h| Highlight {
+                        id: Some(h.id),
+                        color: h.color,
+                        text: h.text,
+                        rects: h.rects,
+                    })
+                    .collect()
+            }
+            Err(e) => self.last_error = Some(format!("could not load highlights: {e}")),
+        }
+    }
+
+    /// Every highlight to paint: the stored ones, plus the pending one while it
+    /// is being placed.
+    ///
+    /// One overlay and one colour for both, so the shell's single merged fill
+    /// cannot double-blend a pending highlight over the stored one it overlaps.
+    pub fn highlight_screen_rects(&self) -> Option<Vec<ScreenRect>> {
+        let session = self.session.as_ref()?;
+        let mut rects = Vec::new();
+        for (page, _) in session.view.visible_pages() {
+            for highlight in &self.highlights {
+                for rect in highlight.rects.iter().filter(|r| r.page == page) {
+                    if let Some(rect) = session
+                        .view
+                        .page_rect_to_screen(page, rect.x0, rect.y0, rect.x1, rect.y1)
+                    {
+                        rects.push(rect);
+                    }
+                }
+            }
+        }
+        if self.mode == Mode::Highlight {
+            if let Some((start, end)) = self.visual_span {
+                rects.extend(self.span_screen_rects(start, end).unwrap_or_default());
+            }
+        }
+        if rects.is_empty() {
+            None
+        } else {
+            Some(rects)
+        }
+    }
+
     /// One-line status text: file, current page, zoom, pending keys.
     pub fn status_text(&self) -> String {
         let mut out = String::new();
@@ -2689,21 +3169,28 @@ impl App {
                 }
             }
         }
-        if self.mode == Mode::Visual {
+        // One arm for both two-ended modes: they show the same thing, and the
+        // only difference is the word — which is the point of the mode.
+        if matches!(self.mode, Mode::Visual | Mode::Highlight) {
+            let name = if self.mode == Mode::Visual {
+                "VISUAL"
+            } else {
+                "HIGHLIGHT"
+            };
             if let Some(a) = self.visual {
                 // Both scopes are shown, head first, when the ends differ.
                 let head_scope = self.focus_scope;
                 if head_scope == a.anchor_scope {
-                    out.push_str(&format!("  -- VISUAL ({}) --", head_scope.name()));
+                    out.push_str(&format!("  -- {name} ({}) --", head_scope.name()));
                 } else {
                     out.push_str(&format!(
-                        "  -- VISUAL ({}/{}) --",
+                        "  -- {name} ({}/{}) --",
                         head_scope.name(),
                         a.anchor_scope.name()
                     ));
                 }
             } else {
-                out.push_str("  -- VISUAL --");
+                out.push_str(&format!("  -- {name} --"));
             }
             if let Some((start, end)) = self.visual_span {
                 out.push_str(&format!("  Ln {}-{}", start.line + 1, end.line + 1));
@@ -2711,6 +3198,9 @@ impl App {
         }
         if self.input.has_pending() {
             out.push_str(&format!("  {}", self.input.pending_display()));
+        }
+        if let Some(message) = &self.status_message {
+            out.push_str(&format!("  {message}"));
         }
         if let Some(error) = &self.last_error {
             out.push_str(&format!("  ERROR: {error}"));
@@ -3374,7 +3864,7 @@ mod tests {
         let mut app = app_with_list_page(dir.path());
         press(&mut app, "cs");
         press(&mut app, "s");
-        assert_eq!(span_text(&app), "\u{2022} the globs file");
+        assert_eq!(span_text(&mut app), "\u{2022} the globs file");
         press(&mut app, "s");
         // The second item wraps onto the line below, and carries it along.
         let (start, end) = app.focus_span().unwrap();
@@ -3398,7 +3888,7 @@ mod tests {
         let (start, end) = app.focus_span().unwrap();
         assert_eq!((start.line, end.line), (4, 4));
         press(&mut app, "s");
-        assert_eq!(span_text(&app), "Each of them is regenerated in turn.");
+        assert_eq!(span_text(&mut app), "Each of them is regenerated in turn.");
     }
 
     #[test]
@@ -3435,9 +3925,9 @@ mod tests {
             },
         );
         press(&mut app, "cs");
-        assert_eq!(span_text(&app), "1. First point of the list");
+        assert_eq!(span_text(&mut app), "1. First point of the list");
         press(&mut app, "s");
-        assert_eq!(span_text(&app), "2. Second point of the list");
+        assert_eq!(span_text(&mut app), "2. Second point of the list");
     }
 
     #[test]
@@ -3466,9 +3956,9 @@ mod tests {
             press(&mut app, "w");
         }
         assert_eq!(app.caret().unwrap().line, 1, "never reached the first item");
-        assert_eq!(span_text(&app), "\u{2022}");
+        assert_eq!(span_text(&mut app), "\u{2022}");
         press(&mut app, "w");
-        assert_eq!(span_text(&app), "the");
+        assert_eq!(span_text(&mut app), "the");
     }
 
     // ---- Numbers ----------------------------------------------------------
@@ -3487,25 +3977,12 @@ mod tests {
     }
 
     /// The text the focus span currently covers, across however many lines.
-    fn span_text(app: &App) -> String {
+    ///
+    /// Goes through the production `App::span_text`, so these tests also pin down
+    /// what a stored highlight records as its text.
+    fn span_text(app: &mut App) -> String {
         let (start, end) = app.focus_span().unwrap();
-        let lines = app.content(start.page);
-        let mut out = String::new();
-        for (line, content) in lines.iter().enumerate().take(end.line + 1).skip(start.line) {
-            let cells = &content.cells;
-            let first = if line == start.line { start.cell } else { 0 };
-            let last = if line == end.line {
-                end.cell.min(cells.len().saturating_sub(1))
-            } else {
-                cells.len().saturating_sub(1)
-            };
-            for cell in &cells[first..=last] {
-                if let CellKind::Char(ch) = cell.kind {
-                    out.push(ch);
-                }
-            }
-        }
-        out
+        app.span_text(start, end)
     }
 
     // ---- Abbreviations ----------------------------------------------------
@@ -3515,7 +3992,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "Use a glob, e.g. the star form. Then stop.");
         press(&mut app, "cs");
-        assert_eq!(span_text(&app), "Use a glob, e.g. the star form.");
+        assert_eq!(span_text(&mut app), "Use a glob, e.g. the star form.");
     }
 
     #[test]
@@ -3525,9 +4002,9 @@ mod tests {
         press(&mut app, "cw");
         press(&mut app, "www"); // Use, a, glob, then the comma
         press(&mut app, "w");
-        assert_eq!(span_text(&app), "e.g.");
+        assert_eq!(span_text(&mut app), "e.g.");
         press(&mut app, "w");
-        assert_eq!(span_text(&app), "the");
+        assert_eq!(span_text(&mut app), "the");
     }
 
     #[test]
@@ -3535,7 +4012,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "As shown in Fig. 3 the glob wins. Then stop.");
         press(&mut app, "cs");
-        assert_eq!(span_text(&app), "As shown in Fig. 3 the glob wins.");
+        assert_eq!(span_text(&mut app), "As shown in Fig. 3 the glob wins.");
     }
 
     #[test]
@@ -3544,9 +4021,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "Globs, magic, etc. The next sentence here.");
         press(&mut app, "cs");
-        assert_eq!(span_text(&app), "Globs, magic, etc.");
+        assert_eq!(span_text(&mut app), "Globs, magic, etc.");
         press(&mut app, "s");
-        assert_eq!(span_text(&app), "The next sentence here.");
+        assert_eq!(span_text(&mut app), "The next sentence here.");
     }
 
     #[test]
@@ -3554,7 +4031,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "Globs, magic, etc. and then more. Next.");
         press(&mut app, "cs");
-        assert_eq!(span_text(&app), "Globs, magic, etc. and then more.");
+        assert_eq!(span_text(&mut app), "Globs, magic, etc. and then more.");
     }
 
     #[test]
@@ -3566,15 +4043,15 @@ mod tests {
         let mut app = app_with_line(dir.path(), "Many globs (e.g., the star form) work.");
         press(&mut app, "cw");
         press(&mut app, "w");
-        assert_eq!(span_text(&app), "globs");
+        assert_eq!(span_text(&mut app), "globs");
         press(&mut app, "w");
-        assert_eq!(span_text(&app), "(");
+        assert_eq!(span_text(&mut app), "(");
         press(&mut app, "w");
-        assert_eq!(span_text(&app), "e.g.");
+        assert_eq!(span_text(&mut app), "e.g.");
         press(&mut app, "w");
-        assert_eq!(span_text(&app), ",");
+        assert_eq!(span_text(&mut app), ",");
         press(&mut app, "w");
-        assert_eq!(span_text(&app), "the");
+        assert_eq!(span_text(&mut app), "the");
     }
 
     #[test]
@@ -3582,7 +4059,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "Many globs (e.g., the star) work. Then stop.");
         press(&mut app, "cs");
-        assert_eq!(span_text(&app), "Many globs (e.g., the star) work.");
+        assert_eq!(span_text(&mut app), "Many globs (e.g., the star) work.");
     }
 
     #[test]
@@ -3592,7 +4069,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "Recent work (e.g., Smith 2020) shows it. Next.");
         press(&mut app, "cs");
-        assert_eq!(span_text(&app), "Recent work (e.g., Smith 2020) shows it.");
+        assert_eq!(
+            span_text(&mut app),
+            "Recent work (e.g., Smith 2020) shows it."
+        );
     }
 
     #[test]
@@ -3602,9 +4082,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "Globs and magic (etc.) Then more.");
         press(&mut app, "cs");
-        assert_eq!(span_text(&app), "Globs and magic (etc.)");
+        assert_eq!(span_text(&mut app), "Globs and magic (etc.)");
         press(&mut app, "s");
-        assert_eq!(span_text(&app), "Then more.");
+        assert_eq!(span_text(&mut app), "Then more.");
     }
 
     #[test]
@@ -3613,11 +4093,11 @@ mod tests {
         let mut app = app_with_line(dir.path(), "Globs, magic, [etc.] and more.");
         press(&mut app, "cw");
         press(&mut app, "wwww"); // comma, magic, comma, then the bracket
-        assert_eq!(span_text(&app), "[");
+        assert_eq!(span_text(&mut app), "[");
         press(&mut app, "w");
-        assert_eq!(span_text(&app), "etc.");
+        assert_eq!(span_text(&mut app), "etc.");
         press(&mut app, "w");
-        assert_eq!(span_text(&app), "]");
+        assert_eq!(span_text(&mut app), "]");
     }
 
     #[test]
@@ -3628,7 +4108,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "It scans all the data. glob rules follow.");
         press(&mut app, "cs");
-        assert_eq!(span_text(&app), "It scans all the data.");
+        assert_eq!(span_text(&mut app), "It scans all the data.");
     }
 
     #[test]
@@ -3637,9 +4117,9 @@ mod tests {
         let mut app = app_with_line(dir.path(), "pi is 3.14 exactly");
         press(&mut app, "cw");
         press(&mut app, "ww"); // "pi", "is", then the number
-        assert_eq!(span_text(&app), "3.14");
+        assert_eq!(span_text(&mut app), "3.14");
         press(&mut app, "w");
-        assert_eq!(span_text(&app), "exactly");
+        assert_eq!(span_text(&mut app), "exactly");
     }
 
     #[test]
@@ -3648,7 +4128,7 @@ mod tests {
         let mut app = app_with_line(dir.path(), "about 1,234.56 units");
         press(&mut app, "cw");
         press(&mut app, "w");
-        assert_eq!(span_text(&app), "1,234.56");
+        assert_eq!(span_text(&mut app), "1,234.56");
     }
 
     #[test]
@@ -3657,9 +4137,9 @@ mod tests {
         let mut app = app_with_line(dir.path(), "it costs 3. Next");
         press(&mut app, "cw");
         press(&mut app, "ww");
-        assert_eq!(span_text(&app), "3");
+        assert_eq!(span_text(&mut app), "3");
         press(&mut app, "w");
-        assert_eq!(span_text(&app), ".");
+        assert_eq!(span_text(&mut app), ".");
     }
 
     #[test]
@@ -3667,7 +4147,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "pi is 3.14 exactly. Then more.");
         press(&mut app, "cs");
-        assert_eq!(span_text(&app), "pi is 3.14 exactly.");
+        assert_eq!(span_text(&mut app), "pi is 3.14 exactly.");
     }
 
     #[test]
@@ -3675,7 +4155,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "we saw 1,234.56 of them. Then more.");
         press(&mut app, "cs");
-        assert_eq!(span_text(&app), "we saw 1,234.56 of them.");
+        assert_eq!(span_text(&mut app), "we saw 1,234.56 of them.");
     }
 
     #[test]
@@ -3683,7 +4163,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "it costs 3. Then more.");
         press(&mut app, "cs");
-        assert_eq!(span_text(&app), "it costs 3.");
+        assert_eq!(span_text(&mut app), "it costs 3.");
     }
 
     #[test]
@@ -3692,7 +4172,7 @@ mod tests {
         let mut app = app_with_line(dir.path(), "pi is 3.14 exactly. Then more.");
         press(&mut app, "cs");
         press(&mut app, "s");
-        assert_eq!(span_text(&app), "Then more.");
+        assert_eq!(span_text(&mut app), "Then more.");
     }
 
     #[test]
@@ -3701,9 +4181,9 @@ mod tests {
         let mut app = app_with_line(dir.path(), "about 45.5% of them");
         press(&mut app, "cw");
         press(&mut app, "w");
-        assert_eq!(span_text(&app), "45.5%");
+        assert_eq!(span_text(&mut app), "45.5%");
         press(&mut app, "w");
-        assert_eq!(span_text(&app), "of");
+        assert_eq!(span_text(&mut app), "of");
     }
 
     #[test]
@@ -3712,7 +4192,7 @@ mod tests {
         let mut app = app_with_line(dir.path(), "the % sign here");
         press(&mut app, "cw");
         press(&mut app, "w");
-        assert_eq!(span_text(&app), "%");
+        assert_eq!(span_text(&mut app), "%");
     }
 
     #[test]
@@ -3720,7 +4200,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "It grew 45.5%. Then more.");
         press(&mut app, "cs");
-        assert_eq!(span_text(&app), "It grew 45.5%.");
+        assert_eq!(span_text(&mut app), "It grew 45.5%.");
     }
 
     #[test]
@@ -3729,9 +4209,9 @@ mod tests {
         let mut app = app_with_line(dir.path(), "about 1.5e-10 metres");
         press(&mut app, "cw");
         press(&mut app, "w");
-        assert_eq!(span_text(&app), "1.5e-10");
+        assert_eq!(span_text(&mut app), "1.5e-10");
         press(&mut app, "w");
-        assert_eq!(span_text(&app), "metres");
+        assert_eq!(span_text(&mut app), "metres");
     }
 
     #[test]
@@ -3740,7 +4220,7 @@ mod tests {
         let mut app = app_with_line(dir.path(), "about 2.3E+5 units");
         press(&mut app, "cw");
         press(&mut app, "w");
-        assert_eq!(span_text(&app), "2.3E+5");
+        assert_eq!(span_text(&mut app), "2.3E+5");
     }
 
     #[test]
@@ -3748,7 +4228,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "It is 1.5e-10 exactly. Then more.");
         press(&mut app, "cs");
-        assert_eq!(span_text(&app), "It is 1.5e-10 exactly.");
+        assert_eq!(span_text(&mut app), "It is 1.5e-10 exactly.");
     }
 
     #[test]
@@ -3759,11 +4239,11 @@ mod tests {
         let mut app = app_with_line(dir.path(), "the cache+1 case");
         press(&mut app, "cw");
         press(&mut app, "w");
-        assert_eq!(span_text(&app), "cache");
+        assert_eq!(span_text(&mut app), "cache");
         press(&mut app, "w");
-        assert_eq!(span_text(&app), "+");
+        assert_eq!(span_text(&mut app), "+");
         press(&mut app, "w");
-        assert_eq!(span_text(&app), "1");
+        assert_eq!(span_text(&mut app), "1");
     }
 
     // ---- Links ------------------------------------------------------------
@@ -3774,9 +4254,9 @@ mod tests {
         let mut app = app_with_line(dir.path(), "See https://example.com/a?x=1 for more");
         press(&mut app, "cw");
         press(&mut app, "w");
-        assert_eq!(span_text(&app), "https://example.com/a?x=1");
+        assert_eq!(span_text(&mut app), "https://example.com/a?x=1");
         press(&mut app, "w");
-        assert_eq!(span_text(&app), "for");
+        assert_eq!(span_text(&mut app), "for");
     }
 
     #[test]
@@ -3784,7 +4264,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "See https://example.com/a.html for it. Then.");
         press(&mut app, "cs");
-        assert_eq!(span_text(&app), "See https://example.com/a.html for it.");
+        assert_eq!(
+            span_text(&mut app),
+            "See https://example.com/a.html for it."
+        );
     }
 
     #[test]
@@ -3792,12 +4275,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "See https://example.com. Then more.");
         press(&mut app, "cs");
-        assert_eq!(span_text(&app), "See https://example.com.");
+        assert_eq!(span_text(&mut app), "See https://example.com.");
         press(&mut app, "cw");
         press(&mut app, "w");
-        assert_eq!(span_text(&app), "https://example.com");
+        assert_eq!(span_text(&mut app), "https://example.com");
         press(&mut app, "w");
-        assert_eq!(span_text(&app), ".");
+        assert_eq!(span_text(&mut app), ".");
     }
 
     #[test]
@@ -3806,11 +4289,11 @@ mod tests {
         let mut app = app_with_line(dir.path(), "see (https://doi.org/10.1000/182) there");
         press(&mut app, "cw");
         press(&mut app, "w");
-        assert_eq!(span_text(&app), "(");
+        assert_eq!(span_text(&mut app), "(");
         press(&mut app, "w");
-        assert_eq!(span_text(&app), "https://doi.org/10.1000/182");
+        assert_eq!(span_text(&mut app), "https://doi.org/10.1000/182");
         press(&mut app, "w");
-        assert_eq!(span_text(&app), ")");
+        assert_eq!(span_text(&mut app), ")");
     }
 
     #[test]
@@ -3819,7 +4302,7 @@ mod tests {
         let mut app = app_with_line(dir.path(), "at https://x.org/wiki/Glob_(pattern) today");
         press(&mut app, "cw");
         press(&mut app, "w");
-        assert_eq!(span_text(&app), "https://x.org/wiki/Glob_(pattern)");
+        assert_eq!(span_text(&mut app), "https://x.org/wiki/Glob_(pattern)");
     }
 
     #[test]
@@ -3828,11 +4311,11 @@ mod tests {
         let mut app = app_with_line(dir.path(), "see doi.org/10.1000/182 and www.example.com/x");
         press(&mut app, "cw");
         press(&mut app, "w");
-        assert_eq!(span_text(&app), "doi.org/10.1000/182");
+        assert_eq!(span_text(&mut app), "doi.org/10.1000/182");
         press(&mut app, "w");
-        assert_eq!(span_text(&app), "and");
+        assert_eq!(span_text(&mut app), "and");
         press(&mut app, "w");
-        assert_eq!(span_text(&app), "www.example.com/x");
+        assert_eq!(span_text(&mut app), "www.example.com/x");
     }
 
     #[test]
@@ -3841,9 +4324,9 @@ mod tests {
         let mut app = app_with_line(dir.path(), "write to jane.doe@example.com today");
         press(&mut app, "cw");
         press(&mut app, "ww");
-        assert_eq!(span_text(&app), "jane.doe@example.com");
+        assert_eq!(span_text(&mut app), "jane.doe@example.com");
         press(&mut app, "w");
-        assert_eq!(span_text(&app), "today");
+        assert_eq!(span_text(&mut app), "today");
     }
 
     #[test]
@@ -3854,11 +4337,11 @@ mod tests {
         let mut app = app_with_line(dir.path(), "one and/or two");
         press(&mut app, "cw");
         press(&mut app, "w");
-        assert_eq!(span_text(&app), "and");
+        assert_eq!(span_text(&mut app), "and");
         press(&mut app, "w");
-        assert_eq!(span_text(&app), "/");
+        assert_eq!(span_text(&mut app), "/");
         press(&mut app, "w");
-        assert_eq!(span_text(&app), "or");
+        assert_eq!(span_text(&mut app), "or");
     }
 
     #[test]
@@ -3867,9 +4350,9 @@ mod tests {
         let mut app = app_with_line(dir.path(), "a well-known result");
         press(&mut app, "cw");
         press(&mut app, "w");
-        assert_eq!(span_text(&app), "well-known");
+        assert_eq!(span_text(&mut app), "well-known");
         press(&mut app, "w");
-        assert_eq!(span_text(&app), "result");
+        assert_eq!(span_text(&mut app), "result");
     }
 
     #[test]
@@ -3880,7 +4363,7 @@ mod tests {
         let mut app = app_with_line(dir.path(), "the state-of-the-art method");
         press(&mut app, "cw");
         press(&mut app, "w");
-        assert_eq!(span_text(&app), "state-of-the-art");
+        assert_eq!(span_text(&mut app), "state-of-the-art");
     }
 
     #[test]
@@ -3889,7 +4372,7 @@ mod tests {
         let mut app = app_with_line(dir.path(), "the COVID-19 data");
         press(&mut app, "cw");
         press(&mut app, "w");
-        assert_eq!(span_text(&app), "COVID-19");
+        assert_eq!(span_text(&mut app), "COVID-19");
     }
 
     #[test]
@@ -3899,7 +4382,7 @@ mod tests {
         press(&mut app, "cw");
         press(&mut app, "www"); // a, well-known, result
         press(&mut app, "b");
-        assert_eq!(span_text(&app), "well-known");
+        assert_eq!(span_text(&mut app), "well-known");
     }
 
     #[test]
@@ -3909,9 +4392,9 @@ mod tests {
         let mut app = app_with_line(dir.path(), "one - two");
         press(&mut app, "cw");
         press(&mut app, "w");
-        assert_eq!(span_text(&app), "-");
+        assert_eq!(span_text(&mut app), "-");
         press(&mut app, "w");
-        assert_eq!(span_text(&app), "two");
+        assert_eq!(span_text(&mut app), "two");
     }
 
     #[test]
@@ -3920,9 +4403,9 @@ mod tests {
         let mut app = app_with_line(dir.path(), "the well- known result");
         press(&mut app, "cw");
         press(&mut app, "w");
-        assert_eq!(span_text(&app), "well");
+        assert_eq!(span_text(&mut app), "well");
         press(&mut app, "w");
-        assert_eq!(span_text(&app), "-");
+        assert_eq!(span_text(&mut app), "-");
     }
 
     #[test]
@@ -3932,11 +4415,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "one—two three");
         press(&mut app, "cw");
-        assert_eq!(span_text(&app), "one");
+        assert_eq!(span_text(&mut app), "one");
         press(&mut app, "w");
-        assert_eq!(span_text(&app), "—");
+        assert_eq!(span_text(&mut app), "—");
         press(&mut app, "w");
-        assert_eq!(span_text(&app), "two");
+        assert_eq!(span_text(&mut app), "two");
     }
 
     #[test]
@@ -3947,9 +4430,9 @@ mod tests {
         let mut app = app_with_line(dir.path(), "one--two three");
         press(&mut app, "cw");
         press(&mut app, "w");
-        assert_eq!(span_text(&app), "--");
+        assert_eq!(span_text(&mut app), "--");
         press(&mut app, "w");
-        assert_eq!(span_text(&app), "two");
+        assert_eq!(span_text(&mut app), "two");
     }
 
     #[test]
@@ -3957,7 +4440,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "It is a well-known result. Then more.");
         press(&mut app, "cs");
-        assert_eq!(span_text(&app), "It is a well-known result.");
+        assert_eq!(span_text(&mut app), "It is a well-known result.");
     }
 
     // ---- Page furniture ---------------------------------------------------
@@ -5808,5 +6291,448 @@ mod tests {
         .unwrap();
         let app = App::new(config, None);
         assert_eq!(app.startup_warnings().len(), 2);
+    }
+
+    // ---- Highlight mode -------------------------------------------------
+    //
+    // `press` parses with `parse_sequence`, which has no leader, so the save
+    // binding is written out as `<Space>w` here. That is the expansion these
+    // tests are checking anyway.
+
+    /// The default highlight colour, as the config defines it.
+    fn highlight_color() -> String {
+        syodep_config::ViewConfig::default().highlight_color
+    }
+
+    #[test]
+    fn a_from_focus_mode_starts_a_highlight_over_the_focused_word() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma"]);
+        press(&mut app, "cw");
+        let span = app.focus_span().expect("word focused");
+
+        press(&mut app, "a");
+        assert_eq!(app.mode(), Mode::Highlight);
+        assert!(app.has_pending_highlight());
+        // Entering synthesises the second end, so the extent is unchanged but
+        // every visual motion now applies to it.
+        assert_eq!(app.visual_span(), Some(span));
+        assert!(app.highlight_screen_rects().is_some());
+        // Nothing is stored until it is committed.
+        assert!(app.highlights().is_empty());
+        assert!(app.status_text().contains("-- HIGHLIGHT (word) --"));
+    }
+
+    #[test]
+    fn a_from_visual_mode_keeps_the_selection_it_had() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma"]);
+        press(&mut app, "vw");
+        press(&mut app, "w");
+        let span = app.visual_span().expect("two words selected");
+        let anchor = app.visual_selection().unwrap();
+
+        press(&mut app, "a");
+        assert_eq!(app.mode(), Mode::Highlight);
+        assert_eq!(app.visual_span(), Some(span));
+        assert_eq!(app.visual_selection().unwrap(), anchor);
+    }
+
+    #[test]
+    fn highlight_mode_reshapes_exactly_as_visual_mode_does() {
+        // The invariant behind binding `[highlight_keys]` to the `visual_*`
+        // commands: there is one implementation of reshaping a selection, so the
+        // same keys must produce the same extent in both modes.
+        let dir = tempfile::tempdir().unwrap();
+        for keys in ["l", "w", "e", "b", "j", "oo", "ol", "ow", "3l"] {
+            let mut visual = app_with_text_pages(dir.path(), &["alpha beta gamma delta"]);
+            press(&mut visual, "vw");
+            press(&mut visual, keys);
+
+            let mut highlight = app_with_text_pages(dir.path(), &["alpha beta gamma delta"]);
+            press(&mut highlight, "vw");
+            press(&mut highlight, "a");
+            press(&mut highlight, keys);
+
+            assert_eq!(highlight.mode(), Mode::Highlight, "for {keys:?}");
+            assert_eq!(
+                highlight.visual_span(),
+                visual.visual_span(),
+                "reshaping with {keys:?} must match visual mode"
+            );
+        }
+    }
+
+    #[test]
+    fn a_second_a_stores_the_highlight_and_returns_to_visual_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma"]);
+        press(&mut app, "cw");
+        press(&mut app, "a");
+        press(&mut app, "w");
+        let span = app.visual_span().expect("selection grown");
+
+        press(&mut app, "a");
+        assert_eq!(app.mode(), Mode::Visual, "back to selecting");
+        assert!(!app.has_pending_highlight());
+        // "with the same text still selected".
+        assert_eq!(app.visual_span(), Some(span));
+
+        assert_eq!(app.highlights().len(), 1);
+        let stored = &app.highlights()[0];
+        assert_eq!(stored.color, highlight_color());
+        assert_eq!(stored.text, "alpha beta");
+        assert!(!stored.rects.is_empty());
+        assert!(stored.rects.iter().all(|r| r.page == 0));
+        assert!(stored.id.is_some(), "persisted to the database");
+        // The stored highlight keeps being drawn now that the pending one is gone.
+        assert!(app.highlight_screen_rects().is_some());
+    }
+
+    #[test]
+    fn escape_and_backspace_restore_what_a_was_pressed_on() {
+        for undo in ["<Esc>", "<BS>"] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma delta"]);
+            // From visual mode, so there is an anchor that must survive intact.
+            press(&mut app, "vw");
+            press(&mut app, "w");
+            let before = (
+                app.mode(),
+                app.focus_caret(),
+                app.focus_scope(),
+                app.visual_selection(),
+                app.visual_span(),
+            );
+
+            press(&mut app, "a");
+            // Reshape first: the restore must undo the motions too, not just the
+            // mode change.
+            press(&mut app, "3l");
+            assert_ne!(app.visual_span(), before.4);
+
+            press(&mut app, undo);
+            assert_eq!(
+                (
+                    app.mode(),
+                    app.focus_caret(),
+                    app.focus_scope(),
+                    app.visual_selection(),
+                    app.visual_span(),
+                ),
+                before,
+                "{undo} must restore the mode and the selection"
+            );
+            assert!(app.highlights().is_empty(), "{undo} must store nothing");
+            assert!(!app.has_pending_highlight());
+        }
+    }
+
+    #[test]
+    fn discarding_from_focus_mode_takes_the_synthesised_anchor_away_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma"]);
+        press(&mut app, "cw");
+        let span = app.focus_span().unwrap();
+        press(&mut app, "a");
+        press(&mut app, "l");
+        press(&mut app, "<Esc>");
+
+        assert_eq!(app.mode(), Mode::Focus);
+        assert_eq!(app.focus_span(), Some(span));
+        // Entering from focus mode invented the second end, so discarding must
+        // uninvent it — otherwise focus mode would be left holding a selection.
+        assert!(app.visual_selection().is_none());
+        assert!(app.visual_span().is_none());
+        assert!(app.visual_screen_rects().is_none());
+    }
+
+    #[test]
+    fn v_and_c_store_the_highlight_and_switch_mode() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // `vw`: keep it, carry on selecting, head now word-granular.
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma"]);
+        press(&mut app, "cc");
+        press(&mut app, "a");
+        press(&mut app, "l");
+        let span = app.visual_span().unwrap();
+        press(&mut app, "vw");
+        assert_eq!(app.mode(), Mode::Visual);
+        assert_eq!(app.focus_scope(), Scope::Word);
+        assert_eq!(app.highlights().len(), 1, "the highlight was kept");
+        // The selection survives: the head's scope grew it, it was not collapsed.
+        let after = app.visual_span().unwrap();
+        assert!(
+            after.0 <= span.0 && after.1 >= span.1,
+            "{after:?} vs {span:?}"
+        );
+
+        // `cw`: keep it, and go to focus mode, which has no second end.
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma"]);
+        press(&mut app, "vc");
+        press(&mut app, "a");
+        press(&mut app, "cw");
+        assert_eq!(app.mode(), Mode::Focus);
+        assert_eq!(app.focus_scope(), Scope::Word);
+        assert_eq!(app.highlights().len(), 1);
+        assert!(app.visual_selection().is_none());
+    }
+
+    #[test]
+    fn bare_v_out_of_highlight_mode_keeps_the_selection() {
+        // The regression the early branch in `enter_visual` exists for: its
+        // ordinary path collapses the selection onto the head, which would throw
+        // away the extent the user just built.
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma"]);
+        press(&mut app, "vw");
+        press(&mut app, "w");
+        press(&mut app, "a");
+        let span = app.visual_span().unwrap();
+        press(&mut app, "v");
+        // `v` is also a prefix, so the pause is what resolves it.
+        app.handle_timeout();
+        assert_eq!(app.mode(), Mode::Visual);
+        assert_eq!(app.visual_span(), Some(span));
+        assert_eq!(app.highlights().len(), 1);
+    }
+
+    #[test]
+    fn a_is_unbound_in_normal_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta"]);
+        // Leave a focus position behind, then return to normal: `a` must not
+        // resurrect it as a highlight.
+        press(&mut app, "cw");
+        press(&mut app, "<Esc>");
+        assert_eq!(app.mode(), Mode::Normal);
+        press(&mut app, "a");
+        assert_eq!(app.mode(), Mode::Normal);
+        assert!(!app.has_pending_highlight());
+        assert!(app.highlights().is_empty());
+    }
+
+    #[test]
+    fn highlight_commands_without_a_document_do_not_crash() {
+        let mut app = App::new(Config::default(), None);
+        press(&mut app, "a");
+        assert_eq!(app.mode(), Mode::Normal);
+        assert!(app.highlight_screen_rects().is_none());
+        press(&mut app, "<Space>w");
+        assert!(app.highlights().is_empty());
+    }
+
+    #[test]
+    fn a_highlight_can_span_pages() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta", "gamma delta"]);
+        press(&mut app, "cw");
+        press(&mut app, "a");
+        // Four words forward crosses onto the second page.
+        press(&mut app, "4w");
+        press(&mut app, "a");
+
+        let stored = &app.highlights()[0];
+        let pages: Vec<usize> = stored.rects.iter().map(|r| r.page).collect();
+        assert!(pages.contains(&0) && pages.contains(&1), "{pages:?}");
+        assert!(stored.text.contains("alpha"));
+        assert!(stored.text.contains("gamma"));
+    }
+
+    #[test]
+    fn stored_highlights_come_back_on_reopen_without_extracting_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_pdf_bytes(
+            dir.path(),
+            "text.pdf",
+            pdf_with_pages(&["alpha beta gamma"]),
+        );
+        let db = dir.path().join("syodep.sqlite3");
+
+        let stored = {
+            let mut app = App::new(Config::default(), Some(Storage::open(&db).unwrap()));
+            app.set_viewport_size(595.0, 600.0);
+            app.open_document(&path).unwrap();
+            press(&mut app, "cw");
+            press(&mut app, "aa");
+            let stored = app.highlights().to_vec();
+            assert_eq!(stored.len(), 1);
+            stored
+        };
+
+        // A second app on the same database is the "closed and reopened" case:
+        // the highlight can only come from storage.
+        let mut app = App::new(Config::default(), Some(Storage::open(&db).unwrap()));
+        app.set_viewport_size(595.0, 600.0);
+        app.open_document(&path).unwrap();
+        assert_eq!(app.mode(), Mode::Normal, "a fresh open resets the mode");
+        assert_eq!(app.highlights(), stored.as_slice());
+        assert!(
+            app.highlight_screen_rects().is_some(),
+            "stored geometry is enough to draw them, with no content extracted"
+        );
+    }
+
+    #[test]
+    fn saving_embeds_the_highlights_and_reopens_where_you_were() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma"]);
+        let path = app.document_path().unwrap().to_owned();
+        let before = std::fs::read(&path).unwrap();
+
+        press(&mut app, "cw");
+        press(&mut app, "aa");
+        assert_eq!(app.mode(), Mode::Visual);
+        let span = app.visual_span().unwrap();
+        let zoom = app.zoom();
+
+        let effects = press(&mut app, "<Space>w");
+        assert!(effects.reload, "the shell must drop its page bitmaps");
+        assert!(
+            app.status_text().contains("saved 1 highlight"),
+            "{}",
+            app.status_text()
+        );
+        assert!(app.last_error().is_none(), "{:?}", app.last_error());
+
+        // The file was rewritten, in place, with a real PDF highlight in it.
+        assert_ne!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(syodep_pdf::page_highlights(&path, 0).unwrap().len(), 1);
+        assert!(
+            !path.with_extension("pdf.syodep-tmp").exists(),
+            "the temporary file must be gone"
+        );
+
+        // Where you were survived the reload.
+        assert_eq!(app.mode(), Mode::Visual);
+        assert_eq!(app.visual_span(), Some(span));
+        assert_eq!(app.zoom(), zoom);
+        // The highlight lives in the PDF now, so the overlay stops drawing it —
+        // otherwise it would be painted twice.
+        assert!(app.highlights().is_empty());
+        assert!(app.highlight_screen_rects().is_none());
+    }
+
+    #[test]
+    fn saving_carries_the_reading_position_to_the_new_fingerprint() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_pdf_bytes(
+            dir.path(),
+            "text.pdf",
+            pdf_with_pages(&["alpha beta", "second page"]),
+        );
+        let db = dir.path().join("syodep.sqlite3");
+
+        let scrolled = {
+            let mut app = App::new(Config::default(), Some(Storage::open(&db).unwrap()));
+            app.set_viewport_size(595.0, 600.0);
+            app.open_document(&path).unwrap();
+            press(&mut app, "J"); // a distinctive reading position
+            let scrolled = app.current_page();
+            assert!(scrolled > 0);
+            press(&mut app, "cw");
+            press(&mut app, "aa");
+            press(&mut app, "<Space>w");
+            assert!(app.last_error().is_none(), "{:?}", app.last_error());
+            scrolled
+        };
+
+        // Rewriting changed the content hash, and documents are keyed by hash.
+        // Opening the saved file afresh must still find the position, which only
+        // works because the row was re-keyed rather than orphaned.
+        let mut app = App::new(Config::default(), Some(Storage::open(&db).unwrap()));
+        app.set_viewport_size(595.0, 600.0);
+        app.open_document(&path).unwrap();
+        assert_eq!(app.current_page(), scrolled);
+    }
+
+    #[test]
+    fn saving_with_nothing_to_save_leaves_the_file_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta"]);
+        let path = app.document_path().unwrap().to_owned();
+        let before = std::fs::read(&path).unwrap();
+        press(&mut app, "<Space>w");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(app.last_error().is_none());
+    }
+
+    #[test]
+    fn saving_from_highlight_mode_keeps_the_pending_highlight() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma"]);
+        let path = app.document_path().unwrap().to_owned();
+        press(&mut app, "cw");
+        press(&mut app, "a");
+        press(&mut app, "<Space>w");
+        assert!(app.last_error().is_none(), "{:?}", app.last_error());
+        assert_eq!(app.mode(), Mode::Visual, "the highlight was committed");
+        assert!(!app.has_pending_highlight());
+        assert_eq!(syodep_pdf::page_highlights(&path, 0).unwrap().len(), 1);
+    }
+
+    /// A save that cannot write must leave everything exactly as it was.
+    ///
+    /// Unix only, because the failure is forced by taking write permission off
+    /// the containing directory — the portable-enough way to stop the temporary
+    /// file being created. Putting a directory in its place does *not* work:
+    /// MuPDF removes whatever is at the path it is told to save to.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_save_leaves_the_document_open_and_intact() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma"]);
+        let path = app.document_path().unwrap().to_owned();
+        press(&mut app, "cw");
+        press(&mut app, "aa");
+        let before = std::fs::read(&path).unwrap();
+
+        let original = std::fs::metadata(dir.path()).unwrap().permissions();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+        let effects = press(&mut app, "<Space>w");
+        // Restored before asserting, so a failing assertion cannot leave an
+        // undeletable temporary directory behind.
+        std::fs::set_permissions(dir.path(), original).unwrap();
+
+        assert!(!effects.reload);
+        assert!(app.last_error().is_some(), "the failure must be reported");
+        assert_eq!(std::fs::read(&path).unwrap(), before, "original untouched");
+        assert!(app.has_document(), "still open");
+        assert_eq!(app.highlights().len(), 1, "the highlight is still there");
+        assert!(!path.with_extension("pdf.syodep-tmp").exists());
+    }
+
+    #[test]
+    fn the_leader_is_configurable_and_degrades_when_invalid() {
+        let dir = tempfile::tempdir().unwrap();
+        // A comma leader means `,w` saves and `<Space>w` no longer does.
+        let config = Config::from_toml("[input]\nleader = \",\"\n").unwrap();
+        let mut app = App::new(config, Some(Storage::in_memory().unwrap()));
+        app.set_viewport_size(595.0, 600.0);
+        app.open_document(&write_pdf_bytes(
+            dir.path(),
+            "text.pdf",
+            pdf_with_pages(&["alpha beta"]),
+        ))
+        .unwrap();
+        let path = app.document_path().unwrap().to_owned();
+        press(&mut app, "cw");
+        press(&mut app, "aa");
+        press(&mut app, ",w");
+        assert!(app.last_error().is_none(), "{:?}", app.last_error());
+        assert_eq!(syodep_pdf::page_highlights(&path, 0).unwrap().len(), 1);
+
+        // An unparseable leader warns and falls back rather than costing the user
+        // every `<leader>` binding they have.
+        let config = Config::from_toml("[input]\nleader = \"<Nope>\"\n").unwrap();
+        let app = App::new(config, None);
+        let warnings = app.startup_warnings();
+        assert!(
+            warnings.iter().any(|w| w.contains("leader")),
+            "{warnings:?}"
+        );
     }
 }

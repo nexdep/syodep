@@ -30,6 +30,13 @@ public:
     void setBackgroundColor(const QColor &color) { m_background = color; }
     void setFocusColor(const QColor &color) { m_focusColor = color; }
     void setVisualColor(const QColor &color) { m_visualColor = color; }
+    void setHighlightColor(const QColor &color) { m_highlightColor = color; }
+
+    // Drop the cached page images. Needed whenever the bytes behind a page
+    // change without its size changing -- opening another document, or a save
+    // rewriting this one -- since the cache is otherwise only invalidated by a
+    // width mismatch.
+    void clearPageCache() { m_pageCache.clear(); }
 
 signals:
     // Emitted after any event was forwarded to the core, so the main window
@@ -57,10 +64,12 @@ private:
     QTimer m_pendingTimer;
 
     QColor m_background;
-    // One colour for every focus mode, one for the selection: the highlight
-    // says whether focus or selection is active, not which scope.
+    // One colour for every focus mode, one for the selection, one for
+    // highlights: the colour says whether focus, a selection or a highlight is
+    // active, not which scope.
     QColor m_focusColor;
     QColor m_visualColor;
+    QColor m_highlightColor;
 
     struct CachedPage
     {

@@ -35,6 +35,10 @@ use crate::command::{Command, UnknownCommand};
 #[derive(Debug, Default, Clone)]
 pub struct Keymap {
     root: Node,
+    /// What `<leader>` expands to in binding strings. Carried on the keymap so
+    /// the mode keymaps — each a clone of the normal one plus an overlay — cannot
+    /// end up with a different leader from the table they were built from.
+    leader: Vec<Chord>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -63,11 +67,17 @@ impl Keymap {
     /// All entries are validated; every invalid entry is reported (not just
     /// the first), so users can fix their config in one pass. Valid entries
     /// are kept even when others fail.
-    pub fn from_entries<'a, I>(entries: I) -> (Self, Vec<KeymapError>)
+    ///
+    /// `leader` is what `<leader>` in a binding expands to; pass an empty slice
+    /// for a keymap whose bindings never use it.
+    pub fn from_entries<'a, I>(entries: I, leader: &[Chord]) -> (Self, Vec<KeymapError>)
     where
         I: IntoIterator<Item = (&'a str, &'a str)>,
     {
-        let mut keymap = Self::default();
+        let mut keymap = Self {
+            leader: leader.to_vec(),
+            ..Self::default()
+        };
         let errors = keymap.overlay(entries);
         (keymap, errors)
     }
@@ -77,13 +87,17 @@ impl Keymap {
     /// build the caret-focus keymap as the normal keymap plus a few overrides,
     /// so normal-binding errors are validated (and reported) only once.
     /// Returns the errors found in *these* entries only.
+    ///
+    /// The leader comes from the keymap being overlaid, so a mode table sees the
+    /// same `<leader>` as the normal table it extends.
     pub fn overlay<'a, I>(&mut self, entries: I) -> Vec<KeymapError>
     where
         I: IntoIterator<Item = (&'a str, &'a str)>,
     {
         let mut errors = Vec::new();
+        let leader = std::mem::take(&mut self.leader);
         for (sequence, command_name) in entries {
-            let chords = match keys::parse_sequence(sequence) {
+            let chords = match keys::parse_sequence_with_leader(sequence, &leader) {
                 Ok(chords) => chords,
                 Err(e) => {
                     errors.push(KeymapError::Key(e));
@@ -102,6 +116,7 @@ impl Keymap {
             };
             self.bind(&chords, command);
         }
+        self.leader = leader;
         errors
     }
 
@@ -293,20 +308,23 @@ mod tests {
     use super::*;
 
     fn test_keymap() -> Keymap {
-        let (keymap, errors) = Keymap::from_entries([
-            ("j", "scroll_down"),
-            ("k", "scroll_up"),
-            ("gg", "goto_first_page"),
-            ("G", "goto_last_page"),
-            ("<C-d>", "scroll_half_page_down"),
-            ("zw", "fit_width"),
-            ("z0", "zoom_reset"),
-            ("<Esc>", "cancel"),
-            // `o` is both a complete binding and a prefix of `ow` -- the case
-            // the longest-prefix fallback exists for.
-            ("o", "open_file"),
-            ("ow", "fit_width"),
-        ]);
+        let (keymap, errors) = Keymap::from_entries(
+            [
+                ("j", "scroll_down"),
+                ("k", "scroll_up"),
+                ("gg", "goto_first_page"),
+                ("G", "goto_last_page"),
+                ("<C-d>", "scroll_half_page_down"),
+                ("zw", "fit_width"),
+                ("z0", "zoom_reset"),
+                ("<Esc>", "cancel"),
+                // `o` is both a complete binding and a prefix of `ow` -- the case
+                // the longest-prefix fallback exists for.
+                ("o", "open_file"),
+                ("ow", "fit_width"),
+            ],
+            &[],
+        );
         assert!(errors.is_empty(), "{errors:?}");
         keymap
     }
@@ -598,11 +616,14 @@ mod tests {
 
     #[test]
     fn keymap_reports_all_errors_but_keeps_valid_entries() {
-        let (keymap, errors) = Keymap::from_entries([
-            ("j", "scroll_down"),
-            ("<Oops>", "scroll_up"),
-            ("k", "not_a_command"),
-        ]);
+        let (keymap, errors) = Keymap::from_entries(
+            [
+                ("j", "scroll_down"),
+                ("<Oops>", "scroll_up"),
+                ("k", "not_a_command"),
+            ],
+            &[],
+        );
         assert_eq!(errors.len(), 2);
         let messages: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
         assert!(messages.iter().any(|m| m.contains("Oops")), "{messages:?}");
@@ -619,6 +640,43 @@ mod tests {
             }
         );
     }
+
+    #[test]
+    fn a_leader_binding_becomes_an_ordinary_sequence() {
+        let leader = vec![Chord::named(NamedKey::Space)];
+        let (mut keymap, errors) = Keymap::from_entries(
+            [("<leader>w", "save_document"), ("w", "fit_width")],
+            &leader,
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+        // The overlay inherits the leader from the keymap it extends, so a mode
+        // table can use `<leader>` too.
+        assert!(keymap.overlay([("<leader>q", "quit")]).is_empty());
+
+        let mut input = InputState::new();
+        // `<Space>` is a prefix only, so it waits; `w` then completes the leader
+        // binding rather than firing the bare `w` one.
+        assert_eq!(
+            input.handle(&keymap, Chord::named(NamedKey::Space)),
+            KeyOutcome::Pending
+        );
+        assert_eq!(
+            input.handle(&keymap, chord('w')),
+            KeyOutcome::Command {
+                command: Command::SaveDocument,
+                count: None,
+            }
+        );
+        // And bare `w` is untouched.
+        assert_eq!(
+            input.handle(&keymap, chord('w')),
+            KeyOutcome::Command {
+                command: Command::FitWidth,
+                count: None,
+            }
+        );
+    }
+
     // ---- the pause -----------------------------------------------------
     //
     // The core never reads a clock: "waiting" in a test is a `timeout` call.

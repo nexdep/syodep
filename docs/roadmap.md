@@ -28,8 +28,9 @@ Ordered roughly by dependency:
 2. 🚧 Keyboard text selection + selection overlay rendering (done: visual
    mode, `v`/`vc`/`vw`/`ve`/`vs`/`vp`, two independently-scoped ends, `o` to
    switch ends); mouse selection still to come
-3. ⬜ Highlight selected text; SQLite `highlights` table (migration v2);
-   highlight overlays rendered on reload
+3. ✅ Highlight selected text (highlight mode, `a`); SQLite `highlights` table
+   (migration v2); highlight overlays rendered on reload; `<leader>w` saves the
+   PDF with the highlights embedded as real PDF annotations
 4. ⬜ Search within document; result overlays; `/`, `n`, `N`
 5. ⬜ Text notes attached to highlights
 6. ⬜ Bookmarks (current position) and single-key marks (`m{a-z}`,
@@ -43,7 +44,9 @@ Delivered ahead of the rest: a **modal caret** (`c` to enter, then `hjkl`)
 navigates the content layer character- and line-wise across text and images,
 auto-scrolling to follow, plus word/line/sentence/paragraph scopes over
 the same layer. **Visual mode** (item 2) builds a two-ended selection on top of
-them, and is the seam highlighting builds on. See the development log.
+them, and was the seam **highlight mode** (item 3) built on: it reuses visual
+mode's motion *commands* outright, so highlighting a range and selecting one are
+the same code. See the development log.
 
 ## Phase 3 — text objects and smart navigation ⬜
 

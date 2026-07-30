@@ -140,9 +140,38 @@ pub struct KeyParseError {
     pub message: String,
 }
 
+/// The bracketed token that stands for the configured leader key.
+pub const LEADER_TOKEN: &str = "leader";
+
 /// Parse a full key sequence such as `gg`, `5j` is NOT valid here (counts are
 /// runtime input, not bindings), `g<C-d>` is.
+///
+/// `<leader>` is *not* accepted here, because this function has no leader to
+/// expand it to — use [`parse_sequence_with_leader`] for bindings. That is also
+/// what stops a leader defined as `<leader>` from recursing: the leader itself is
+/// parsed with this function.
 pub fn parse_sequence(input: &str) -> Result<Vec<Chord>, KeyParseError> {
+    parse_sequence_inner(input, None)
+}
+
+/// Parse a key sequence in which `<leader>` (any capitalisation) stands for
+/// `leader`, the user's configured leader chords.
+///
+/// Expansion is a splice rather than a distinct chord kind: once a binding is in
+/// the keymap it is an ordinary sequence, so the leader costs the input state
+/// machine nothing and `<leader>w` disambiguates against `w` by the same
+/// prefix rules as `gg` against `g`.
+pub fn parse_sequence_with_leader(
+    input: &str,
+    leader: &[Chord],
+) -> Result<Vec<Chord>, KeyParseError> {
+    parse_sequence_inner(input, Some(leader))
+}
+
+fn parse_sequence_inner(
+    input: &str,
+    leader: Option<&[Chord]>,
+) -> Result<Vec<Chord>, KeyParseError> {
     let err = |message: String| KeyParseError {
         sequence: input.to_owned(),
         message,
@@ -161,6 +190,19 @@ pub fn parse_sequence(input: &str) -> Result<Vec<Chord>, KeyParseError> {
                     Some(c) => inner.push(c),
                     None => return Err(err(format!("unclosed '<' before end of {input:?}"))),
                 }
+            }
+            if inner.eq_ignore_ascii_case(LEADER_TOKEN) {
+                match leader {
+                    Some(leader) => chords.extend_from_slice(leader),
+                    None => {
+                        return Err(err(
+                            "<leader> is only allowed in keybindings; set the leader \
+                             itself with [input] leader"
+                                .to_owned(),
+                        ))
+                    }
+                }
+                continue;
             }
             chords.push(parse_bracketed(&inner).map_err(err)?);
         } else if c.is_whitespace() {
@@ -287,6 +329,38 @@ mod tests {
 
         let err = parse_sequence("g g").unwrap_err();
         assert!(err.message.contains("whitespace"), "{err}");
+    }
+
+    #[test]
+    fn leader_expands_to_its_chords() {
+        let leader = parse_sequence("<Space>").unwrap();
+        assert_eq!(
+            parse_sequence_with_leader("<leader>w", &leader).unwrap(),
+            vec![Chord::named(NamedKey::Space), Chord::char('w')]
+        );
+        // Capitalisation of the token does not matter, and a multi-chord leader
+        // splices in whole.
+        let long = parse_sequence("g<C-d>").unwrap();
+        assert_eq!(
+            parse_sequence_with_leader("<Leader>x", &long).unwrap(),
+            vec![
+                Chord::char('g'),
+                Chord {
+                    key: Key::Char('d'),
+                    ctrl: true,
+                    alt: false
+                },
+                Chord::char('x'),
+            ]
+        );
+    }
+
+    #[test]
+    fn leader_is_rejected_where_there_is_none_to_expand() {
+        // Which is what keeps `leader = "<leader>"` from recursing: the leader
+        // string itself goes through `parse_sequence`.
+        let err = parse_sequence("<leader>w").unwrap_err();
+        assert!(err.message.contains("[input] leader"), "{err}");
     }
 
     #[test]

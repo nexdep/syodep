@@ -44,6 +44,33 @@ pub struct Position {
     pub zoom: f32,
 }
 
+/// One rectangle of a highlight, in page points with the origin at the top left
+/// (the space the content layer reports).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HighlightRect {
+    pub page: usize,
+    pub x0: f32,
+    pub y0: f32,
+    pub x1: f32,
+    pub y1: f32,
+}
+
+/// A stored highlight: its geometry and the text it covers.
+///
+/// Geometry rather than a document position, because rectangles are what all
+/// three consumers need — the overlay renderer, the PDF writer's per-page
+/// `/QuadPoints`, and later the exporters — and because they stay valid without
+/// re-extracting the page's content layer on reload.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredHighlight {
+    pub id: i64,
+    /// `#rrggbb`.
+    pub color: String,
+    pub text: String,
+    /// In document order, one per covered line.
+    pub rects: Vec<HighlightRect>,
+}
+
 /// Handle to the syodep database.
 #[derive(Debug)]
 pub struct Storage {
@@ -147,6 +174,124 @@ impl Storage {
             )
             .optional()?;
         Ok(position)
+    }
+
+    /// Point an existing document row at a new content fingerprint.
+    ///
+    /// Needed because saving rewrites the PDF, which changes the SHA-256 the
+    /// document is keyed by. Moving the row rather than inserting a new one is
+    /// what carries the reading position across the save — otherwise every save
+    /// would silently orphan it.
+    pub fn rekey_document(
+        &self,
+        document_id: i64,
+        fingerprint: &str,
+        path: &str,
+    ) -> Result<(), StorageError> {
+        self.conn.execute(
+            "UPDATE documents SET fingerprint = ?2, path = ?3 WHERE id = ?1",
+            (document_id, fingerprint, path),
+        )?;
+        Ok(())
+    }
+
+    /// Store a highlight and its rectangles, returning the new row id.
+    pub fn insert_highlight(
+        &self,
+        document_id: i64,
+        color: &str,
+        text: &str,
+        rects: &[HighlightRect],
+    ) -> Result<i64, StorageError> {
+        // One transaction: a highlight with no rectangles would be invisible and
+        // unreachable, so the two inserts must not be separable.
+        self.conn.execute("BEGIN", [])?;
+        let result = self.insert_highlight_inner(document_id, color, text, rects);
+        match &result {
+            Ok(_) => self.conn.execute("COMMIT", [])?,
+            Err(_) => self.conn.execute("ROLLBACK", [])?,
+        };
+        result
+    }
+
+    fn insert_highlight_inner(
+        &self,
+        document_id: i64,
+        color: &str,
+        text: &str,
+        rects: &[HighlightRect],
+    ) -> Result<i64, StorageError> {
+        self.conn.execute(
+            "INSERT INTO highlights (document_id, color, text) VALUES (?1, ?2, ?3)",
+            (document_id, color, text),
+        )?;
+        let id = self.conn.last_insert_rowid();
+        let mut statement = self.conn.prepare(
+            "INSERT INTO highlight_rects (highlight_id, ordinal, page, x0, y0, x1, y1)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        )?;
+        for (ordinal, rect) in rects.iter().enumerate() {
+            statement.execute((
+                id,
+                ordinal as i64,
+                rect.page as i64,
+                rect.x0 as f64,
+                rect.y0 as f64,
+                rect.x1 as f64,
+                rect.y1 as f64,
+            ))?;
+        }
+        Ok(id)
+    }
+
+    /// Every highlight of a document, oldest first, each with its rectangles in
+    /// the order they were stored.
+    pub fn load_highlights(&self, document_id: i64) -> Result<Vec<StoredHighlight>, StorageError> {
+        let mut statement = self.conn.prepare(
+            "SELECT id, color, text FROM highlights
+             WHERE document_id = ?1 ORDER BY id",
+        )?;
+        let mut highlights = statement
+            .query_map((document_id,), |row| {
+                Ok(StoredHighlight {
+                    id: row.get(0)?,
+                    color: row.get(1)?,
+                    text: row.get(2)?,
+                    rects: Vec::new(),
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut statement = self.conn.prepare(
+            "SELECT page, x0, y0, x1, y1 FROM highlight_rects
+             WHERE highlight_id = ?1 ORDER BY ordinal",
+        )?;
+        for highlight in &mut highlights {
+            highlight.rects = statement
+                .query_map((highlight.id,), |row| {
+                    Ok(HighlightRect {
+                        page: row.get::<_, i64>(0)? as usize,
+                        x0: row.get::<_, f64>(1)? as f32,
+                        y0: row.get::<_, f64>(2)? as f32,
+                        x1: row.get::<_, f64>(3)? as f32,
+                        y1: row.get::<_, f64>(4)? as f32,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        Ok(highlights)
+    }
+
+    /// Forget every highlight of a document. Called once they have been written
+    /// into the PDF itself, where the renderer picks them up instead.
+    pub fn delete_highlights(&self, document_id: i64) -> Result<(), StorageError> {
+        // `highlight_rects` goes with them: the foreign key cascades, and
+        // `foreign_keys` is ON for every connection this type hands out.
+        self.conn.execute(
+            "DELETE FROM highlights WHERE document_id = ?1",
+            (document_id,),
+        )?;
+        Ok(())
     }
 }
 
@@ -255,5 +400,124 @@ mod tests {
         conn.pragma_update(None, "user_version", 9999).unwrap();
         let err = Storage::from_connection(conn).unwrap_err();
         assert!(matches!(err, StorageError::SchemaTooNew { .. }), "{err}");
+    }
+
+    fn rect(page: usize, x0: f32) -> HighlightRect {
+        HighlightRect {
+            page,
+            x0,
+            y0: 10.0,
+            x1: x0 + 40.0,
+            y1: 24.0,
+        }
+    }
+
+    #[test]
+    fn a_highlight_spanning_pages_round_trips_in_order() {
+        let storage = Storage::in_memory().unwrap();
+        let id = storage.upsert_document("fp", "/a.pdf").unwrap();
+        assert!(storage.load_highlights(id).unwrap().is_empty());
+
+        let rects = vec![rect(0, 72.0), rect(0, 120.0), rect(1, 72.0)];
+        let first = storage
+            .insert_highlight(id, "#ffe066", "hello there", &rects)
+            .unwrap();
+        let second = storage
+            .insert_highlight(id, "#88ccff", "second", &[rect(2, 90.0)])
+            .unwrap();
+
+        let loaded = storage.load_highlights(id).unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(
+            loaded[0],
+            StoredHighlight {
+                id: first,
+                color: "#ffe066".to_owned(),
+                text: "hello there".to_owned(),
+                rects: rects.clone(),
+            }
+        );
+        assert_eq!(loaded[1].id, second);
+        assert_eq!(loaded[1].rects, vec![rect(2, 90.0)]);
+    }
+
+    #[test]
+    fn highlights_belong_to_one_document() {
+        let storage = Storage::in_memory().unwrap();
+        let a = storage.upsert_document("fp-a", "/a.pdf").unwrap();
+        let b = storage.upsert_document("fp-b", "/b.pdf").unwrap();
+        storage
+            .insert_highlight(a, "#ffe066", "in a", &[rect(0, 72.0)])
+            .unwrap();
+        assert_eq!(storage.load_highlights(a).unwrap().len(), 1);
+        assert!(storage.load_highlights(b).unwrap().is_empty());
+    }
+
+    #[test]
+    fn deleting_highlights_takes_their_rectangles_with_them() {
+        let storage = Storage::in_memory().unwrap();
+        let id = storage.upsert_document("fp", "/a.pdf").unwrap();
+        storage
+            .insert_highlight(id, "#ffe066", "gone", &[rect(0, 72.0), rect(0, 120.0)])
+            .unwrap();
+        storage.delete_highlights(id).unwrap();
+        assert!(storage.load_highlights(id).unwrap().is_empty());
+        let orphans: i64 = storage
+            .conn
+            .query_row("SELECT count(*) FROM highlight_rects", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(orphans, 0);
+    }
+
+    #[test]
+    fn deleting_a_document_cascades_to_its_highlights() {
+        let storage = Storage::in_memory().unwrap();
+        let id = storage.upsert_document("fp", "/a.pdf").unwrap();
+        storage
+            .insert_highlight(id, "#ffe066", "gone", &[rect(0, 72.0)])
+            .unwrap();
+        storage
+            .conn
+            .execute("DELETE FROM documents WHERE id = ?1", (id,))
+            .unwrap();
+        let orphans: i64 = storage
+            .conn
+            .query_row("SELECT count(*) FROM highlight_rects", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(orphans, 0);
+    }
+
+    #[test]
+    fn rekeying_carries_the_position_and_highlights_across() {
+        // What saving does: the file is rewritten, so its fingerprint changes.
+        // The row must follow, or the reading position is orphaned every time.
+        let storage = Storage::in_memory().unwrap();
+        let id = storage.upsert_document("old-fp", "/a.pdf").unwrap();
+        let position = Position {
+            scroll_x: 0.0,
+            scroll_y: 500.0,
+            zoom: 1.25,
+        };
+        storage.save_position(id, position).unwrap();
+        storage
+            .insert_highlight(id, "#ffe066", "kept", &[rect(0, 72.0)])
+            .unwrap();
+
+        storage.rekey_document(id, "new-fp", "/a.pdf").unwrap();
+
+        // Opening the rewritten file finds the same row, not a fresh one.
+        assert_eq!(storage.upsert_document("new-fp", "/a.pdf").unwrap(), id);
+        assert_eq!(storage.load_position(id).unwrap(), Some(position));
+        assert_eq!(storage.load_highlights(id).unwrap().len(), 1);
+        // The old fingerprint is gone, so it cannot resurrect a stale row.
+        let stale: i64 = storage
+            .conn
+            .query_row(
+                "SELECT count(*) FROM documents WHERE fingerprint = 'old-fp'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stale, 0);
     }
 }

@@ -61,6 +61,7 @@ MainWindow::MainWindow(QWidget *parent)
     m_canvas->setBackgroundColor(toQColor(syo_app_background_color(m_app)));
     m_canvas->setFocusColor(toQColor(syo_app_focus_color(m_app)));
     m_canvas->setVisualColor(toQColor(syo_app_visual_color(m_app)));
+    m_canvas->setHighlightColor(toQColor(syo_app_highlight_color(m_app)));
     setCentralWidget(m_canvas);
 
     // The canvas covers the window but leaves acceptDrops() false, so Qt walks
@@ -90,6 +91,10 @@ MainWindow::~MainWindow()
 bool MainWindow::openDocument(const QString &path)
 {
     const bool ok = syo_app_open_document(m_app, path.toUtf8().constData());
+    // The cached images belong to the document we just replaced. The canvas only
+    // invalidates them on a width change, so two documents with the same page
+    // width would otherwise show the wrong pages.
+    m_canvas->clearPageCache();
     m_canvas->update();
     refreshStatus();
     return ok;

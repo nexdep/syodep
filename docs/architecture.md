@@ -72,8 +72,8 @@ input take plain data). Key pieces:
   (redraw / quit / open-file-dialog) come out. Persists the reading
   position after every navigation command and on drop.
 - **Focus mode** (`caret.rs` + `app.rs`): one highlighted position over
-  page-content geometry. `Mode` has exactly three variants — `Normal`, `Focus`,
-  `Visual` — and *granularity is not a mode*: `Focus` carries a `Scope` (char,
+  page-content geometry. `Mode` has exactly four variants — `Normal`, `Focus`,
+  `Visual`, `Highlight` — and *granularity is not a mode*: `Focus` carries a `Scope` (char,
   word, line, sentence or paragraph). The app stores one `Caret` plus that
   scope; what is drawn is derived by `scope_span(caret, scope)` and cached in
   `focus_span`, so changing the scope reinterprets the position you are on
@@ -107,12 +107,36 @@ input take plain data). Key pieces:
   maps (scope, direction) onto a motion, and one `span_screen_rects` turns a
   span into overlay rectangles. A scope therefore cannot mean one thing in one
   mode and something else in the other — enforced by construction rather than
-  by discipline. The FFI reflects this: a single `SyoOverlay` shape serves both,
-  fetched with `syo_app_focus` / `syo_app_selection`. Overlays are drawn per
-  *visible* page, so cost does not grow with span length.
+  by discipline. The FFI reflects this: a single `SyoOverlay` shape serves all
+  three, fetched with `syo_app_focus` / `syo_app_selection` /
+  `syo_app_highlights`. Overlays are drawn per *visible* page, so cost does not
+  grow with span length. Stored *and* pending highlights come back from one
+  getter in one colour, because the shell merges an overlay's rectangles into a
+  single fill — two overlays in the same colour would double-blend where they
+  overlap.
   The two stay separate modes because their exit semantics differ, focus draws
   one end where visual draws two, and they want distinct colours — but they
   share the position itself.
+- **Highlight mode** (`app.rs`): visual mode with a pending highlight attached.
+  It stores no extent of its own — the pending highlight's extent *is*
+  `visual_span` — and `[highlight_keys]` binds the motion keys to the existing
+  `visual_*` **commands**, not to new ones. That works because `visual_move`,
+  `swap_visual_ends` and `set_head_scope` guard on `self.visual.is_some()` rather
+  than on the mode, so the entire feature added three commands
+  (`highlight_enter`/`commit`/`discard`) and no motion code. Entering from focus
+  mode synthesises the second end; `PendingHighlight` records the mode, position,
+  scope and anchor to restore, so discarding is four assignments with nothing
+  partially applied to unwind.
+  The exits that *keep* a highlight (`a`, `v`, `c`, saving) all call one
+  `store_pending_highlight`, so "which exits keep it" is a fact about the
+  keybindings rather than a condition repeated in four places. `enter_visual`
+  needs one early branch for it: its ordinary path collapses the selection onto
+  the head, which would throw away the extent the user just shaped.
+- **Highlights** (`app.rs` + `syodep-storage` + `syodep-pdf`): stored as
+  page-space rectangles plus the covered text, not as a caret span — see decision
+  15. Committing writes them to SQLite (migration v2) so they survive a reopen;
+  `save_document` embeds them in the PDF as real `Highlight` annotations, after
+  which syodep stops drawing them because MuPDF renders them itself.
 
 ### syodep-pdf
 
@@ -123,6 +147,10 @@ and the content-geometry layer `PageContent` — `ContentLine`/`Cell` (per-page
 text/image boxes from `page_content`, the foundation the caret — and later
 selection and search — navigate) plus `ContentObject`, the runs of lines that
 navigation treats as one unit. No MuPDF type or pointer crosses this boundary.
+
+It is also the only crate that *writes* a PDF: `write_highlights` (plus
+`HighlightAnnotation` and the read-back helper `page_highlights`, which lets tests
+assert against the file rather than the code that produced it).
 
 **Decision — tables and images are atomic units, found by a second text
 pass:** `page_content` extracts text once with `PRESERVE_IMAGES`, then runs a
@@ -212,6 +240,32 @@ around it, so making a formula inside a sentence a unit would break the sentence
 carrying it. Cost is nothing extra — both signals come from the extraction pass,
 as headings' do.
 
+**Decision — highlight annotations are written through a second, short-lived
+document handle, and their geometry goes in by hand:** `write_highlights(src,
+out, …)` is a free function that opens its own `PdfDocument`, so it never touches
+the caller's live document (which is busy rendering, and which
+`PdfDocument::try_from` would consume by value) and a failed write cannot leave
+that document half-annotated. Two things about the geometry are not obvious.
+`PdfAnnotation::set_rect` *raises* for a highlight — MuPDF lists the subtypes
+whose `/Rect` is settable and computes a quad-point annotation's rect from its
+`/QuadPoints` instead — and the `mupdf` crate exposes no quad-point setter at all.
+So the quads are written straight into the annotation's dictionary, reached
+through the page's `/Annots` at the index recorded *before* the annotation was
+created (rather than assuming it is the last one). They are transformed by the
+inverse page CTM, which is what `pdf_set_annot_quad_points` does internally and
+what keeps rotated pages correct, where a bare `height - y` would not. Finally
+`page.update()` must come *after* the dictionary edit: it synthesises the
+appearance stream, which is what makes the highlight visible in every reader,
+including our own renderer (`render_page` runs annotations).
+
+Embedded highlights cannot disturb the content layer: text extraction goes
+through `fz_new_stext_page_from_page`, which calls `fz_run_page_contents` and so
+skips annotations entirely. That matters twice over — the caret gains no stops it
+cannot see, and the `COLLECT_VECTORS` table hunt cannot mistake a highlight's
+appearance rectangles for a ruled table. There is a test asserting the extracted
+lines and objects are unchanged by a save, so the reasoning is pinned rather than
+assumed.
+
 **Decision — use `mupdf-rs` instead of hand-rolled bindgen FFI:** building
 MuPDF from vendored source via cargo gives reproducible Linux+Windows
 builds with zero system dependencies, and the bindings already encapsulate
@@ -235,7 +289,19 @@ SQLite via `rusqlite` (bundled SQLite, no system dependency). Decisions:
 
 Schema v1: `documents` (id, fingerprint UNIQUE, path, timestamps) and
 `positions` (document_id PK→documents CASCADE, scroll_x, scroll_y, zoom).
-Phase 2 adds marks/bookmarks/highlights/notes tables as new migrations.
+
+Schema v2: `highlights` (id, document_id→documents CASCADE, color, text,
+created_at) and `highlight_rects` (highlight_id→highlights CASCADE, ordinal,
+page, x0, y0, x1, y1). Geometry lives in a child table because one highlight
+covers a rectangle per line and may run across pages — and because PDF
+annotations are per-page, so the writer groups by `page` anyway.
+
+Phase 2 adds marks/bookmarks/notes tables as further migrations.
+
+**Consequence of saving:** writing highlights into the PDF changes its bytes and
+therefore its fingerprint, which is the document's identity. `rekey_document`
+moves the row to the new hash as part of the save, so the reading position
+survives; without it every save would silently orphan it. See decision 16.
 
 ### syodep-ffi
 
@@ -286,7 +352,10 @@ Four small files; intentionally boring:
 | 4 | Scroll state in document space (points) | zoom changes don't displace the view | — |
 | 5 | Timer-free key disambiguation (prefix waits, then longest-prefix fallback + replay) | predictability, testability; a binding that is also a prefix stays reachable without a timer | users demand Vim `timeoutlen` |
 | 12 | Visual-mode scope belongs to each *endpoint*, not to the start/end role | crossing the anchor and coming back is the identity, so the selection never silently changes shape on an overshoot | a use case needs "the first edge is always line-granular" |
-| 13 | Selection overlay is computed per visible page, not per selected page | cost is O(visible lines) however long the selection is, and page content is never force-extracted off-screen | selections need to be exported/persisted whole (then resolve the span separately from drawing it) |
+| 13 | Selection overlay is computed per visible page, not per selected page | cost is O(visible lines) however long the selection is, and page content is never force-extracted off-screen | ✅ done: storing a highlight needs the whole span, so `page_span_rects` is now the shared per-page geometry and `span_page_rects` walks every covered page |
+| 15 | A highlight is stored as page-space rectangles plus its text, not as a caret span | rectangles are what all three consumers need — the overlay, the PDF's `/QuadPoints`, and export — and they draw correctly on reload without re-extracting any page content | highlights need to be re-anchored to text that has moved (a re-flowed or replaced document) |
+| 16 | Saving re-keys the document row to the rewritten file's fingerprint, and drops the stored highlights | the fingerprint *is* the identity, so the position must follow the file; and once the highlights are annotations MuPDF renders, keeping rows too would paint them twice | notes/export need the rows after a save (then keep them with an `embedded_at` marker instead of deleting) |
+| 17 | Highlight mode binds visual mode's commands rather than having its own | one implementation of reshaping a two-ended range, so a key provably cannot mean different things in the two modes; the feature cost three commands and no motion code | a highlight needs a motion a selection does not have |
 | 6 | Synchronous rendering + byte-bounded LRU cache | simplest correct thing for M1 | phase 3 (async tiles) |
 | 7 | Counts are runtime input, not part of binding syntax | matches Vim; keeps keymap finite | — |
 | 8 | `0` counts only after a nonzero digit (Vim rule) | lets `0`-prefixed bindings exist later | — |

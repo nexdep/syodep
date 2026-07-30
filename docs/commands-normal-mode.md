@@ -73,12 +73,38 @@ focused.
 | Command | Effect |
 |---|---|
 | `open_file` | open the native file picker and load the chosen PDF |
+| `save_document` | overwrite the open PDF with its highlights embedded |
 | `quit` | save the reading position and quit |
 | `cancel` | clear pending count/sequence input (bound to `<Esc>`; Esc also clears pending input implicitly mid-sequence) |
 
+### `save_document`
+
+Bound to `<leader>w` (leader `<Space>` by default), and available in every mode
+— saving is not modal. It writes every stored highlight into the PDF as a real
+`Highlight` annotation, so other readers show them too, and reports what it did
+in the status bar. A highlight still being placed is kept first, as `a` would.
+
+The file is **overwritten in place**, with no backup: the new PDF is written
+beside the original and renamed over it, so an interrupted save can never leave a
+half-written file where the document was. If the write fails the original is
+untouched, the document stays open, and the error is shown in the status bar.
+
+Two consequences worth knowing:
+
+- Rewriting changes the file's content hash, and syodep keys documents by hash so
+  their state survives moves and renames. The document's row is moved to the new
+  hash as part of the save, so the reading position carries over.
+- Once the highlights are in the PDF, syodep stops drawing them as an overlay and
+  its own records of them are dropped — the renderer draws the annotations
+  themselves, and drawing both would paint them twice. They will look slightly
+  different afterwards, because a PDF highlight is painted with Multiply
+  blending rather than syodep's `highlight_opacity`.
+
+Saving with nothing to save leaves the file completely alone.
+
 ## Planned (not yet implemented)
 
-Phase 2 adds highlight/search/bookmark/mark/jump commands on top of the
-selection visual mode provides (mouse selection is still to come); phase 3
-adds text-object commands (`select_word`, `highlight_sentence`, …) and smart
-jump. See `docs/roadmap.md`.
+Phase 2 adds search/bookmark/mark/jump commands and notes attached to
+highlights, on top of the selection visual mode provides (mouse selection is
+still to come); phase 3 adds text-object commands (`select_word`,
+`highlight_sentence`, …) and smart jump. See `docs/roadmap.md`.

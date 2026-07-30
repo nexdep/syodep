@@ -14,6 +14,7 @@ CanvasWidget::CanvasWidget(SyoApp *app, QWidget *parent)
     , m_background(QStringLiteral("#1e1e1e"))
     , m_focusColor(0xad, 0xd8, 0xe6, 102)
     , m_visualColor(0xd3, 0xd3, 0xd3, 102)
+    , m_highlightColor(0xff, 0xe0, 0x66, 140)
 {
     setFocusPolicy(Qt::StrongFocus);
     // Single-shot: each key press re-arms it, so the pause is measured from
@@ -70,6 +71,10 @@ void CanvasWidget::applyEffects(uint32_t effects)
         return;
     }
     updatePendingTimer(effects);
+    // Before the redraw: a save rewrote the file, so every cached page image is
+    // of the old bytes at the same size, which the width check cannot catch.
+    if (effects & SYO_EFFECT_RELOAD)
+        clearPageCache();
     if (effects & SYO_EFFECT_OPEN_FILE_DIALOG)
         emit openFileRequested();
     if (effects & SYO_EFFECT_REDRAW)
@@ -130,8 +135,9 @@ void CanvasWidget::paintGL()
         painter.drawImage(target, image);
     }
 
-    // Overlays. At most one is ever valid -- focus and visual are different
-    // modes -- so collecting from both yields exactly one mode's rectangles.
+    // Overlays. At most one of focus and visual is ever valid -- they are
+    // different modes -- while highlights can coexist with either, since stored
+    // highlights are drawn whatever the mode.
     //
     // Every rectangle goes into a QPainterPath that is simplified before a
     // single fill. simplified() merges intersecting subpaths into an outline
@@ -166,6 +172,8 @@ void CanvasWidget::paintGL()
             painter.fillPath(path.simplified(), color);
     };
 
+    // Highlights first, so a selection drawn over one still reads as a selection.
+    fillOverlay(syo_app_highlights(m_app), m_highlightColor);
     fillOverlay(syo_app_focus(m_app), m_focusColor);
     fillOverlay(syo_app_selection(m_app), m_visualColor);
 }

@@ -40,6 +40,8 @@ pub struct SyoApp {
     focus_color: SyoColor,
     /// Highlight for the visual selection, from `[view] visual_color`/`visual_opacity`.
     visual_color: SyoColor,
+    /// Highlight colour, from `[view] highlight_color`/`highlight_opacity`.
+    highlight_color: SyoColor,
     /// Pause before a half-typed sequence resolves, from `[input] timeout_ms`.
     key_timeout_ms: u32,
 }
@@ -138,6 +140,10 @@ pub const SYO_EFFECT_OPEN_FILE_DIALOG: u32 = 4;
 /// (see `syo_app_key_timeout_ms`) and call `syo_app_key_timeout` when it
 /// fires; when this bit is clear it should cancel any armed timer.
 pub const SYO_EFFECT_PENDING_INPUT: u32 = 8;
+/// The document was reloaded from disk (a save rewrote it). Any page bitmaps the
+/// shell is caching are stale even though the layout and zoom are unchanged, so
+/// it must drop them.
+pub const SYO_EFFECT_RELOAD: u32 = 16;
 
 fn effects_to_bits(effects: Effects) -> u32 {
     let mut bits = 0;
@@ -152,6 +158,9 @@ fn effects_to_bits(effects: Effects) -> u32 {
     }
     if effects.pending_input {
         bits |= SYO_EFFECT_PENDING_INPUT;
+    }
+    if effects.reload {
+        bits |= SYO_EFFECT_RELOAD;
     }
     bits
 }
@@ -278,6 +287,13 @@ pub unsafe extern "C" fn syo_app_new(
             "#8a8a8a",
         );
         warnings.extend(w);
+        let (highlight_color, w) = resolve_color(
+            "highlight_color",
+            &config.view.highlight_color,
+            config.view.highlight_opacity,
+            "#ffe066",
+        );
+        warnings.extend(w);
         let key_timeout_ms = config.input.timeout_ms;
         let mut app = App::new(config, storage);
         for warning in warnings {
@@ -290,6 +306,7 @@ pub unsafe extern "C" fn syo_app_new(
             background_color,
             focus_color,
             visual_color,
+            highlight_color,
             key_timeout_ms,
         }
     });
@@ -533,12 +550,34 @@ pub unsafe extern "C" fn syo_app_selection(app: *const SyoApp) -> SyoOverlay {
     .unwrap_or_else(|_| invalid_overlay())
 }
 
+/// Every highlight to paint: the stored ones on visible pages, plus the one being
+/// placed while highlight mode is active.
+///
+/// One call for both, and one colour, because the shell merges an overlay's
+/// rectangles into a single fill — two overlays in the same colour would
+/// double-blend wherever a pending highlight overlapped a stored one. Highlights
+/// already written into the PDF are *not* included: the renderer draws those
+/// itself. The result must be released with [`syo_overlay_free`].
+///
+/// # Safety
+/// `app` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn syo_app_highlights(app: *const SyoApp) -> SyoOverlay {
+    let Some(app) = (unsafe { app.as_ref() }) else {
+        return invalid_overlay();
+    };
+    catch_unwind(AssertUnwindSafe(|| {
+        overlay_from(app.app.highlight_screen_rects())
+    }))
+    .unwrap_or_else(|_| invalid_overlay())
+}
+
 /// Free the `rects` buffer of a [`SyoOverlay`]. A no-op for an invalid overlay,
 /// so the shell can call it unconditionally.
 ///
 /// # Safety
-/// `overlay` must be a value returned by `syo_app_focus` or
-/// `syo_app_selection`, not freed before.
+/// `overlay` must be a value returned by `syo_app_focus`, `syo_app_selection` or
+/// `syo_app_highlights`, not freed before.
 #[no_mangle]
 pub unsafe extern "C" fn syo_overlay_free(overlay: SyoOverlay) {
     if overlay.rects.is_null() || overlay.rect_count == 0 {
@@ -686,6 +725,25 @@ pub unsafe extern "C" fn syo_app_visual_color(app: *const SyoApp) -> SyoColor {
         };
     };
     app.visual_color
+}
+
+/// Colour of a highlight, from `[view] highlight_color` and
+/// `highlight_opacity`. Used for both the pending and the stored ones — the
+/// signal is "this text is highlighted", not how far along the highlight is.
+///
+/// # Safety
+/// `app` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn syo_app_highlight_color(app: *const SyoApp) -> SyoColor {
+    let Some(app) = (unsafe { app.as_ref() }) else {
+        return SyoColor {
+            r: 0xff,
+            g: 0xe0,
+            b: 0x66,
+            a: 140,
+        };
+    };
+    app.highlight_color
 }
 
 /// Resolved starting directory for the Open dialog (absolute when known; empty
@@ -1014,7 +1072,9 @@ mod tests {
              focus_color = '#405060'\n\
              focus_opacity = 1.0\n\
              visual_color = '#708090'\n\
-             visual_opacity = 0.0\n",
+             visual_opacity = 0.0\n\
+             highlight_color = '#a0b0c0'\n\
+             highlight_opacity = 0.5\n",
         )
         .unwrap();
         let c_config = CString::new(config_path.display().to_string()).unwrap();
@@ -1034,6 +1094,21 @@ mod tests {
             assert_eq!((visual.r, visual.g, visual.b), (0x70, 0x80, 0x90));
             assert_eq!(visual.a, 0, "opacity 0.0 maps to a fully transparent alpha");
 
+            let highlight = syo_app_highlight_color(app);
+            assert_eq!((highlight.r, highlight.g, highlight.b), (0xa0, 0xb0, 0xc0));
+            assert_eq!(highlight.a, 128);
+
+            syo_app_free(app);
+        }
+    }
+
+    #[test]
+    fn the_highlight_overlay_is_empty_without_a_document() {
+        unsafe {
+            let app = syo_app_new(std::ptr::null(), std::ptr::null());
+            let overlay = syo_app_highlights(app);
+            assert_eq!(overlay.valid, 0);
+            syo_overlay_free(overlay);
             syo_app_free(app);
         }
     }

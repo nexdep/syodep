@@ -40,6 +40,14 @@ pub struct Config {
     /// normal `keys` while visual mode is active.
     #[serde(default)]
     pub visual_keys: BTreeMap<String, String>,
+    /// Highlight-mode keybindings (the `[highlight_keys]` table). These overlay
+    /// the normal `keys` while a highlight is being placed.
+    ///
+    /// Mostly the visual-mode motions, bound to the very same commands: a
+    /// pending highlight *is* a selection, so reshaping it must not be a second
+    /// implementation of reshaping a selection.
+    #[serde(default)]
+    pub highlight_keys: BTreeMap<String, String>,
     /// `[files]` section: file-dialog and path behaviour.
     #[serde(default)]
     pub files: FilesConfig,
@@ -59,13 +67,25 @@ pub struct InputConfig {
     /// acts. Sequences typed at normal speed never reach the pause. `0`
     /// disables it, restoring "only the next key press ends the wait".
     pub timeout_ms: u32,
+    /// The key sequence `<leader>` stands for in keybindings.
+    ///
+    /// A leader is not a mechanism of its own: `<leader>w` is expanded at load
+    /// time into the leader's chords followed by `w`, so it is an ordinary
+    /// sequence by the time the keymap sees it. Any sequence works, though a
+    /// single unbound key is the point.
+    pub leader: String,
 }
 
 impl Default for InputConfig {
     fn default() -> Self {
-        // Long enough that ordinary two-key chords never trip it, short enough
-        // that a deliberate pause feels immediate.
-        Self { timeout_ms: 500 }
+        Self {
+            // Long enough that ordinary two-key chords never trip it, short
+            // enough that a deliberate pause feels immediate.
+            timeout_ms: 500,
+            // Space: unbound in every mode, easy to reach with either thumb, and
+            // the convention users arrive with from Vim configurations.
+            leader: "<Space>".to_owned(),
+        }
     }
 }
 
@@ -108,6 +128,15 @@ pub struct ViewConfig {
     pub visual_color: String,
     /// Opacity of the selection highlight, 0.0 (invisible) to 1.0 (opaque).
     pub visual_opacity: f32,
+    /// Colour of a highlight as `#rrggbb`, both while it is being placed and
+    /// once it is stored. Also the colour written into the PDF on save, so it is
+    /// what the highlight looks like in every other reader too.
+    pub highlight_color: String,
+    /// Opacity of the highlight overlay, 0.0 (invisible) to 1.0 (opaque).
+    ///
+    /// Only affects syodep's own overlay: a highlight embedded in the PDF is
+    /// painted by the reader with Multiply blending, which has no opacity to set.
+    pub highlight_opacity: f32,
     /// Detect tables so each one is a single stop for focus and selection
     /// motions above char scope. Costs a second text-extraction pass per page
     /// and relies on a heuristic, so it can be turned off.
@@ -142,6 +171,10 @@ impl Default for ViewConfig {
             focus_opacity: 0.55,
             visual_color: "#8a8a8a".to_owned(),
             visual_opacity: 0.55,
+            // The classic highlighter yellow, a touch desaturated so black text
+            // on top of it stays comfortable to read.
+            highlight_color: "#ffe066".to_owned(),
+            highlight_opacity: 0.55,
             detect_tables: true,
             detect_headings: true,
             detect_equations: true,
@@ -169,6 +202,7 @@ impl Default for Config {
             keys: default_keybindings(),
             focus_keys: default_focus_keybindings(),
             visual_keys: default_visual_keybindings(),
+            highlight_keys: default_highlight_keybindings(),
             files: FilesConfig::default(),
             input: InputConfig::default(),
         }
@@ -226,6 +260,9 @@ pub fn default_keybindings() -> BTreeMap<String, String> {
         // Ctrl rather than a bare `o`: visual mode binds `o` to swapping the
         // selection ends, and a command should not vanish in one mode.
         ("<C-o>", "open_file"),
+        // `w` for write, as in `:w`. On the normal table so it is inherited by
+        // every mode: saving is not a modal operation.
+        ("<leader>w", "save_document"),
         ("q", "quit"),
         ("<Esc>", "cancel"),
     ]
@@ -265,6 +302,10 @@ pub fn default_focus_keybindings() -> BTreeMap<String, String> {
         // sentence, `cs` *focuses by* sentence.
         ("s", "focus_next_sentence"),
         ("p", "focus_next_paragraph"),
+        // `a` for annotate. Bound here and in `[visual_keys]` rather than on the
+        // normal table, so that in normal mode — where there is no selection,
+        // only a remembered position — it stays unbound.
+        ("a", "highlight_enter"),
         ("<Esc>", "focus_exit"),
     ]
     .into_iter()
@@ -310,7 +351,53 @@ pub fn default_visual_keybindings() -> BTreeMap<String, String> {
         ("ve", "visual_scope_line"),
         ("vs", "visual_scope_sentence"),
         ("vp", "visual_scope_paragraph"),
+        ("a", "highlight_enter"),
         ("<Esc>", "visual_exit"),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_owned(), v.to_owned()))
+    .collect()
+}
+
+/// Built-in highlight-mode keybindings (the `[highlight_keys]` table).
+///
+/// Deliberately the visual-mode motions bound to the *same commands*: a pending
+/// highlight is a selection with a colour, so `hjkl`, `w`/`e`/`b`, `s`, `p` and
+/// `o` reshape it through exactly the code that reshapes a selection. Only the
+/// three keys whose meaning is specific to a pending highlight are new.
+///
+/// `v` and `c` are absent on purpose. They fall through to the normal table's
+/// `visual_enter*` / `focus_enter*`, which store the highlight on the way out —
+/// so `vw` means "keep it and carry on selecting by word" with no binding of its
+/// own.
+///
+/// Every entry here must be documented in `docs/keybindings.md`.
+pub fn default_highlight_keybindings() -> BTreeMap<String, String> {
+    [
+        ("h", "visual_left"),
+        ("j", "visual_down"),
+        ("k", "visual_up"),
+        ("l", "visual_right"),
+        ("<Left>", "visual_left"),
+        ("<Down>", "visual_down"),
+        ("<Up>", "visual_up"),
+        ("<Right>", "visual_right"),
+        ("w", "visual_next_word"),
+        ("e", "visual_end_word"),
+        ("b", "visual_prev_word"),
+        ("s", "visual_next_sentence"),
+        ("p", "visual_next_paragraph"),
+        ("o", "visual_swap_ends"),
+        ("oo", "visual_swap_ends"),
+        ("oc", "visual_other_char"),
+        ("ow", "visual_other_word"),
+        ("oe", "visual_other_line"),
+        ("os", "visual_other_sentence"),
+        ("op", "visual_other_paragraph"),
+        // `a` again keeps the highlight; either undo key throws it away.
+        ("a", "highlight_commit"),
+        ("<Esc>", "highlight_discard"),
+        ("<BS>", "highlight_discard"),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_owned(), v.to_owned()))
@@ -386,6 +473,9 @@ impl Config {
         let mut visual_keys = default_visual_keybindings();
         visual_keys.extend(std::mem::take(&mut config.visual_keys));
         config.visual_keys = visual_keys;
+        let mut highlight_keys = default_highlight_keybindings();
+        highlight_keys.extend(std::mem::take(&mut config.highlight_keys));
+        config.highlight_keys = highlight_keys;
         Ok(config)
     }
 
@@ -470,6 +560,18 @@ pub fn default_config_doc() -> String {
     out.push_str("# Opacity of the selection highlight, 0.0 to 1.0.\n");
     let _ = writeln!(out, "visual_opacity = {}", float(view.visual_opacity));
     out.push_str(
+        "# Colour of a highlight (#rrggbb), while you place it and once it is\n\
+         # stored. This is also the colour written into the PDF by the save\n\
+         # command, so it is what other readers show too.\n",
+    );
+    let _ = writeln!(out, "highlight_color = \"{}\"", view.highlight_color);
+    out.push_str(
+        "# Opacity of the highlight overlay, 0.0 to 1.0. Applies to syodep's own\n\
+         # overlay only: a highlight saved into the PDF is painted by the reader\n\
+         # with Multiply blending, which has no opacity of its own.\n",
+    );
+    let _ = writeln!(out, "highlight_opacity = {}", float(view.highlight_opacity));
+    out.push_str(
         "# Treat each detected table as one stop for focus and selection\n\
          # motions (char scope still steps through a table's characters).\n\
          # Images are always single stops; this only controls table detection,\n\
@@ -518,6 +620,12 @@ pub fn default_config_doc() -> String {
          # next key press ever ends the wait.\n",
     );
     let _ = writeln!(out, "timeout_ms = {}", InputConfig::default().timeout_ms);
+    out.push_str(
+        "# The key sequence \"<leader>\" stands for in keybindings below. It is\n\
+         # expanded when the config is loaded, so \"<leader>w\" is just the leader\n\
+         # key followed by \"w\" as far as everything else is concerned.\n",
+    );
+    let _ = writeln!(out, "leader = \"{}\"", InputConfig::default().leader);
     out.push('\n');
 
     out.push_str(
@@ -550,6 +658,18 @@ pub fn default_config_doc() -> String {
          # letter does both. <Esc> exits to the mode visual mode was entered from.\n",
     );
     push_keytable(&mut out, "visual_keys", &default_visual_keybindings());
+
+    out.push_str(
+        "\n# Highlight-mode keybindings (active after pressing \"a\" while focused or\n\
+         # selecting). The motions are the visual-mode ones bound to the very same\n\
+         # commands, because a pending highlight is a selection: hjkl/arrows and\n\
+         # w/e/b/s/p reshape it, \"o\" switches ends, \"o\" plus a scope letter does\n\
+         # both. \"a\" again keeps the highlight and returns to selecting; <Esc> or\n\
+         # <BS> throws it away and restores what you had. \"v\" and \"c\" are not\n\
+         # listed because they fall through to [keys], where they keep the\n\
+         # highlight on the way into the mode they name.\n",
+    );
+    push_keytable(&mut out, "highlight_keys", &default_highlight_keybindings());
 
     out
 }
@@ -773,6 +893,75 @@ mod tests {
     }
 
     #[test]
+    fn highlight_keys_default_and_user_override() {
+        let config = Config::from_toml(
+            r#"
+            [highlight_keys]
+            "y" = "highlight_commit"
+            "#,
+        )
+        .unwrap();
+        // The motions are the visual-mode commands, not copies of them.
+        assert_eq!(
+            config.highlight_keys.get("h").map(String::as_str),
+            Some("visual_left")
+        );
+        assert_eq!(
+            config.highlight_keys.get("ow").map(String::as_str),
+            Some("visual_other_word")
+        );
+        // Both undo keys throw the highlight away.
+        for key in ["<Esc>", "<BS>"] {
+            assert_eq!(
+                config.highlight_keys.get(key).map(String::as_str),
+                Some("highlight_discard"),
+                "for {key}"
+            );
+        }
+        assert_eq!(
+            config.highlight_keys.get("a").map(String::as_str),
+            Some("highlight_commit")
+        );
+        assert_eq!(
+            config.highlight_keys.get("y").map(String::as_str),
+            Some("highlight_commit"),
+            "user override is merged in"
+        );
+        // `a` enters from focus and visual mode, but is unbound in normal mode:
+        // there is no selection there to colour in.
+        assert_eq!(
+            config.focus_keys.get("a").map(String::as_str),
+            Some("highlight_enter")
+        );
+        assert_eq!(
+            config.visual_keys.get("a").map(String::as_str),
+            Some("highlight_enter")
+        );
+        assert_eq!(config.keys.get("a"), None);
+        // `v` and `c` are left to fall through to [keys].
+        assert_eq!(config.highlight_keys.get("v"), None);
+        assert_eq!(config.highlight_keys.get("c"), None);
+    }
+
+    #[test]
+    fn the_leader_defaults_to_space_and_is_configurable() {
+        assert_eq!(InputConfig::default().leader, "<Space>");
+        assert_eq!(
+            Config::default().keys.get("<leader>w").map(String::as_str),
+            Some("save_document"),
+            "the save binding is written in terms of the leader"
+        );
+        let config = Config::from_toml("[input]\nleader = \",\"\n").unwrap();
+        assert_eq!(config.input.leader, ",");
+        // The binding string is unchanged; expansion happens when the keymap is
+        // built, which is where the leader is known.
+        assert_eq!(
+            config.keys.get("<leader>w").map(String::as_str),
+            Some("save_document")
+        );
+    }
+
+    #[test]
     fn pre_collapse_focus_tables_get_a_migration_hint() {
         let err = Config::from_toml(
             r#"
@@ -857,12 +1046,13 @@ mod tests {
         // silently dropped from the generated template.
         let value = toml::Value::try_from(Config::default()).unwrap();
         let table = value.as_table().unwrap();
-        let view = table["view"].as_table().unwrap();
-        for field in view.keys() {
-            assert!(
-                doc.contains(field),
-                "[view] field missing from doc: {field}"
-            );
+        for section in ["view", "input"] {
+            for field in table[section].as_table().unwrap().keys() {
+                assert!(
+                    doc.contains(field),
+                    "[{section}] field missing from doc: {field}"
+                );
+            }
         }
         // Every top-level section/table header must appear.
         for section in table.keys() {

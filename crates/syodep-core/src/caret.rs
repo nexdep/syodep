@@ -14,16 +14,18 @@
 //! page boundaries, scrolling the caret into view) lives in [`crate::app`],
 //! which holds the document and the layout.
 
-use syodep_pdf::{Cell, CellKind, ContentLine, ContentObject};
+use syodep_pdf::{Cell, CellKind, ContentLine, ContentObject, PageContent};
 
-/// Whether `hjkl` scroll the page, move a focus highlight, or grow a selection.
+/// Whether `hjkl` scroll the page, move a focus highlight, grow a selection, or
+/// shape a highlight.
 ///
-/// There are exactly three modes. Granularity is *not* a mode: both [`Focus`]
-/// and [`Visual`] carry a [`Scope`], so "word focus" and "line focus" are the
-/// same mode holding a different scope.
+/// There are exactly four modes. Granularity is *not* a mode: [`Focus`],
+/// [`Visual`] and [`Highlight`] all carry a [`Scope`], so "word focus" and "line
+/// focus" are the same mode holding a different scope.
 ///
 /// [`Focus`]: Mode::Focus
 /// [`Visual`]: Mode::Visual
+/// [`Highlight`]: Mode::Highlight
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Mode {
     /// `hjkl` scroll the page (the original behavior).
@@ -35,6 +37,10 @@ pub enum Mode {
     /// Visual mode: a two-ended selection. `hjkl`/arrows grow it by one unit of
     /// the active end's [`Scope`]; `o` swaps which end moves.
     Visual,
+    /// Highlight mode: a selection being turned into a highlight. Every motion
+    /// is visual mode's — a pending highlight *is* a selection, drawn in the
+    /// highlight colour — plus keys to keep it or throw it away.
+    Highlight,
 }
 
 /// A granularity that a position moves and snaps by.
@@ -102,6 +108,27 @@ pub struct VisualSelection {
     pub head_scope: Scope,
     /// The mode to restore when visual mode is left with `<Esc>`.
     pub return_mode: Mode,
+}
+
+/// A highlight being placed, holding everything needed to undo entering
+/// [`Mode::Highlight`].
+///
+/// Discarding restores all four fields, which is the whole operation — there is
+/// no partially-applied state to unwind, because entering highlight mode only
+/// ever *adds* an anchor (when coming from focus mode) and never moves the
+/// position.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PendingHighlight {
+    /// [`Mode::Focus`] or [`Mode::Visual`]: the mode `a` was pressed in.
+    pub return_mode: Mode,
+    pub return_focus: Caret,
+    pub return_scope: Scope,
+    /// The anchor as it was, `None` when entering from focus mode (where the
+    /// second end is synthesised on entry and must disappear again).
+    pub return_visual: Option<VisualAnchor>,
+    /// `#rrggbb`, captured on entry so a config reload mid-highlight cannot
+    /// change the colour of a highlight already on screen.
+    pub color: String,
 }
 
 /// A word-focus position: the run of cells `start_cell..=end_cell` within a line
@@ -707,6 +734,87 @@ pub fn column_index_of(cols: &[(f32, f32)], x0: f32, x1: f32) -> Option<usize> {
             oa.total_cmp(&ob)
         })
         .map(|(i, _)| i)
+}
+
+/// The part of an inclusive `start..=end` cell span that falls on `page`, as one
+/// page-space rectangle per covered line.
+///
+/// A fully covered table or image becomes a single rectangle over its own
+/// bounds: per-line boxes would leave its rules and empty cells unpainted, which
+/// reads as a broken highlight.
+///
+/// Pure and page-local so it can serve both consumers of a span — the overlay,
+/// which asks only about visible pages, and storing a highlight, which asks
+/// about all of them — without either growing its own copy of the geometry
+/// rules.
+pub fn page_span_rects(
+    content: &PageContent,
+    page: usize,
+    start: Caret,
+    end: Caret,
+) -> Vec<syodep_pdf::Rect> {
+    let mut rects = Vec::new();
+    if page < start.page || page > end.page {
+        return rects;
+    }
+    let lines = &content.lines;
+    let first_line = if page == start.page { start.line } else { 0 };
+    let last_line = if page == end.page {
+        end.line
+    } else {
+        lines.len().saturating_sub(1)
+    };
+    let mut line_idx = first_line;
+    while line_idx <= last_line {
+        if let Some(object) = content.atomic_object_at(line_idx) {
+            let whole = object.start_line == line_idx
+                && object.end_line <= last_line
+                && !(page == start.page && start.line == line_idx && start.cell > 0)
+                && !(page == end.page
+                    && end.line == object.end_line
+                    && end.cell + 1 < lines.get(object.end_line).map_or(0, |l| l.cells.len()));
+            if whole {
+                rects.push(object.bbox);
+                line_idx = object.end_line + 1;
+                continue;
+            }
+        }
+        let Some(line) = lines.get(line_idx) else {
+            line_idx += 1;
+            continue;
+        };
+        if line.cells.is_empty() {
+            line_idx += 1;
+            continue;
+        }
+        let at_start = page == start.page && line_idx == start.line;
+        let at_end = page == end.page && line_idx == end.line;
+        let span = match (at_start, at_end) {
+            (true, true) => line.cells.get(start.cell).map(|s| {
+                let e = line.cells.get(end.cell).map_or(s.bbox, |c| c.bbox);
+                (s.bbox.x0.min(e.x0), s.bbox.x1.max(e.x1))
+            }),
+            (true, false) => line
+                .cells
+                .get(start.cell)
+                .map(|s| (s.bbox.x0, line.bbox.x1)),
+            (false, true) => line.cells.get(end.cell).map(|e| (line.bbox.x0, e.bbox.x1)),
+            (false, false) => Some((line.bbox.x0, line.bbox.x1)),
+        };
+        // A cell index off the end of its line means the span and the content
+        // disagree; skipping the line degrades to a shorter highlight, which is
+        // always safer than a wrong one.
+        if let Some((x0, x1)) = span {
+            rects.push(syodep_pdf::Rect {
+                x0,
+                y0: line.bbox.y0,
+                x1,
+                y1: line.bbox.y1,
+            });
+        }
+        line_idx += 1;
+    }
+    rects
 }
 
 #[cfg(test)]

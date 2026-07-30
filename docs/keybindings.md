@@ -13,6 +13,12 @@ and the internals):
 - Modifiers go inside the brackets: `<C-d>` (ctrl), `<A-x>` (alt),
   `<C-A-Left>` (both). Shift on letters is expressed by case: `<C-G>`.
 - A *sequence* concatenates chords: `gg`, `zw`, `g<C-d>`.
+- `<leader>` stands for the leader key, `[input] leader` (`<Space>` by
+  default). It is expanded when the config is read, so `<leader>w` is simply
+  the leader's chords followed by `w` — a leader is a naming convenience, not a
+  mechanism of its own, and it disambiguates by the ordinary prefix rules
+  below. `<leader>` is only valid on the left of a binding; the leader itself is
+  written out in full.
 
 **Counts are not part of bindings.** Typing digits before a binding
 (`5j`, `12G`) passes a count to the command at runtime. `0` only continues
@@ -102,11 +108,19 @@ Selection (see "Visual mode" below):
 | `vs` | `visual_enter_sentence` |
 | `vp` | `visual_enter_paragraph` |
 
+Highlighting (see "Highlight mode" below). Bound in focus and visual mode, not
+in normal mode, where there is nothing selected to highlight:
+
+| Keys | Command |
+|---|---|
+| `a` | `highlight_enter` — turn the focus highlight or selection into a highlight |
+
 Application:
 
 | Keys | Command |
 |---|---|
 | `<C-o>` | `open_file` |
+| `<leader>w` | `save_document` — overwrite the PDF with the highlights embedded |
 | `q` | `quit` |
 | `<Esc>` | `cancel` |
 
@@ -225,6 +239,50 @@ different scopes. See `docs/commands-visual-mode.md` for the full list.
 
 Customize visual-mode keys with a `[visual_keys]` table (see `docs/config.md`);
 it overlays the normal bindings while visual mode is active.
+
+## Highlight mode
+
+Press `a` (`highlight_enter`) while focused or selecting to turn what is
+highlighted or selected into a highlight, in the highlight colour. It stays
+adjustable: **every visual-mode motion works, bound to the very same commands**,
+so a key cannot mean one thing while selecting and another while highlighting.
+
+| Keys | Command |
+|---|---|
+| `h`, `j`, `k`, `l` and the arrows | `visual_left`, `visual_down`, `visual_up`, `visual_right` |
+| `w`, `b`, `e` | `visual_next_word`, `visual_prev_word`, `visual_end_word` |
+| `s`, `p` | `visual_next_sentence`, `visual_next_paragraph` |
+| `o`, `oo` | `visual_swap_ends` |
+| `oc`, `oe`, `ow`, `os`, `op` | `visual_other_char`, `visual_other_line`, `visual_other_word`, `visual_other_sentence`, `visual_other_paragraph` |
+
+Only three keys mean something specific to a highlight:
+
+| Keys | Command |
+|---|---|
+| `a` | `highlight_commit` — keep it, back to visual mode with the same text selected |
+| `<Esc>` | `highlight_discard` — throw it away, restoring the mode and selection `a` was pressed on |
+| `<BS>` | `highlight_discard` |
+
+`v` and `c`, with or without a scope letter, also **keep** the highlight and go
+to the mode they name — they are not bound here at all, but fall through to
+`[keys]`, where `visual_enter*` and `focus_enter*` store the pending highlight on
+the way out. So `vw` means "keep it and carry on selecting by word", and the only
+way to lose a highlight is to ask for it with `<Esc>` or `<BS>`.
+
+Entering from focus mode gives the highlight a second end where the focus was,
+so `w` and `o` can still grow a highlight that began on one word; discarding
+takes that end away again.
+
+Committing stores the highlight in syodep's database, so it comes back when the
+document is reopened. `<leader>w` (`save_document`) overwrites the PDF with every
+stored highlight embedded as a real PDF annotation, which is what makes them
+visible in other readers.
+
+The status bar shows `-- HIGHLIGHT (scope) --`, in the same shape as visual
+mode's. See `docs/commands-highlight-mode.md` for the full list.
+
+Customize highlight-mode keys with a `[highlight_keys]` table (see
+`docs/config.md`); it overlays the normal bindings while a highlight is pending.
 
 ## Customizing
 

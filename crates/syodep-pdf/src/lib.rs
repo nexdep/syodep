@@ -20,6 +20,7 @@
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use mupdf::{
@@ -1848,8 +1849,280 @@ fn convert_outline(item: mupdf::Outline) -> OutlineItem {
     }
 }
 
+/// A highlight to embed in a PDF: the rectangles it covers on one page, in page
+/// points with the origin at the top left (the same space [`Cell::bbox`] uses),
+/// and its colour.
+///
+/// One value per page: PDF highlight annotations belong to a page, so a
+/// selection spanning several pages becomes several of these.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HighlightAnnotation {
+    pub page: usize,
+    pub rects: Vec<Rect>,
+    /// Colour as 8-bit RGB.
+    pub color: (u8, u8, u8),
+}
+
+/// Copy the PDF at `src` to `out`, adding `highlights` as PDF `Highlight`
+/// annotations. `src` is never modified.
+///
+/// Deliberately a free function that opens its own handle rather than a method
+/// on [`Document`]: `PdfDocument::try_from` consumes the document by value, and
+/// the caller's live document is busy rendering. Writing through a second,
+/// short-lived handle keeps the two from interfering, and means a failed write
+/// cannot leave the open document in a half-annotated state.
+pub fn write_highlights(
+    src: &Path,
+    out: &Path,
+    highlights: &[HighlightAnnotation],
+) -> Result<(), PdfError> {
+    let src_str = src.to_string_lossy();
+    let doc = mupdf::Document::open(src_str.as_ref()).map_err(|e| PdfError::Open {
+        path: src.display().to_string(),
+        message: e.to_string(),
+    })?;
+    let pdf = mupdf::pdf::PdfDocument::try_from(doc).map_err(|e| PdfError::Open {
+        path: src.display().to_string(),
+        message: format!("not a PDF that can be annotated: {e}"),
+    })?;
+    let page_count = pdf.page_count()? as usize;
+
+    // Group by page so a page is loaded and its appearance streams regenerated
+    // once however many highlights land on it.
+    let mut by_page: BTreeMap<usize, Vec<&HighlightAnnotation>> = BTreeMap::new();
+    for highlight in highlights {
+        if highlight.rects.is_empty() {
+            continue;
+        }
+        if highlight.page >= page_count {
+            return Err(PdfError::PageOutOfRange {
+                page: highlight.page,
+                count: page_count,
+            });
+        }
+        by_page.entry(highlight.page).or_default().push(highlight);
+    }
+
+    for (page_number, page_highlights) in by_page {
+        let page = pdf.load_page(page_number as i32)?;
+        let mut page = mupdf::pdf::PdfPage::try_from(page)?;
+        // MuPDF stores /QuadPoints in the page's *default user space* (origin
+        // bottom left), while our rectangles are in the transformed space text
+        // extraction reports (origin top left). The page CTM is exactly that
+        // transform, so its inverse is the conversion — and using it rather
+        // than an ad-hoc `height - y` is what keeps rotated pages correct.
+        let inverse = page.ctm()?.invert().ok_or_else(|| {
+            PdfError::Backend(format!("page {page_number} has no invertible CTM"))
+        })?;
+        for highlight in page_highlights {
+            add_highlight_annotation(&mut page, &inverse, highlight)?;
+        }
+        // Generates the appearance streams for the annotations just created, so
+        // every viewer — including our own renderer, which runs annotations —
+        // shows them. Must come after the /QuadPoints are in place.
+        page.update()?;
+    }
+
+    let out_str = out.to_string_lossy();
+    pdf.save_with_options(out_str.as_ref(), mupdf::pdf::PdfWriteOptions::default())
+        .map_err(|e| PdfError::Backend(format!("cannot write {}: {e}", out.display())))?;
+    Ok(())
+}
+
+/// Create one `Highlight` annotation on `page` covering `highlight.rects`.
+///
+/// `mupdf` 0.7 exposes no quad-point setter, and `PdfAnnotation::set_rect`
+/// *raises* for a highlight (MuPDF computes a quad-point annotation's `/Rect`
+/// from its `/QuadPoints`, so the rect is not settable by design). So the
+/// geometry is written straight into the annotation's dictionary, reached
+/// through the page's `/Annots` array at the index recorded before the
+/// annotation was created.
+fn add_highlight_annotation(
+    page: &mut mupdf::pdf::PdfPage,
+    inverse: &Matrix,
+    highlight: &HighlightAnnotation,
+) -> Result<(), PdfError> {
+    let index = annots_len(page)?;
+    let (r, g, b) = highlight.color;
+    let mut annot = page.create_annotation(mupdf::pdf::PdfAnnotationType::Highlight)?;
+    annot.set_color(mupdf::color::AnnotationColor::Rgb {
+        red: f32::from(r) / 255.0,
+        green: f32::from(g) / 255.0,
+        blue: f32::from(b) / 255.0,
+    })?;
+    // Dropped before the dictionary is edited: the annotation borrows the page,
+    // and the edit needs the page's own object.
+    drop(annot);
+
+    let mut dict = annot_dict(page, index)?;
+    let doc = dict
+        .document()
+        .ok_or_else(|| PdfError::Backend("annotation has no owning document".to_owned()))?;
+
+    let mut quads = doc.new_array()?;
+    let mut bounds: Option<Rect> = None;
+    for rect in &highlight.rects {
+        // Order is the PDF one: upper-left, upper-right, lower-left,
+        // lower-right, each as an x/y pair.
+        let (ulx, uly) = inverse.transform_xy(rect.x0, rect.y0);
+        let (urx, ury) = inverse.transform_xy(rect.x1, rect.y0);
+        let (llx, lly) = inverse.transform_xy(rect.x0, rect.y1);
+        let (lrx, lry) = inverse.transform_xy(rect.x1, rect.y1);
+        for value in [ulx, uly, urx, ury, llx, lly, lrx, lry] {
+            quads.array_push(mupdf::pdf::PdfObject::new_real(value)?)?;
+        }
+        let quad = Rect {
+            x0: ulx.min(urx).min(llx).min(lrx),
+            y0: uly.min(ury).min(lly).min(lry),
+            x1: ulx.max(urx).max(llx).max(lrx),
+            y1: uly.max(ury).max(lly).max(lry),
+        };
+        bounds = Some(match bounds {
+            Some(b) => b.union(quad),
+            None => quad,
+        });
+    }
+    dict.dict_put("QuadPoints", quads)?;
+
+    // MuPDF derives a highlight's /Rect from its quads when it synthesises the
+    // appearance, but a reader that does not synthesise still needs a /Rect that
+    // contains the quads, or it clips the highlight away.
+    if let Some(bounds) = bounds {
+        let mut rect = doc.new_array()?;
+        for value in [bounds.x0, bounds.y0, bounds.x1, bounds.y1] {
+            rect.array_push(mupdf::pdf::PdfObject::new_real(value)?)?;
+        }
+        dict.dict_put("Rect", rect)?;
+    }
+    Ok(())
+}
+
+/// How many entries the page's `/Annots` array has, treating a missing or
+/// malformed array as empty.
+fn annots_len(page: &mupdf::pdf::PdfPage) -> Result<usize, PdfError> {
+    let Some(annots) = resolved_annots(page)? else {
+        return Ok(0);
+    };
+    Ok(annots.len().unwrap_or(0))
+}
+
+/// The page's `/Annots` array with any indirect reference resolved.
+fn resolved_annots(page: &mupdf::pdf::PdfPage) -> Result<Option<mupdf::pdf::PdfObject>, PdfError> {
+    let Some(annots) = page.object().get_dict("Annots")? else {
+        return Ok(None);
+    };
+    let annots = match annots.resolve()? {
+        Some(resolved) => resolved,
+        None => annots,
+    };
+    if !annots.is_array()? {
+        return Ok(None);
+    }
+    Ok(Some(annots))
+}
+
+/// The dictionary of the annotation at `index` in the page's `/Annots`.
+fn annot_dict(page: &mupdf::pdf::PdfPage, index: usize) -> Result<mupdf::pdf::PdfObject, PdfError> {
+    let annots = resolved_annots(page)?
+        .ok_or_else(|| PdfError::Backend("page has no /Annots array".to_owned()))?;
+    let entry = annots
+        .get_array(index as i32)?
+        .ok_or_else(|| PdfError::Backend(format!("no annotation at /Annots[{index}]")))?;
+    let dict = match entry.resolve()? {
+        Some(resolved) => resolved,
+        None => entry,
+    };
+    if !dict.is_dict()? {
+        return Err(PdfError::Backend(format!(
+            "/Annots[{index}] is not a dictionary"
+        )));
+    }
+    Ok(dict)
+}
+
+/// The `Highlight` annotations on `page`, as the page-space rectangles each one
+/// covers (origin top left, matching [`HighlightAnnotation::rects`]).
+///
+/// Reads back what [`write_highlights`] wrote, which is what lets a test assert
+/// against the file rather than against the code that produced it.
+pub fn page_highlights(path: &Path, page: usize) -> Result<Vec<Vec<Rect>>, PdfError> {
+    let path_str = path.to_string_lossy();
+    let doc = mupdf::Document::open(path_str.as_ref()).map_err(|e| PdfError::Open {
+        path: path.display().to_string(),
+        message: e.to_string(),
+    })?;
+    let pdf = mupdf::pdf::PdfDocument::try_from(doc).map_err(|e| PdfError::Open {
+        path: path.display().to_string(),
+        message: e.to_string(),
+    })?;
+    let count = pdf.page_count()? as usize;
+    if page >= count {
+        return Err(PdfError::PageOutOfRange { page, count });
+    }
+    let loaded = pdf.load_page(page as i32)?;
+    let pdf_page = mupdf::pdf::PdfPage::try_from(loaded)?;
+    let ctm = pdf_page.ctm()?;
+    let Some(annots) = resolved_annots(&pdf_page)? else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    // Walking `/Annots` rather than the `PdfAnnotation` iterator: the quads live
+    // in the dictionary, and `PdfAnnotation` exposes no accessor for its own
+    // object, so the iterator would only have to be matched back to a dictionary
+    // anyway.
+    for index in 0..annots.len().unwrap_or(0) {
+        let dict = annot_dict(&pdf_page, index)?;
+        let is_highlight = dict
+            .get_dict("Subtype")?
+            .and_then(|s| s.as_name().ok().map(|n| n == b"Highlight"))
+            .unwrap_or(false);
+        if !is_highlight {
+            continue;
+        }
+        let Some(quads) = dict.get_dict("QuadPoints")? else {
+            continue;
+        };
+        let len = quads.len().unwrap_or(0);
+        let mut rects = Vec::new();
+        for quad in 0..len / 8 {
+            let mut xs = [0.0f32; 4];
+            let mut ys = [0.0f32; 4];
+            for corner in 0..4 {
+                let base = (quad * 8 + corner * 2) as i32;
+                xs[corner] = array_real(&quads, base)?;
+                ys[corner] = array_real(&quads, base + 1)?;
+            }
+            let corners: Vec<(f32, f32)> = (0..4).map(|i| ctm.transform_xy(xs[i], ys[i])).collect();
+            rects.push(Rect {
+                x0: corners.iter().map(|c| c.0).fold(f32::INFINITY, f32::min),
+                y0: corners.iter().map(|c| c.1).fold(f32::INFINITY, f32::min),
+                x1: corners
+                    .iter()
+                    .map(|c| c.0)
+                    .fold(f32::NEG_INFINITY, f32::max),
+                y1: corners
+                    .iter()
+                    .map(|c| c.1)
+                    .fold(f32::NEG_INFINITY, f32::max),
+            });
+        }
+        out.push(rects);
+    }
+    Ok(out)
+}
+
+/// One number from a PDF array, as `f32`.
+fn array_real(array: &mupdf::pdf::PdfObject, index: i32) -> Result<f32, PdfError> {
+    let entry = array
+        .get_array(index)?
+        .ok_or_else(|| PdfError::Backend(format!("missing array entry {index}")))?;
+    Ok(entry.as_float()?)
+}
+
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
     use crate::test_support::pdf_with_pages;
 
@@ -3647,5 +3920,221 @@ mod tests {
             )
             .unwrap();
         assert!(content.objects.iter().all(|o| o.kind != ObjectKind::Table));
+    }
+
+    // ---- Highlight annotations ------------------------------------------
+
+    /// The classic highlighter yellow, as the core's default.
+    const YELLOW: (u8, u8, u8) = (0xff, 0xe0, 0x66);
+
+    /// A two-page fixture on disk, plus the box of the first page's first word.
+    fn highlight_fixture(dir: &Path) -> (PathBuf, Rect) {
+        let path = dir.join("src.pdf");
+        std::fs::write(
+            &path,
+            pdf_with_pages(&["Highlight this line", "And this second page"]),
+        )
+        .unwrap();
+        let doc = Document::open(&path).unwrap();
+        let content = doc
+            .page_content(0, ContentOptions::default(), None)
+            .unwrap();
+        let cells = &content.lines[0].cells;
+        let first_word: Vec<&Cell> = cells
+            .iter()
+            .take_while(|c| c.kind != CellKind::Char(' '))
+            .collect();
+        let bbox = first_word
+            .iter()
+            .map(|c| c.bbox)
+            .reduce(Rect::union)
+            .unwrap();
+        (path, bbox)
+    }
+
+    #[test]
+    fn write_highlights_leaves_the_source_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let (src, bbox) = highlight_fixture(dir.path());
+        let before = std::fs::read(&src).unwrap();
+        let out = dir.path().join("out.pdf");
+        write_highlights(
+            &src,
+            &out,
+            &[HighlightAnnotation {
+                page: 0,
+                rects: vec![bbox],
+                color: YELLOW,
+            }],
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&src).unwrap(), before);
+        assert!(std::fs::metadata(&out).unwrap().len() > 0);
+    }
+
+    #[test]
+    fn written_highlights_read_back_with_their_page_geometry() {
+        let dir = tempfile::tempdir().unwrap();
+        let (src, bbox) = highlight_fixture(dir.path());
+        let out = dir.path().join("out.pdf");
+        let second = Rect {
+            x0: bbox.x0,
+            y0: bbox.y1 + 4.0,
+            x1: bbox.x1 + 20.0,
+            y1: bbox.y1 + 16.0,
+        };
+        write_highlights(
+            &src,
+            &out,
+            &[
+                HighlightAnnotation {
+                    page: 0,
+                    rects: vec![bbox, second],
+                    color: YELLOW,
+                },
+                HighlightAnnotation {
+                    page: 1,
+                    rects: vec![bbox],
+                    color: YELLOW,
+                },
+            ],
+        )
+        .unwrap();
+
+        // One annotation per page, and the round trip through /QuadPoints (which
+        // are in bottom-left-origin user space) returns the top-left-origin
+        // rectangles that went in.
+        let first = page_highlights(&out, 0).unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].len(), 2);
+        for (got, want) in first[0].iter().zip([bbox, second]) {
+            for (got, want) in [
+                (got.x0, want.x0),
+                (got.y0, want.y0),
+                (got.x1, want.x1),
+                (got.y1, want.y1),
+            ] {
+                assert!((got - want).abs() < 0.01, "{got} != {want}");
+            }
+        }
+        assert_eq!(page_highlights(&out, 1).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_document_with_no_highlights_still_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let (src, _) = highlight_fixture(dir.path());
+        let out = dir.path().join("out.pdf");
+        write_highlights(&src, &out, &[]).unwrap();
+        assert_eq!(Document::open(&out).unwrap().page_count(), 2);
+        assert!(page_highlights(&out, 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn embedded_highlights_do_not_reach_the_content_layer() {
+        // Text extraction runs `fz_run_page_contents`, which skips annotations.
+        // This matters twice over: the caret must not gain stops it cannot see,
+        // and the `COLLECT_VECTORS` table hunt must not mistake a highlight's
+        // appearance rectangles for a ruled table.
+        let dir = tempfile::tempdir().unwrap();
+        let (src, bbox) = highlight_fixture(dir.path());
+        let out = dir.path().join("out.pdf");
+        write_highlights(
+            &src,
+            &out,
+            &[HighlightAnnotation {
+                page: 0,
+                rects: vec![bbox],
+                color: YELLOW,
+            }],
+        )
+        .unwrap();
+
+        let before = Document::open(&src).unwrap();
+        let after = Document::open(&out).unwrap();
+        assert_eq!(
+            after.page_text(0).unwrap(),
+            before.page_text(0).unwrap(),
+            "annotations must not change extracted text"
+        );
+        let before_content = before
+            .page_content(0, ContentOptions::default(), None)
+            .unwrap();
+        let after_content = after
+            .page_content(0, ContentOptions::default(), None)
+            .unwrap();
+        assert_eq!(after_content.lines, before_content.lines);
+        assert_eq!(after_content.objects, before_content.objects);
+    }
+
+    #[test]
+    fn a_saved_highlight_renders_as_colour_on_the_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let (src, bbox) = highlight_fixture(dir.path());
+        let out = dir.path().join("out.pdf");
+        write_highlights(
+            &src,
+            &out,
+            &[HighlightAnnotation {
+                page: 0,
+                rects: vec![bbox],
+                color: YELLOW,
+            }],
+        )
+        .unwrap();
+
+        // `render_page` runs annotations, so the appearance stream `page.update`
+        // generated must show up in the bitmap. The test asserts on the colour of
+        // the paper rather than diffing two renders: a highlight is drawn with
+        // Multiply blending, so the pixels under a glyph stroke stay black and
+        // any single sample point is a coin toss.
+        let bitmap = Document::open(&out).unwrap().render_page(0, 1.0).unwrap();
+        let width = bitmap.width as usize;
+        // Yellow-ish means the blue channel is clearly the darkest, which no
+        // shade of the fixture's black-on-white text can be.
+        let yellow_in_band = |top: f32, bottom: f32| {
+            let mut count = 0usize;
+            for y in top.max(0.0) as usize..(bottom as usize).min(bitmap.height as usize) {
+                for x in 0..width {
+                    let i = (y * width + x) * 4;
+                    let (r, g, b) = (bitmap.data[i], bitmap.data[i + 1], bitmap.data[i + 2]);
+                    if r.saturating_sub(b) > 0x30 && g.saturating_sub(b) > 0x30 {
+                        count += 1;
+                    }
+                }
+            }
+            count
+        };
+        assert!(
+            yellow_in_band(bbox.y0, bbox.y1) > 100,
+            "expected the highlighted line to be painted yellow"
+        );
+        // A band well below the highlight is untouched paper and text.
+        assert_eq!(
+            yellow_in_band(bbox.y1 + 40.0, bbox.y1 + 140.0),
+            0,
+            "the highlight must not paint outside its own line"
+        );
+    }
+
+    #[test]
+    fn a_highlight_past_the_last_page_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let (src, bbox) = highlight_fixture(dir.path());
+        let out = dir.path().join("out.pdf");
+        let err = write_highlights(
+            &src,
+            &out,
+            &[HighlightAnnotation {
+                page: 9,
+                rects: vec![bbox],
+                color: YELLOW,
+            }],
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, PdfError::PageOutOfRange { page: 9, count: 2 }),
+            "{err}"
+        );
     }
 }

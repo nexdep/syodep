@@ -7,6 +7,137 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-07-30 — Highlight mode, and saving the PDF with highlights in it
+
+Phase 2 item 3. `a` from focus or visual mode turns what is focused or selected
+into a highlight; it stays adjustable with every visual-mode motion; `a` again
+keeps it, `<Esc>`/`<BS>` throws it away and restores exactly what you had, and
+`v`/`c` with any specifier keep it on the way into the mode they name. A new
+`<leader>w` (leader `<Space>`) overwrites the PDF with every stored highlight
+embedded as a real PDF `Highlight` annotation.
+
+### The whole feature is three commands and no motion code
+
+`visual_move`, `visual_scope_motion`, `visual_word_end`, `swap_visual_ends` and
+`set_head_scope` guard on `self.visual.is_some()`, not on `self.mode ==
+Mode::Visual`. So `[highlight_keys]` binds `hjkl`, `w`/`e`/`b`/`s`/`p`, `o` and
+`o{scope}` to **the `visual_*` commands themselves**. A pending highlight stores
+no extent of its own either — it *is* `visual_span` — so `refresh_visual_span`
+was not touched. Entering from focus mode synthesises the second end, which is
+what lets `w` grow a highlight that started on one focused word.
+
+Only `highlight_enter`, `highlight_commit` and `highlight_discard` are new. The
+invariant is pinned by a test that runs nine key sequences through both modes and
+asserts the spans match, so a key cannot come to mean different things in the two.
+
+`PendingHighlight` records the mode, position, scope and anchor to put back, and
+discarding is those four assignments — there is no partially-applied state,
+because entering only ever *adds* an anchor and never moves the position. The
+exits that keep a highlight all call one `store_pending_highlight`, so "which
+exits keep it" is a fact about the keybindings rather than a condition in four
+places.
+
+`enter_visual` needed one early branch: its ordinary path collapses the selection
+onto the head, which is right for `v` inside visual mode and would throw away the
+extent the user just shaped when coming out of highlight mode. That is the one
+regression this design could plausibly have, so it has its own test.
+
+### A highlight is rectangles, not a span
+
+Stored as page-space rectangles plus the covered text (decision 15). That serves
+all three consumers — the overlay, the PDF's `/QuadPoints`, and later export —
+and means a stored highlight draws on reload with no page content extracted at
+all.
+
+Decision 13 anticipated this: the overlay was computed per *visible* page and
+said to revisit "when selections need to be exported/persisted whole". Doing it
+removed duplication rather than adding any: the per-line geometry moved into a
+pure `caret::page_span_rects`, and `span_screen_rects` (visible pages) and the
+new `span_page_rects` (every covered page, extracting as needed) are now two
+callers of it. The `#[cfg(test)]` `span_text` helper became a real method for the
+same reason, so 79 existing tests now also pin what a highlight records as its
+text.
+
+### Writing the PDF: two things MuPDF does not let you do the obvious way
+
+`PdfAnnotation::set_rect` **raises** for a highlight. MuPDF lists the subtypes
+whose `/Rect` is settable (`rect_subtypes` in `pdf-annot.c`) and computes a
+quad-point annotation's rect from its `/QuadPoints` instead. And the `mupdf` 0.7
+crate exposes no quad-point setter at all, though the C API has one.
+
+So `write_highlights` creates the annotation, then writes the quads into its
+dictionary through the page's `/Annots` at the index recorded *before* creating it
+(not "it's the last one"), transformed by the inverse page CTM — which is what
+`pdf_set_annot_quad_points` does internally, and what keeps rotated pages right
+where a bare `height - y` would not. `page.update()` comes after that edit, since
+it is what synthesises the appearance stream. All still safe Rust; no new
+dependency.
+
+It is a free function opening its own handle rather than a `Document` method:
+`PdfDocument::try_from` consumes the document by value, the live one is busy
+rendering, and a failed write then cannot leave it half-annotated.
+
+**Embedded highlights cannot disturb the content layer**, which was the risk
+worth checking: text extraction goes through `fz_run_page_contents`, so
+annotations are skipped, and the `COLLECT_VECTORS` table hunt cannot mistake a
+highlight's appearance rectangles for a ruled table. A test asserts the extracted
+lines and objects are byte-identical across a save, so that is pinned rather than
+believed.
+
+### Saving overwrites in place, and re-keys the document
+
+Write beside the original, then rename over it — atomic on one filesystem, so an
+interrupted save can never leave a half-written PDF where the document was. The
+session is dropped *before* the rename, because on Windows replacing a file MuPDF
+still holds open fails with a sharing violation, and CI runs the Windows suite.
+
+Rewriting changes the file's hash, and the hash *is* the document's identity, so
+`rekey_document` moves the row to the new fingerprint as part of the save
+(decision 16). Without it every save would silently orphan the reading position.
+Then the highlight rows are dropped and the overlay stops drawing them: they are
+annotations MuPDF renders now, and drawing both would paint them twice. They do
+look slightly different afterwards — a PDF highlight blends Multiply rather than
+using `highlight_opacity`.
+
+`Effects::reload` / `SYO_EFFECT_RELOAD` is new because the shell's page-image
+cache is only invalidated on a width mismatch, so after a same-zoom reload it
+would keep serving pre-save bitmaps. The same latent bug was in
+`MainWindow::openDocument`, which never cleared the cache either; both now call
+`CanvasWidget::clearPageCache()`.
+
+### The leader is expansion, not a mechanism
+
+`[input] leader` (default `<Space>`) plus `parse_sequence_with_leader`, which
+splices the leader's chords in place of `<leader>`. By the time the keymap sees
+it, `<leader>w` is an ordinary sequence and disambiguates by the existing prefix
+rules — the input state machine is unchanged. The leader lives on the `Keymap`, so
+the mode keymaps (clones plus an overlay) cannot end up with a different one from
+the table they extend. `parse_sequence` rejects a bare `<leader>`, which is also
+what stops `leader = "<leader>"` recursing, since the leader itself is parsed with
+it. An unparseable leader warns and falls back rather than costing the user every
+`<leader>` binding.
+
+### Tests
+
+Storage: 6 new (migration v2 from scratch and from a populated v1, multi-page
+round trip, per-document scoping, both cascades, re-key carrying position and
+highlights). PDF: 6 new (source untouched, quad geometry round-trips through
+bottom-left user space, empty case, content layer unchanged, the highlight
+actually paints yellow on the page, out-of-range page rejected). Core: 18 new
+covering entry from both modes, the reshape-parity invariant, commit, both undo
+keys including after reshaping, the focus-entry anchor being uninvented, `v`/`c`
+exits, the collapse regression, `a` inert in normal mode, no document, spanning
+pages, reload from the database, and the save path end to end — file rewritten,
+annotation present, position and selection preserved, rows dropped, temp file
+gone. Plus config, keys and FFI tests. 451 total, up from 418.
+
+The failing-save test is `#[cfg(unix)]` and forces the failure by removing write
+permission from the directory. Worth recording why: the obvious trick — putting a
+directory where the temporary file goes — does not work, because MuPDF *removes*
+whatever is at the path it is told to save to.
+
+---
+
 ## 2026-07-29 — Equation fixture text is platform-dependent
 
 Windows CI failed `page_content_detects_a_display_equation`: MuPDF there
