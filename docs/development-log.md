@@ -7,6 +7,25 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-07-30 — `open_file` moves from `<C-o>` to `<leader>o`
+
+`<C-o>` was the open-file binding since it moved off a bare `o` in the
+2026-07-28 entry below, back when there was no leader key to move it to. Now
+that one exists (added for `save_document`'s `<leader>w`), grouping the
+application-level commands under it is the more consistent home: `<leader>o`
+opens, `<leader>w` saves.
+
+The empty-state status line ("no document - press ... to open a PDF") moved
+with it, for the same reason it moved off `o` in 2026-07-28: it must never
+advertise a key that no longer does the thing it says.
+
+If you rebound `<C-o>` yourself, that binding still works — user `[keys]`
+entries extend the defaults rather than replacing them — you only lose the
+*default* binding, which is now `<leader>o`. `<C-o>` itself is unbound again,
+and free for the `<C-o>`/`<C-i>` jump-history keys on the roadmap.
+
+---
+
 ## 2026-07-30 — Highlight mode, and saving the PDF with highlights in it
 
 Phase 2 item 3. `a` from focus or visual mode turns what is focused or selected

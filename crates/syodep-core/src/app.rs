@@ -3156,7 +3156,7 @@ impl App {
                     session.view.zoom() * 100.0
                 ));
             }
-            None => out.push_str("no document - press <C-o> to open a PDF"),
+            None => out.push_str("no document - press <leader>o to open a PDF"),
         }
         if self.mode == Mode::Focus {
             // `-- FOCUS (word) --`, matching visual's `-- VISUAL (word) --`.
@@ -3489,7 +3489,9 @@ mod tests {
     #[test]
     fn open_file_key_requests_dialog() {
         let mut app = App::new(Config::default(), None);
-        let effects = press(&mut app, "<C-o>");
+        // `press` parses with `parse_sequence`, which has no leader, so the
+        // default leader `<Space>` is spelled out rather than `<leader>o`.
+        let effects = press(&mut app, "<Space>o");
         assert!(effects.open_file_dialog);
         // A bare `o` is free for modes to claim -- visual mode swaps ends with
         // it -- so it must not still open the dialog.

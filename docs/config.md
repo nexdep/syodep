@@ -133,7 +133,7 @@ rather than silently interpreted.
 
 | Option | Type | Default | Meaning |
 |---|---|---|---|
-| `open_dir` | string | *(unset)* | starting directory for the Open dialog (the `open_file` command, `<C-o>`) |
+| `open_dir` | string | *(unset)* | starting directory for the Open dialog (the `open_file` command, `<leader>o`) |
 
 When `open_dir` is unset, the Open dialog starts in the directory syodep was
 launched from (the process working directory) — useful when launching from a
@@ -193,8 +193,8 @@ the default bindings: `docs/keybindings.md`. Command names:
 
 ```toml
 [keys]
-"j"     = "scroll_half_page_down"
-"<C-o>" = "open_file"
+"j"     = "scroll_half_page_down"  # rebind a default
+"<C-o>" = "open_file"              # add a new binding, alongside the default <leader>o
 ```
 
 ## `[focus_keys]`

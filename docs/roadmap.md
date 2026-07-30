@@ -5,7 +5,7 @@ Status legend: ✅ done · 🚧 in progress · ⬜ planned
 ## Phase 1 — MVP foundation (milestone 1) ✅
 
 - ✅ Rust core / Qt shell split over a C ABI
-- ✅ Open a local PDF (CLI, `<C-o>`, file dialog)
+- ✅ Open a local PDF (CLI, `<leader>o`, file dialog)
 - ✅ Render the entire PDF in a continuous scrollable view (MuPDF)
 - ✅ Keyboard navigation: scroll, half/full pages, next/prev page,
   first/last page, `{n}G`, count prefixes

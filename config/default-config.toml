@@ -63,7 +63,7 @@ detect_equations = true
 skip_page_furniture = true
 
 [files]
-# Starting directory for the Open dialog (<C-o>). When unset, the
+# Starting directory for the Open dialog (<leader>o). When unset, the
 # dialog opens in the directory syodep was launched from. If the path below
 # does not exist (or is not a directory), syodep falls back to the launch
 # directory. Run `syodep --check` to see which directory is in effect.
@@ -97,7 +97,6 @@ leader = "<Space>"
 "<C-b>" = "scroll_page_up"
 "<C-d>" = "scroll_half_page_down"
 "<C-f>" = "scroll_page_down"
-"<C-o>" = "open_file"
 "<C-u>" = "scroll_half_page_up"
 "<Down>" = "scroll_down"
 "<Esc>" = "cancel"
@@ -106,6 +105,7 @@ leader = "<Space>"
 "<PageUp>" = "prev_page"
 "<Right>" = "scroll_right"
 "<Up>" = "scroll_up"
+"<leader>o" = "open_file"
 "<leader>w" = "save_document"
 "=" = "zoom_in"
 "G" = "goto_last_page"

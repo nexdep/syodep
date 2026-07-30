@@ -119,7 +119,7 @@ Application:
 
 | Keys | Command |
 |---|---|
-| `<C-o>` | `open_file` |
+| `<leader>o` | `open_file` — open the native file picker |
 | `<leader>w` | `save_document` — overwrite the PDF with the highlights embedded |
 | `q` | `quit` |
 | `<Esc>` | `cancel` |

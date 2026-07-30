@@ -257,9 +257,10 @@ pub fn default_keybindings() -> BTreeMap<String, String> {
         ("ve", "visual_enter_line"),
         ("vs", "visual_enter_sentence"),
         ("vp", "visual_enter_paragraph"),
-        // Ctrl rather than a bare `o`: visual mode binds `o` to swapping the
-        // selection ends, and a command should not vanish in one mode.
-        ("<C-o>", "open_file"),
+        // `o` for open. Leader rather than a bare `o`: visual mode binds `o`
+        // to swapping the selection ends, and a command should not vanish in
+        // one mode.
+        ("<leader>o", "open_file"),
         // `w` for write, as in `:w`. On the normal table so it is inherited by
         // every mode: saving is not a modal operation.
         ("<leader>w", "save_document"),
@@ -602,7 +603,7 @@ pub fn default_config_doc() -> String {
 
     out.push_str(
         "[files]\n\
-         # Starting directory for the Open dialog (<C-o>). When unset, the\n\
+         # Starting directory for the Open dialog (<leader>o). When unset, the\n\
          # dialog opens in the directory syodep was launched from. If the path below\n\
          # does not exist (or is not a directory), syodep falls back to the launch\n\
          # directory. Run `syodep --check` to see which directory is in effect.\n\
