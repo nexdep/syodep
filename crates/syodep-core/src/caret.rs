@@ -321,6 +321,12 @@ pub fn is_numeric_separator(c: char) -> bool {
     matches!(c, '.' | ',')
 }
 
+/// Whether `c` is a letter, digit or underscore — the sides of a dotted token
+/// such as `VII.0`, `file.txt` or `3.14`.
+fn is_dotted_token_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
 /// Whether `c` is a hyphen — a character that *joins* the words it sits
 /// between rather than separating them.
 ///
@@ -429,6 +435,19 @@ pub fn is_inside_number(before: Option<char>, separator: char, after: Option<cha
     is_numeric_separator(separator)
         && before.is_some_and(|c| c.is_numeric())
         && after.is_some_and(|c| c.is_numeric())
+}
+
+/// Whether a full stop joins two alphanumeric (or `_`) sides with no space —
+/// a dotted identifier such as `VII.0`, `file.txt`, `a.b.c` or `3.14`.
+///
+/// Same asymmetry as [`is_inside_number`]: `word.` with nothing after still
+/// ends the word and the sentence. Digits alone are covered too, so callers
+/// may use this for every `.` case and keep [`is_inside_number`] for grouping
+/// commas.
+pub fn is_inside_dotted_token(before: Option<char>, separator: char, after: Option<char>) -> bool {
+    separator == '.'
+        && before.is_some_and(is_dotted_token_char)
+        && after.is_some_and(is_dotted_token_char)
 }
 
 /// Whether `c` can sign the exponent of a number in scientific notation.
@@ -1115,11 +1134,30 @@ mod tests {
         // "costs 3." — nothing follows, so the stop still ends the sentence.
         assert!(!is_inside_number(Some('3'), '.', Some(' ')));
         assert!(!is_inside_number(Some('3'), '.', None));
-        // "etc. 5" — a full stop that merely happens to precede a figure.
+        // "etc. 5" — a full stop that merely happens to precede a figure
+        // (with a space between; the adjacent-char case `c.5` is a dotted
+        // token, not a number).
         assert!(!is_inside_number(Some('c'), '.', Some('5')));
         // Only a decimal point or a grouping comma joins digits.
         assert!(!is_inside_number(Some('3'), '-', Some('1')));
         assert!(!is_inside_number(Some('3'), '!', Some('1')));
+    }
+
+    #[test]
+    fn a_dot_between_alphanumeric_sides_is_inside_a_dotted_token() {
+        assert!(is_inside_dotted_token(Some('I'), '.', Some('0'))); // VII.0
+        assert!(is_inside_dotted_token(Some('e'), '.', Some('t'))); // file.txt
+        assert!(is_inside_dotted_token(Some('a'), '.', Some('b'))); // a.b.c
+        assert!(is_inside_dotted_token(Some('3'), '.', Some('1'))); // 3.14
+        assert!(is_inside_dotted_token(Some('_'), '.', Some('x')));
+    }
+
+    #[test]
+    fn a_dot_without_alphanumeric_sides_is_not_a_dotted_token() {
+        assert!(!is_inside_dotted_token(Some('3'), '.', Some(' ')));
+        assert!(!is_inside_dotted_token(Some('3'), '.', None));
+        assert!(!is_inside_dotted_token(Some(' '), '.', Some('5')));
+        assert!(!is_inside_dotted_token(Some('c'), ',', Some('5')));
     }
 
     /// The link `link_span` finds in `token`, for readable assertions.

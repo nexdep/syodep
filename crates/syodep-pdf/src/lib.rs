@@ -311,6 +311,12 @@ const ANGLE_DOMINANCE: f32 = 0.55;
 /// How much of the page, top and bottom, counts as margin band.
 const BAND_SHARE: f32 = 0.15;
 
+/// Deeper bottom band used only for folio-shaped lines (normalised text is
+/// exactly `#`). Journal layouts often set the page number a few points above
+/// the strict 15% band; without this the profile stays empty and every folio
+/// is walked as body text — sometimes even flagged as a heading.
+const FOLIO_BAND_SHARE: f32 = 0.20;
+
 /// How far two baselines may differ and still be the same running element.
 const BASELINE_TOLERANCE: f32 = 2.5;
 
@@ -749,14 +755,15 @@ impl Document {
                 }
                 origins.sort_by(f32::total_cmp);
                 let baseline = origins[origins.len() / 2];
-                let Some((edge, offset)) = band_of(baseline, height) else {
-                    continue;
-                };
                 for segment in text_segments(chars.iter().copied()) {
                     let text = normalise_furniture_text(&segment);
                     if text.is_empty() {
                         continue;
                     }
+                    let folio = is_folio_text(&text);
+                    let Some((edge, offset)) = band_of_with_folio(baseline, height, folio) else {
+                        continue;
+                    };
                     out.push(BandLine { text, edge, offset });
                 }
             }
@@ -908,17 +915,31 @@ fn normalise_furniture_text(text: &str) -> String {
 }
 
 /// Which band a baseline falls in, and how far it sits from that page edge.
-fn band_of(baseline: f32, page_height: f32) -> Option<(Edge, f32)> {
+///
+/// Folio-shaped lines (normalised text `#`) may use a slightly deeper bottom
+/// band — see [`FOLIO_BAND_SHARE`].
+fn band_of_with_folio(baseline: f32, page_height: f32, folio_shaped: bool) -> Option<(Edge, f32)> {
     if page_height <= 0.0 {
         return None;
     }
     if baseline <= BAND_SHARE * page_height {
-        Some((Edge::Top, baseline))
-    } else if baseline >= (1.0 - BAND_SHARE) * page_height {
+        return Some((Edge::Top, baseline));
+    }
+    let bottom_share = if folio_shaped {
+        FOLIO_BAND_SHARE
+    } else {
+        BAND_SHARE
+    };
+    if baseline >= (1.0 - bottom_share) * page_height {
         Some((Edge::Bottom, page_height - baseline))
     } else {
         None
     }
+}
+
+/// Whether normalised furniture text is a bare page number.
+fn is_folio_text(text: &str) -> bool {
+    text == "#"
 }
 
 /// Learn which margin lines recur, from one summary per sampled page.
@@ -1025,12 +1046,6 @@ fn furniture_mask(
         if mask[i] {
             continue;
         }
-        let Some((edge, offset)) = band_of(styles[i].baseline, page_height) else {
-            continue;
-        };
-        // Segmented the same way `band_lines` segmented it to build the
-        // profile: a header and a folio sharing this baseline must each be
-        // matchable on their own, whichever side either sits on here.
         let chars = line.cells.iter().filter_map(|cell| match cell.kind {
             CellKind::Char(c) => Some((cell.bbox.x0, c)),
             CellKind::Image => None,
@@ -1040,6 +1055,11 @@ fn furniture_mask(
             if text.is_empty() {
                 return false;
             }
+            let folio = is_folio_text(&text);
+            let Some((edge, offset)) = band_of_with_folio(styles[i].baseline, page_height, folio)
+            else {
+                return false;
+            };
             profile.entries.iter().any(|e| {
                 e.text == text && e.edge == edge && (e.offset - offset).abs() <= BASELINE_TOLERANCE
             })
@@ -1053,7 +1073,11 @@ fn furniture_mask(
     let per_edge = |edge: Edge| {
         repeated
             .iter()
-            .filter(|&&i| band_of(styles[i].baseline, page_height).map(|b| b.0) == Some(edge))
+            .filter(|&&i| {
+                let folio = is_folio_text(&normalise_furniture_text(&line_text(&lines[i])));
+                band_of_with_folio(styles[i].baseline, page_height, folio).map(|b| b.0)
+                    == Some(edge)
+            })
             .count()
     };
     // The per-edge cap is the real bound and applies always. The share cap is
@@ -1349,15 +1373,20 @@ const HEADING_MAX_SHARE: f32 = 0.5;
 ///
 /// A line is a heading when it is set noticeably larger than the page's body
 /// text, or when it is entirely bold at roughly body size *and* does not run
-/// the full width of its column. That last clause is what separates a bold
-/// subsection heading from a bold lead-in sentence inside a paragraph; the
-/// widest line on the page stands in for the column width, which avoids
-/// needing column detection here.
+/// the full width of its column, **or** when it opens with a multi-level
+/// section number such as `1.1.` / `2.12.` followed by a title. That last
+/// clause is shape rather than typography: subsection headings are often set
+/// at body size, so size/weight alone miss them, and missing them glues the
+/// title into the paragraph below while splitting `1.1.` as its own sentence.
+///
+/// Typography-flagged lines still face the share and length caps; numbered
+/// headings are high-precision and are added afterwards, so a page of false
+/// bold flags cannot erase a real `1.1. Methods`.
 fn heading_ranges(lines: &[ContentLine], styles: &[LineStyle]) -> Vec<(usize, usize)> {
     let inked: Vec<usize> = (0..lines.len())
         .filter(|&i| !lines[i].cells.is_empty() && styles.get(i).is_some_and(|s| s.size > 0.0))
         .collect();
-    if inked.len() < 2 {
+    if inked.is_empty() {
         return Vec::new();
     }
 
@@ -1377,15 +1406,15 @@ fn heading_ranges(lines: &[ContentLine], styles: &[LineStyle]) -> Vec<(usize, us
         .iter()
         .max_by_key(|(bucket, w)| (*w, *bucket))
         .map_or(0.0, |(bucket, _)| *bucket as f32 / 10.0);
-    if body <= 0.0 {
-        return Vec::new();
-    }
     let widest = inked
         .iter()
         .map(|&i| lines[i].bbox.x1 - lines[i].bbox.x0)
         .fold(0.0_f32, f32::max);
 
-    let is_heading = |i: usize| {
+    let is_typography_heading = |i: usize| {
+        if body <= 0.0 {
+            return false;
+        }
         let style = styles[i];
         let width = lines[i].bbox.x1 - lines[i].bbox.x0;
         style.size >= body * HEADING_SIZE_FACTOR
@@ -1397,7 +1426,7 @@ fn heading_ranges(lines: &[ContentLine], styles: &[LineStyle]) -> Vec<(usize, us
     let mut ranges: Vec<(usize, usize)> = Vec::new();
     let mut flagged = 0usize;
     for &i in &inked {
-        if !is_heading(i) {
+        if !is_typography_heading(i) {
             continue;
         }
         flagged += 1;
@@ -1413,13 +1442,77 @@ fn heading_ranges(lines: &[ContentLine], styles: &[LineStyle]) -> Vec<(usize, us
     }
 
     if flagged as f32 > HEADING_MAX_SHARE * inked.len() as f32 {
-        return Vec::new();
+        ranges.clear();
+    } else {
+        ranges.retain(|&(start, end)| {
+            let lines_covered = end - start + 1;
+            lines_covered <= HEADING_MAX_LINES
+        });
     }
-    ranges.retain(|&(start, end)| {
-        let lines_covered = end - start + 1;
-        lines_covered <= HEADING_MAX_LINES
-    });
+
+    // Numbered subsection headings, independent of the typography vote.
+    for &i in &inked {
+        if !is_numbered_heading_text(&line_text(&lines[i])) {
+            continue;
+        }
+        if ranges.iter().any(|&(start, end)| i >= start && i <= end) {
+            continue;
+        }
+        ranges.push((i, i));
+    }
+    ranges.sort_by_key(|&(start, _)| start);
     ranges
+}
+
+/// Whether `text` opens with a multi-level section number and a title:
+/// `1.1. Methods`, `2.12. Recommended checking order`, `1.2.3 Overview`.
+///
+/// At least one internal dot in the number is required, so a plain enumerated
+/// item (`1. First point`) stays a list candidate rather than a heading. The
+/// optional trailing dot after the last component matches both `1.1 Title`
+/// and `1.1. Title`.
+fn is_numbered_heading_text(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    let mut chars = trimmed.chars().peekable();
+    let mut saw_internal_dot = false;
+    // First component: one or more digits.
+    if !chars.peek().is_some_and(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    while chars.peek().is_some_and(|c| c.is_ascii_digit()) {
+        chars.next();
+    }
+    // Further `.digits` components — at least one.
+    loop {
+        if chars.peek() != Some(&'.') {
+            break;
+        }
+        let mut look = chars.clone();
+        look.next(); // '.'
+        if !look.peek().is_some_and(|c| c.is_ascii_digit()) {
+            break;
+        }
+        chars.next();
+        saw_internal_dot = true;
+        while chars.peek().is_some_and(|c| c.is_ascii_digit()) {
+            chars.next();
+        }
+    }
+    if !saw_internal_dot {
+        return false;
+    }
+    // Require the trailing section-number dot before the title: `1.1. Title`,
+    // not a decimal that opens a sentence (`3.14 is the value`).
+    if chars.peek() != Some(&'.') {
+        return false;
+    }
+    chars.next();
+    let mut saw_space = false;
+    while chars.peek().is_some_and(|c| c.is_whitespace()) {
+        saw_space = true;
+        chars.next();
+    }
+    saw_space && chars.next().is_some_and(|c| c.is_alphanumeric())
 }
 
 /// Fonts whose names say "this is mathematics". Matched as lower-case
@@ -1592,9 +1685,27 @@ fn equation_ranges(lines: &[ContentLine], styles: &[LineStyle]) -> Vec<(usize, u
         if counted == 0 {
             return false;
         }
+        // A lone signed number (`−1`, `+2`) is not a display equation — it is
+        // usually a table cell, an axis tick or a code fragment.
+        if text
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .all(|c| c.is_numeric() || matches!(c, '+' | '-' | '\u{2212}' | '.' | ','))
+        {
+            return false;
+        }
         let symbols = text.chars().filter(|&c| is_math_symbol(c)).count();
         let math_by_font = styles[i].math >= EQUATION_MATH_FONT_SHARE;
-        let math_by_chars = symbols as f32 >= EQUATION_SYMBOL_SHARE * counted as f32;
+        // ASCII `+`/`=`/`<>` alone are not enough: they fire on `C++`,
+        // `count += 1`, `-> None` and other code/prose that is not display
+        // mathematics. Character-based detection needs a richer math mark
+        // (Greek, a unicode operator, …); TeX and Unicode math fonts still
+        // qualify through `math_by_font`.
+        let has_rich_math = text
+            .chars()
+            .any(|c| is_math_symbol(c) && !matches!(c, '=' | '+' | '<' | '>'));
+        let math_by_chars =
+            has_rich_math && symbols as f32 >= EQUATION_SYMBOL_SHARE * counted as f32;
         if !(math_by_font || math_by_chars) {
             return false;
         }
@@ -2762,6 +2873,37 @@ mod tests {
     }
 
     #[test]
+    fn equation_ranges_ignore_ascii_code_fragments() {
+        // Programming idioms that look like maths to a naive operator check.
+        let (mut lines, mut styles) = body_lines(10, 400.0);
+        set_text(&mut lines, &mut styles, 4, "in C++.", 80.0, 0.0);
+        assert_eq!(equation_ranges(&lines, &styles), vec![]);
+        set_text(&mut lines, &mut styles, 4, "count += 1", 90.0, 0.0);
+        assert_eq!(equation_ranges(&lines, &styles), vec![]);
+        set_text(&mut lines, &mut styles, 4, "-> None", 70.0, 0.0);
+        assert_eq!(equation_ranges(&lines, &styles), vec![]);
+        set_text(&mut lines, &mut styles, 4, "== 1)", 50.0, 0.0);
+        assert_eq!(equation_ranges(&lines, &styles), vec![]);
+        set_text(&mut lines, &mut styles, 4, "−1", 30.0, 0.0);
+        assert_eq!(equation_ranges(&lines, &styles), vec![]);
+    }
+
+    #[test]
+    fn equation_ranges_still_find_unicode_maths_without_a_math_font() {
+        // Character-based detection must keep working for real formulae once
+        // ASCII-only fragments are filtered out.
+        let (mut lines, mut styles) = body_lines(10, 400.0);
+        set_text(&mut lines, &mut styles, 4, "α + β = γ", 120.0, 0.0);
+        assert_eq!(equation_ranges(&lines, &styles), vec![(4, 4)]);
+        set_text(&mut lines, &mut styles, 5, "E = mc²", 80.0, 0.0);
+        // `²` is not in the math-symbol set and there is no Greek / unicode
+        // operator besides ASCII `=`, so fonts must carry this one.
+        assert_eq!(equation_ranges(&lines, &styles), vec![(4, 4)]);
+        set_text(&mut lines, &mut styles, 5, "E = mc²", 80.0, 1.0);
+        assert_eq!(equation_ranges(&lines, &styles), vec![(4, 5)]);
+    }
+
+    #[test]
     fn equation_ranges_flags_a_set_apart_formula() {
         let (mut lines, mut styles) = body_lines(10, 400.0);
         set_text(&mut lines, &mut styles, 4, "α + β = γ", 120.0, 0.0);
@@ -2890,6 +3032,99 @@ mod tests {
         for name in ["Helvetica", "NimbusRomNo9L-Regu", "CMR10", "Times-Italic"] {
             assert!(!is_math_font(name), "{name}");
         }
+    }
+
+    #[test]
+    fn heading_ranges_flags_a_numbered_subsection_at_body_size() {
+        // Shape, not typography: `1.1. Title` at body size was previously
+        // invisible to the size/weight vote and split as two sentences.
+        let (mut lines, mut styles) = body_lines(10, 400.0);
+        set_text(
+            &mut lines,
+            &mut styles,
+            3,
+            "1.1. The ENDF format and nuclear data libraries",
+            380.0,
+            0.0,
+        );
+        assert_eq!(heading_ranges(&lines, &styles), vec![(3, 3)]);
+    }
+
+    #[test]
+    fn heading_ranges_flags_a_deeper_numbered_heading() {
+        let (mut lines, mut styles) = body_lines(10, 400.0);
+        set_text(
+            &mut lines,
+            &mut styles,
+            2,
+            "2.12. Recommended checking order",
+            300.0,
+            0.0,
+        );
+        assert_eq!(heading_ranges(&lines, &styles), vec![(2, 2)]);
+    }
+
+    #[test]
+    fn heading_ranges_ignores_a_single_level_enumerator() {
+        // `1. First point` is a list candidate, not a section heading.
+        let (mut lines, mut styles) = body_lines(10, 400.0);
+        set_text(
+            &mut lines,
+            &mut styles,
+            4,
+            "1. First point of the list",
+            280.0,
+            0.0,
+        );
+        assert_eq!(heading_ranges(&lines, &styles), vec![]);
+    }
+
+    #[test]
+    fn a_numbered_heading_text_needs_an_internal_dot_and_a_title() {
+        assert!(is_numbered_heading_text("1.1. Methods"));
+        assert!(is_numbered_heading_text("2.12. Recommended checking order"));
+        assert!(is_numbered_heading_text("1.2.3. Overview"));
+        assert!(
+            !is_numbered_heading_text("1.2.3 Overview"),
+            "needs the trailing section dot"
+        );
+        assert!(!is_numbered_heading_text("1. Introduction"));
+        assert!(!is_numbered_heading_text("1. First point"));
+        assert!(!is_numbered_heading_text("1.1."));
+        assert!(!is_numbered_heading_text("The 1.1. Methods"));
+        assert!(!is_numbered_heading_text("3.14 is the value"));
+    }
+
+    #[test]
+    fn heading_ranges_keeps_a_numbered_heading_when_typography_share_trips() {
+        // A page of short bold lines trips the share cap and would erase every
+        // typography heading — the shape rule must still report `1.1. Title`.
+        let (mut lines, mut styles) = body_lines(10, 400.0);
+        for i in 0..10 {
+            set_style(&mut lines, &mut styles, i, 10.0, true, 80.0);
+        }
+        set_text(&mut lines, &mut styles, 4, "1.1. Methods", 200.0, 0.0);
+        styles[4].bold = false;
+        assert_eq!(heading_ranges(&lines, &styles), vec![(4, 4)]);
+    }
+
+    #[test]
+    fn content_objects_promote_a_numbered_heading_range() {
+        let (mut lines, mut styles) = body_lines(10, 400.0);
+        set_text(
+            &mut lines,
+            &mut styles,
+            3,
+            "1.1. The ENDF format and nuclear data libraries",
+            380.0,
+            0.0,
+        );
+        let headings = heading_ranges(&lines, &styles);
+        assert_eq!(headings, vec![(3, 3)]);
+        let objects = content_objects(&lines, &[], &[], &headings, &[], &[]);
+        assert_eq!(objects.len(), 1);
+        assert_eq!(objects[0].kind, ObjectKind::Heading);
+        assert_eq!((objects[0].start_line, objects[0].end_line), (3, 3));
     }
 
     #[test]
@@ -3654,6 +3889,82 @@ mod tests {
     }
 
     #[test]
+    fn a_folio_just_above_the_strict_band_is_still_in_the_folio_band() {
+        // ENDFtk's folio sits near 706pt on an 842pt page — outside the 15%
+        // band (threshold ~716) but inside the 20% folio band (threshold ~674).
+        let height = 842.0;
+        let y = 706.0;
+        assert!(
+            band_of_with_folio(y, height, false).is_none(),
+            "ordinary text at this height is not margin furniture"
+        );
+        assert_eq!(
+            band_of_with_folio(y, height, true).map(|(edge, _)| edge),
+            Some(Edge::Bottom)
+        );
+    }
+
+    #[test]
+    fn mask_removes_a_folio_just_above_the_strict_bottom_band() {
+        let height = 842.0;
+        let (mut lines, mut styles) = page_lines(10, height);
+        let y = 706.0;
+        lines[9] = text_line_at(y, "12");
+        styles[9].baseline = y;
+        let profile = profile_of(&[("#", Edge::Bottom, height - y)]);
+        let mask = furniture_mask(&lines, &styles, height, Some(&profile));
+        assert!(
+            mask[9],
+            "folio in the deeper band must be furniture: {mask:?}"
+        );
+        assert!(
+            mask[..9].iter().all(|m| !m),
+            "body lines must stay: {mask:?}"
+        );
+    }
+
+    #[test]
+    fn mask_does_not_use_the_deeper_band_for_non_folio_text() {
+        // The deeper band is folio-only: body text at the same height that
+        // happens to match a profile entry must not vanish.
+        let height = 842.0;
+        let (mut lines, mut styles) = page_lines(10, height);
+        let y = 706.0;
+        lines[9] = text_line_at(y, "closing remark near the foot");
+        styles[9].baseline = y;
+        let profile = profile_of(&[("closing remark near the foot", Edge::Bottom, height - y)]);
+        assert!(
+            furniture_mask(&lines, &styles, height, Some(&profile))
+                .iter()
+                .all(|m| !m),
+            "non-folio text outside the strict band stays navigable"
+        );
+    }
+
+    #[test]
+    fn build_profile_learns_folios_from_the_deeper_band() {
+        // Sampling must see the same deeper-band folios the mask will match,
+        // or the profile stays empty and nothing is removed.
+        let height = 842.0;
+        let y = 706.0;
+        let folio = BandLine {
+            text: "#".into(),
+            edge: Edge::Bottom,
+            offset: height - y,
+        };
+        let samples: Vec<Vec<BandLine>> = (0..8).map(|_| vec![folio.clone()]).collect();
+        let profile = build_profile(&samples);
+        assert!(
+            !profile.is_empty(),
+            "a folio recurring in the deeper band must enter the profile"
+        );
+        assert!(profile
+            .entries
+            .iter()
+            .any(|e| e.text == "#" && e.edge == Edge::Bottom));
+    }
+
+    #[test]
     fn mask_keeps_a_band_line_that_does_not_repeat() {
         let height = 842.0;
         let (mut lines, mut styles) = page_lines(10, height);
@@ -3731,7 +4042,7 @@ mod tests {
         for (i, offset) in [20.0f32, 30.0, 812.0, 822.0].into_iter().enumerate() {
             lines[i] = text_line_at(offset, "running head");
             styles[i].baseline = offset;
-            let (edge, off) = band_of(offset, height).unwrap();
+            let (edge, off) = band_of_with_folio(offset, height, false).unwrap();
             entries.push(("running head", edge, off));
         }
         let profile = profile_of(&entries);

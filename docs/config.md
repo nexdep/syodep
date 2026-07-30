@@ -66,9 +66,11 @@ sentence despite their periods. Unlike a table a heading is *not* atomic — `w`
 still walks its individual words and `j` at line scope still moves line by line
 — because a heading is ordinary prose you may want to select part of. A line
 counts as a heading when it is set noticeably larger than the page's body text,
-or when it is entirely bold at body size and does not fill the column width.
-Detection costs nothing extra to extract; set it to `false` if the heuristic
-misjudges a document.
+or when it is entirely bold at body size and does not fill the column width, or
+when it opens with a multi-level section number and title (`1.1. Methods`,
+`2.12. Recommended checking order`) — the shape rule that catches subsection
+headings set at body size. Detection costs nothing extra to extract; set it to
+`false` if the heuristic misjudges a document.
 
 **Equation detection.** With `detect_equations = true` a display equation is one
 step at sentence and paragraph scope, like a heading and for the same reason: a
@@ -78,10 +80,11 @@ not atomic, so `w` and `h`/`l` still walk through it, which is what keeps a
 single variable selectable.
 
 A line counts as a display equation when it is set apart from the prose (it does
-not fill the column width), reads as mathematics either by its fonts or by its
-characters, carries an operator or relation, and carries almost no ordinary
-words. An aligned system of several lines is one equation, and an equation number
-set on a line of its own (`(3.4)`) belongs to the equation beside it.
+not fill the column width), reads as mathematics either by its fonts or by rich
+math characters (Greek / unicode operators — ASCII `+`/`=` alone is not enough),
+carries an operator or relation, and carries almost no ordinary words. An
+aligned system of several lines is one equation, and an equation number set on a
+line of its own (`(3.4)`) belongs to the equation beside it.
 
 **Maths written inline in a sentence is deliberately left alone**: to become one
 step it would have to be a region, and a region would split the sentence around
@@ -104,7 +107,9 @@ Three independent rules find them:
   mistaken for a running head. A header and a folio sharing one baseline —
   common in facing-page layouts, where the pair swaps sides between recto and
   verso — are matched independently of which side either one is on or which
-  one a page happens to put first.
+  one a page happens to put first. Bare page numbers may sit a little further
+  into the page than the strict margin band (journal folios often do) and still
+  count.
 - **Line numbering** — a run of short, purely numeric lines forming their own
   column at the page's left margin, clearly separated from the body text
   beside them: the manuscript line-numbering of a submission or review draft,

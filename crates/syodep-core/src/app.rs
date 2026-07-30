@@ -23,12 +23,13 @@ use syodep_storage::{HighlightRect, Position, Storage};
 
 use crate::caret::{
     column_index_of, column_ranges, continues_word_run, is_abbreviation, is_attached_number_suffix,
-    is_exponent_sign, is_inside_hyphenated_word, is_inside_number, is_inside_scientific_exponent,
-    is_number_suffix, is_numeric_separator, is_sentence_terminator, is_sentence_trailer,
-    is_word_hyphen, is_word_target, link_span, nearest_cell_in_line, nearest_line_in_column,
-    opens_a_sentence, page_span_rects, paragraph_segments, split_segments_at_objects, word_class,
-    Caret, Dir, Landing, LineMark, Mode, ObjectId, ParagraphMark, PendingHighlight, Scope,
-    SentenceMark, VisualAnchor, VisualSelection, WordClass, WordMark,
+    is_exponent_sign, is_inside_dotted_token, is_inside_hyphenated_word, is_inside_number,
+    is_inside_scientific_exponent, is_number_suffix, is_numeric_separator, is_sentence_terminator,
+    is_sentence_trailer, is_word_hyphen, is_word_target, link_span, nearest_cell_in_line,
+    nearest_line_in_column, opens_a_sentence, page_span_rects, paragraph_segments,
+    split_segments_at_objects, word_class, Caret, Dir, Landing, LineMark, Mode, ObjectId,
+    ParagraphMark, PendingHighlight, Scope, SentenceMark, VisualAnchor, VisualSelection, WordClass,
+    WordMark,
 };
 use crate::command::Command;
 use crate::input::{InputState, KeyOutcome, Keymap, KeymapError};
@@ -1254,9 +1255,9 @@ impl App {
                 }
             }
         }
-        // A number is one word however it is punctuated: the separator in
-        // `3.14` joins to the digits on either side of it, so `w` steps over
-        // the whole figure instead of stopping three times inside it.
+        // A number or dotted identifier is one word: the separator in `3.14`
+        // or `VII.0` joins the alphanumeric sides, so `w` steps over the
+        // whole token instead of stopping inside it.
         if same_line && (self.is_number_interior(left) || self.is_number_interior(right)) {
             return true;
         }
@@ -1294,8 +1295,9 @@ impl App {
         continues_word_run(left_class, right_class, same_line)
     }
 
-    /// Whether the character at `c` is punctuation sitting inside a number: a
-    /// decimal point, a grouping separator, or the sign of an exponent.
+    /// Whether the character at `c` is punctuation sitting inside a number or
+    /// a dotted identifier: a decimal point, a grouping separator, a full stop
+    /// in `VII.0` / `file.txt`, or the sign of an exponent.
     ///
     /// Only the same line counts: a figure is not carried across a line break,
     /// and treating one as though it were would join text that merely happens
@@ -1310,7 +1312,7 @@ impl App {
         let prev = self.prev_cell_on_line(c);
         let before = prev.and_then(|p| self.char_at(p));
         let after = self.next_cell_on_line(c).and_then(|n| self.char_at(n));
-        if is_inside_number(before, here, after) {
+        if is_inside_number(before, here, after) || is_inside_dotted_token(before, here, after) {
             return true;
         }
         // `2.3E+5`: the sign needs the exponent marker behind it and a digit
@@ -1742,9 +1744,10 @@ impl App {
             Some(ch) if is_sentence_terminator(ch) || is_sentence_trailer(ch) => ch,
             _ => return false,
         };
-        // A full stop with digits on both sides is a decimal point, not the
-        // end of anything: `3.14` is one number in the middle of a sentence.
-        // The stop in `costs 3.` still ends it, because nothing follows.
+        // A full stop with alphanumeric sides is inside a number or dotted
+        // identifier, not the end of anything: `3.14` and `ENDF/B-VII.0` sit
+        // in the middle of a sentence. The stop in `costs 3.` still ends it,
+        // because nothing follows.
         if self.is_number_interior(c) {
             return false;
         }
@@ -4138,6 +4141,64 @@ mod tests {
     }
 
     #[test]
+    fn a_dotted_version_token_is_one_word() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_line(dir.path(), "see B-VII.0 next");
+        press(&mut app, "cw");
+        press(&mut app, "w"); // "see", then the version token
+        assert_eq!(span_text(&mut app), "B-VII.0");
+        press(&mut app, "w");
+        assert_eq!(span_text(&mut app), "next");
+    }
+
+    #[test]
+    fn a_dotted_version_token_does_not_end_a_sentence() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_line(
+            dir.path(),
+            "released in 2006 (ENDF/B-VII.0), 2011 (ENDF/B-VII.1) and 2018.",
+        );
+        press(&mut app, "cs");
+        assert_eq!(
+            span_text(&mut app),
+            "released in 2006 (ENDF/B-VII.0), 2011 (ENDF/B-VII.1) and 2018."
+        );
+    }
+
+    #[test]
+    fn a_dotted_filename_is_one_word() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_line(dir.path(), "open file.txt now");
+        press(&mut app, "cw");
+        press(&mut app, "w");
+        assert_eq!(span_text(&mut app), "file.txt");
+        press(&mut app, "w");
+        assert_eq!(span_text(&mut app), "now");
+    }
+
+    #[test]
+    fn a_chain_of_dotted_identifiers_is_one_word() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_line(dir.path(), "see a.b.c next");
+        press(&mut app, "cw");
+        press(&mut app, "w");
+        assert_eq!(span_text(&mut app), "a.b.c");
+        press(&mut app, "w");
+        assert_eq!(span_text(&mut app), "next");
+    }
+
+    #[test]
+    fn a_dotted_token_does_not_join_across_a_space() {
+        // "word. Next" — the stop ends the sentence; the capital opens another.
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_line(dir.path(), "word. Next");
+        press(&mut app, "cs");
+        assert_eq!(span_text(&mut app), "word.");
+        press(&mut app, "s");
+        assert_eq!(span_text(&mut app), "Next");
+    }
+
+    #[test]
     fn a_grouped_number_does_not_end_a_sentence() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "we saw 1,234.56 of them. Then more.");
@@ -4701,6 +4762,80 @@ mod tests {
         let last = heading_page_content().lines[2].cells.len() - 1;
         assert_eq!((start.line, start.cell), (2, 0));
         assert_eq!((end.line, end.cell), (2, last));
+    }
+
+    fn subsection_heading_page_content() -> PageContent {
+        // The shape detector's output, as the app sees it: a `1.1.` heading at
+        // body size with prose on either side.
+        let texts = [
+            "Opening prose sentence.",
+            "1.1. The ENDF format and nuclear data libraries",
+            "Evaluated nuclear data encapsulate the known physics.",
+        ];
+        let lines: Vec<ContentLine> = texts
+            .iter()
+            .enumerate()
+            .map(|(i, t)| text_line(100.0 + i as f32 * 12.0, t))
+            .collect();
+        let heading = ContentObject {
+            kind: ObjectKind::Heading,
+            bbox: lines[1].bbox,
+            start_line: 1,
+            end_line: 1,
+        };
+        PageContent {
+            lines,
+            objects: vec![heading],
+            ..Default::default()
+        }
+    }
+
+    fn app_with_subsection_heading_page(dir: &Path) -> App {
+        let mut app = app_with_text_pages(dir, &["placeholder"]);
+        app.set_page_content(0, subsection_heading_page_content());
+        app
+    }
+
+    #[test]
+    fn a_body_size_subsection_heading_is_one_sentence_step() {
+        // Without the heading region, `s` would stop after `1.1.` and glue the
+        // title into the following prose.
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_subsection_heading_page(dir.path());
+
+        press(&mut app, "cs");
+        assert_eq!(span_text(&mut app), "Opening prose sentence.");
+        press(&mut app, "s");
+        assert_eq!(
+            span_text(&mut app),
+            "1.1. The ENDF format and nuclear data libraries"
+        );
+        press(&mut app, "s");
+        assert_eq!(
+            span_text(&mut app),
+            "Evaluated nuclear data encapsulate the known physics."
+        );
+    }
+
+    #[test]
+    fn a_body_size_subsection_heading_is_one_paragraph_step() {
+        // Without the heading region, `p` would glue the title into the body
+        // below it.
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_subsection_heading_page(dir.path());
+
+        press(&mut app, "cp");
+        assert_eq!(span_text(&mut app), "Opening prose sentence.");
+        press(&mut app, "p");
+        assert_eq!(
+            span_text(&mut app),
+            "1.1. The ENDF format and nuclear data libraries"
+        );
+        press(&mut app, "p");
+        assert_eq!(
+            span_text(&mut app),
+            "Evaluated nuclear data encapsulate the known physics."
+        );
     }
 
     #[test]

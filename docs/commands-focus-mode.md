@@ -145,6 +145,11 @@ figure. The same rule keeps a decimal point from ending a sentence — `pi is 3.
 exactly.` is one sentence, not two. A full stop that merely follows a number
 still ends both, since nothing follows it: `it costs 3.` behaves as before.
 
+More generally, a full stop with alphanumeric (or `_`) sides and no space —
+`VII.0`, `file.txt`, `a.b.c` — is the same kind of join: one word, and never a
+sentence boundary. That is what keeps library versions like `ENDF/B-VII.0` from
+splitting under `s`.
+
 Scientific notation and percentages come with it. `1.5e-10` and `2.3E+5` are one
 word each: the sign of an exponent joins when an `e`/`E` with a digit behind it
 sits in front of it, so `cache+1` is still three stops. A proportion sign
@@ -205,7 +210,8 @@ A heading is one step at **sentence and paragraph scope**: `s` lands on it, the
 next `s` lands on the body beneath. Without this a heading would be swallowed by
 the paragraph that follows it, because headings rarely end in a full stop. A
 numbered heading like `2.12. Recommended checking order` is still one sentence,
-not three, and a heading that wraps onto two lines is one step across both.
+not three — including when it is set at body size, where typography alone would
+miss it — and a heading that wraps onto two lines is one step across both.
 
 A heading is **not** atomic the way a table is: `w` still walks its individual
 words and `j` at line scope still moves through it line by line. It is ordinary
@@ -228,10 +234,11 @@ its characters, so a single variable or coefficient stays selectable. Only the
 scopes that group text into runs treat the equation as one thing.
 
 A line reads as a display equation when it is set apart from the prose (it does
-not fill the column), reads as mathematics by its fonts or its characters,
-carries an operator or relation, and carries almost no ordinary words. **Maths
-inline in a sentence is left alone** — making it a unit would mean making it a
-region, and that would split the sentence around it. Turn detection off with
+not fill the column), reads as mathematics by its fonts or by rich math
+characters (Greek / unicode operators — not ASCII `+`/`=` alone), carries an
+operator or relation, and carries almost no ordinary words. **Maths inline in a
+sentence is left alone** — making it a unit would mean making it a region, and
+that would split the sentence around it. Turn detection off with
 `view.detect_equations` — see `docs/config.md`.
 
 ## Page furniture

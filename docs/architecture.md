@@ -201,7 +201,10 @@ further split into `text_segments` wherever a gap exceeds `SEGMENT_GAP_POINTS`
 baseline — a facing-page layout where the pair swaps sides between recto and
 verso is the case this exists for — are then two segments the vote can accept
 independently, rather than one string whose order depends on which side either
-field is on. *Line numbering* flags a run of purely numeric lines (at least
+field is on. Bare page numbers get a slightly deeper bottom band (20% rather
+than 15%), because journal layouts often set the folio a few points above the
+strict margin and an empty furniture profile leaves every folio in the caret
+path — sometimes even flagged as a heading. *Line numbering* flags a run of purely numeric lines (at least
 `MIN_LINE_NUMBERS`) forming their own column left of the body text, separated
 from it by at least `LINE_NUMBER_GAP` — manuscript line-numbering, which
 restarts every page and so has no cross-page profile to learn from; it needs
@@ -244,7 +247,12 @@ sentence and paragraph scope. Headings are found from typography rather than
 structure: a line set noticeably larger than the page's body size (the
 character-count mode, which body text dominates on every page), or entirely
 bold at body size without filling the column. Both signals come free from the
-pass that extracts the text. MuPDF's own heading detection
+pass that extracts the text. A third, shape-based rule catches multi-level
+section numbers at body size — `1.1. Methods`, `2.12. Recommended checking
+order` — which typography alone misses; those lines must end with the
+section-number's own trailing dot before the title, so a decimal that opens a
+sentence (`3.14 is the value`) is not mistaken for one. MuPDF's own heading
+detection
 (`FZ_STEXT_PARAGRAPH_BREAK`) is unusable here for the same reason as its table
 grids — it hides the text inside structure nodes the bindings cannot walk — and
 it keys on bold alone, missing size, the stronger signal.
@@ -255,7 +263,10 @@ as mathematics, carries an operator, and carries almost no words. Two math
 signals, because either can be missing: TeX gives its fonts away by name
 (`CMMI10`, `MSBM10`, `XITSMath-Regular`, and MuPDF passes the PDF's own font name
 through every load path), while a PDF whose fonts are unrecognisable still gives
-away its operators and Greek in the characters. The set-apart test is what keeps
+away its operators and Greek in the characters — but character-based detection
+requires a *rich* math mark (Greek or a unicode operator), not ASCII `+`/`=`
+alone, or `in C++.` and `count += 1` become equations. A lone signed number
+(`−1`) is rejected for the same reason. The set-apart test is what keeps
 inline maths out, and inline maths must stay out: a region splits the sentence
 around it, so making a formula inside a sentence a unit would break the sentence
 carrying it. Cost is nothing extra — both signals come from the extraction pass,

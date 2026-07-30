@@ -7,6 +7,76 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-07-30 — Dotted tokens, numbered headings, tighter equations, deeper folios
+
+Prompted by walking the ENDFtk CPC paper (OSTI accepted manuscript) in focus
+mode. Four related failures, fixed together because each one feeds the next:
+version dots split sentences, missed subsection headings glued into prose,
+false "equations" stole `s`/`p` stops, and folios just above the margin band
+stayed in the caret path (then often became headings).
+
+### Dotted identifiers are one word
+
+`is_inside_number` wanted digits on both sides of `.`, so `VII.0` was three
+stops and two sentence fragments. A new predicate,
+`is_inside_dotted_token`, joins any full stop with alphanumeric/`_` sides and
+no space — `VII.0`, `file.txt`, `a.b.c`, and `3.14` alike — and is consulted
+from the same `is_number_interior` path numbers already use. `costs 3.` is
+unchanged: nothing after the stop means it still ends the word and the
+sentence. Grouping commas stay on the digit-only rule.
+
+### Numbered subsection headings by shape
+
+Typography alone misses `1.1. The ENDF format…` when it is set at body size.
+`heading_ranges` now also flags lines that open with a multi-level section
+number and a title (`1.1. Methods`, `2.12. Recommended…`), requiring the
+trailing section-number dot so `3.14 is the value` cannot qualify. These are
+added *after* the typography share cap, so a page of false bold flags cannot
+erase a real subsection. Single-level `1. Introduction` stays on the
+typography / list path — without an internal dot it would steal enumerated
+items.
+
+### Display equations need rich maths
+
+Character-based detection no longer treats ASCII `+`/`=`/`<>` alone as a math
+signal, and a line that is only a signed number (`−1`) is rejected. That
+drops `in C++.`, `count += 1`, `-> None` and friends. Math fonts and Greek /
+unicode operators still qualify; inline formulae in full-width prose remain
+out via the width test, so they do not break `s`/`p`.
+
+### Folios just above the 15% band
+
+The ENDFtk folio sits at ~706pt on an 842pt page — a few points above the
+strict bottom band — so the furniture profile was empty and every page number
+was walked (and often headed). Folio-shaped lines (normalised text `#`) may
+now match in a 20% bottom band while ordinary margin text keeps the 15%
+band, so body lines near the foot are not pulled in.
+
+### Tests
+
+Pure predicates and detectors:
+- `is_inside_dotted_token_*`
+- `is_numbered_heading_text_*`, `heading_ranges_flags_a_numbered_*`,
+  `heading_ranges_keeps_a_numbered_heading_when_typography_share_trips`,
+  `content_objects_promote_a_numbered_heading_range`
+- `equation_ranges_ignore_ascii_code_fragments`,
+  `equation_ranges_still_find_unicode_maths_without_a_math_font`
+- `a_folio_just_above_the_strict_band_is_still_in_the_folio_band`,
+  `mask_removes_a_folio_just_above_the_strict_bottom_band`,
+  `mask_does_not_use_the_deeper_band_for_non_folio_text`,
+  `build_profile_learns_folios_from_the_deeper_band`
+
+App motion:
+- `a_dotted_version_token_is_one_word`,
+  `a_dotted_version_token_does_not_end_a_sentence`,
+  `a_dotted_filename_is_one_word`,
+  `a_chain_of_dotted_identifiers_is_one_word`,
+  `a_dotted_token_does_not_join_across_a_space`
+- `a_body_size_subsection_heading_is_one_sentence_step`,
+  `a_body_size_subsection_heading_is_one_paragraph_step`
+
+---
+
 ## 2026-07-30 — Quitting now confirms unsaved highlights, and moves to `<leader>q`
 
 Highlight mode lets a highlight live in the session and the SQLite
