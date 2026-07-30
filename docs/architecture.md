@@ -56,9 +56,10 @@ input take plain data). Key pieces:
   cancels. If the wait ends in an unbound sequence, the longest bound prefix
   fires and the leftover chords are queued for replay, so a binding that is
   also a prefix stays reachable. Timer-free throughout, hence deterministic
-  and easily tested. The replay queue is drained by `App::handle_key` rather
-  than resolved inside `InputState`, because the fired command may switch
-  modes and the replayed chords must use the new mode's keymap.
+  and easily tested. The replay queue is drained by the private `App::dispatch`
+  (called from both `handle_key` and `handle_timeout`) rather than resolved
+  inside `InputState`, because the fired command may switch modes and the
+  replayed chords must use the new mode's keymap.
 - **Layout** (`layout.rs`): pages stacked vertically in *document space*
   (PDF points), centered on the widest page. Scroll offsets are stored in
   document space so they survive zoom changes. `View` provides clamped
@@ -69,8 +70,12 @@ input take plain data). Key pieces:
   thread in milestone 1; asynchronous tile rendering is a later milestone
   (see roadmap) and will live behind the same `App::render_page` seam.
 - **`App`** (`app.rs`): glues everything; input events come in, `Effects`
-  (redraw / quit / open-file-dialog) come out. Persists the reading
-  position after every navigation command and on drop.
+  (redraw / quit / open-file-dialog / pending-input / reload) come out. The
+  last two are state rather than one-shot requests: `pending_input` tells the
+  shell whether to arm its pause timer, and `reload` tells it a save rewrote
+  the document, so cached page bitmaps must be dropped even though nothing
+  else about the view changed. Persists the reading position after every
+  navigation command and on drop.
 - **Focus mode** (`caret.rs` + `app.rs`): one highlighted position over
   page-content geometry. `Mode` has exactly four variants — `Normal`, `Focus`,
   `Visual`, `Highlight` — and *granularity is not a mode*: `Focus` carries a `Scope` (char,
@@ -313,21 +318,26 @@ by cbindgen at build time into `crates/syodep-ffi/include/syodep_ffi.h`.
 
 ### ui-qt
 
-Four small files; intentionally boring:
+Five small components; intentionally boring:
 
 - `key_encoder` translates `QKeyEvent` to the chord syntax (the shell's
   only input knowledge).
 - `CanvasWidget` (a `QOpenGLWidget`) forwards keys/wheel/resizes, asks the
   core for visible page rects + bitmaps, paints them with `QPainter` on the
-  GL-backed surface, and draws the caret overlay rectangle the core reports
-  (`syo_app_caret`, in canvas pixels) on top. It keeps a tiny per-page
-  `QImage` cache only to avoid re-copying bitmaps across the FFI every
-  repaint; the real cache is in the core. Tiled GL texture rendering is
-  planned for phase 3 (roadmap).
+  GL-backed surface, and fills the overlay rectangles the core reports —
+  `syo_app_focus`, `syo_app_selection`, `syo_app_highlights`, each a set of
+  screen rects in canvas pixels, at most one of the first two ever valid at
+  once — on top, one `QPainterPath` per overlay so overlapping rects blend
+  once. It keeps a tiny per-page `QImage` cache only to avoid re-copying
+  bitmaps across the FFI every repaint (cleared on a save's `reload` effect,
+  or on opening a different document); the real cache is in the core. Tiled
+  GL texture rendering is planned for phase 3 (roadmap).
 - `MainWindow` owns the `SyoApp*` handle, the status label and the native
   file dialog, and accepts PDFs dropped onto the window. The canvas fills the
   window but leaves `acceptDrops()` false, so Qt delivers drag events to the
   window; only it needs the flag.
+- `diagnostics` detects the platform's graphics situation (WSL, software GL,
+  missing OpenGL) and produces the `--check`/`--version` reports.
 - `main.cpp` parses the CLI and implements `--smoke-test` for CI.
 
 ## Data flow example: pressing `5j`

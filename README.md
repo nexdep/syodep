@@ -131,6 +131,7 @@ no document logic. Details in `docs/architecture.md`.
 - `docs/commands-normal-mode.md` – commands available in normal mode
 - `docs/commands-focus-mode.md` – commands available in focus mode
 - `docs/commands-visual-mode.md` – commands available in visual mode
+- `docs/commands-highlight-mode.md` – commands available in highlight mode
 - `docs/keybindings.md` – every default binding + key syntax
 - `docs/config.md` – every config option
 - `docs/testing.md` – test strategy and how to run tests

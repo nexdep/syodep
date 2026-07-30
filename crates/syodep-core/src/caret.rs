@@ -1,12 +1,11 @@
 //! Caret navigation: a Vim-like cursor that moves through a document's
 //! content (text characters and images) independently of scrolling.
 //!
-//! The caret is *modal*: the app is either in [`Mode::Normal`] (where `hjkl`
-//! scroll the page) or [`Mode::Focus`] (where `hjkl` move the caret and the view
-//! auto-scrolls to follow it). What a step of `hjkl` covers is the focus
-//! [`Scope`] — a character, word, line, sentence or paragraph — not a separate
-//! mode. Each image is a single caret stop, so the caret traverses text and
-//! images uniformly.
+//! The caret is *modal* — see [`Mode`] for the four modes and what `hjkl`
+//! does in each. What a step of `hjkl` covers within focus, visual or
+//! highlight mode is the [`Scope`] — a character, word, line, sentence or
+//! paragraph — not a separate mode. Each image is a single caret stop, so the
+//! caret traverses text and images uniformly.
 //!
 //! This module owns the small pieces that are pure and unit-testable in
 //! isolation: the position type, the movement direction, and the

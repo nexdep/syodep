@@ -36,7 +36,7 @@ bookmarks, highlights, notes, history. That lives in the SQLite database
 | `fit_width_on_open` | bool | `true` | fit page width to window when opening a document without a saved position |
 | `zoom_step` | float | `1.1` | multiplicative step for `zoom_in`/`zoom_out` |
 | `background` | string | `"#1e1e1e"` | canvas background color, `#rrggbb` |
-| `focus_color` | string | `"#5b9bd5"` | highlight for every focus mode, `#rrggbb` |
+| `focus_color` | string | `"#5b9bd5"` | highlight for focus mode (one colour shared by every scope), `#rrggbb` |
 | `focus_opacity` | float | `0.55` | opacity of the focus highlight, `0.0`-`1.0` |
 | `visual_color` | string | `"#8a8a8a"` | highlight for the visual-mode selection, `#rrggbb` |
 | `visual_opacity` | float | `0.55` | opacity of the selection highlight, `0.0`-`1.0` |
@@ -108,17 +108,21 @@ Set it to `false` to walk every extracted line as before. Note that `Ln 1` in
 the status line then means the page's first *content* line rather than its first
 body line.
 
-**Overlay colours.** All five focus modes (caret, line, word, sentence,
-paragraph) share `focus_color`: the highlight tells you that focus is active,
-not which scope you are in. The selection uses `visual_color`. Overlays are
-drawn as plain filled boxes with no border, and overlapping boxes are merged
-before filling, so a multi-line highlight is one flat block rather than a
-ladder of edges with darker seams.
+**Overlay colours.** The one focus mode's five scopes (char, line, word,
+sentence, paragraph) all share `focus_color`: the highlight tells you that
+focus is active, not which scope you are in. The selection uses
+`visual_color`, and a highlight — pending or stored — uses `highlight_color`.
+Overlays are drawn as plain filled boxes with no border, and overlapping boxes
+are merged before filling, so a multi-line highlight is one flat block rather
+than a ladder of edges with darker seams.
 
 The defaults are mid-tone colours at `0.55` opacity, which over a white page
 blend to about `#a5c8e8` (focus) and `#bfbfbf` (selection) — clearly visible at
-a glance while leaving the text under them fully legible. Lower the opacity for
-a fainter tint, or raise it towards `1.0` for a solid block.
+a glance while leaving the text under them fully legible. The highlight
+default is the classic highlighter yellow, `#ffe066`. Lower the opacity for a
+fainter tint, or raise it towards `1.0` for a solid block. `highlight_opacity`
+only affects syodep's own overlay — a highlight saved into the PDF is painted
+by the reader with Multiply blending, which has no opacity of its own.
 
 An unparseable colour falls back to its default and reports the problem in the
 status line rather than leaving the overlay invisible. Only `#rrggbb` is

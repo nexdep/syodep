@@ -33,7 +33,7 @@ for what to build next.
 A feature is complete only when implemented, tested, and documented:
 commands in the per-mode pages indexed by `docs/commands.md`
 (`docs/commands-normal-mode.md`, `docs/commands-focus-mode.md`,
-`docs/commands-visual-mode.md`),
+`docs/commands-visual-mode.md`, `docs/commands-highlight-mode.md`),
 default bindings in `docs/keybindings.md`,
 config options in `docs/config.md` (the `docs` CI job greps source registries
 against these files — `scripts/check-docs.sh`), plus a dev-log entry for the
@@ -80,8 +80,8 @@ and additionally review by hand that the docs indexed under "Definition of
 done" still match what the code does:
 
 - per-mode command pages (`docs/commands-normal-mode.md`,
-  `docs/commands-focus-mode.md`, `docs/commands-visual-mode.md`) match
-  `Command`/`ALL_COMMANDS`,
+  `docs/commands-focus-mode.md`, `docs/commands-visual-mode.md`,
+  `docs/commands-highlight-mode.md`) match `Command`/`ALL_COMMANDS`,
 - `docs/keybindings.md` matches `syodep-config::default_keybindings()`,
 - `docs/config.md` matches the config registry,
 - `docs/architecture.md` and `docs/roadmap.md` still reflect current

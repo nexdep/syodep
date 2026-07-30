@@ -24,9 +24,12 @@ real files. The strategy, in descending order of coverage:
    grid between a heading and a caption, for table detection) and
    `pdf_with_heading` (a large heading plus a bold subheading over body prose),
    `pdf_with_running_header` (multi-page, with the header either constant or
-   varying, plus a folio) and `pdf_with_rotated_text` (a sideways stamp and an
-   inclined watermark, or a page laid out entirely sideways) and
-   `pdf_with_list` (a colon lead-in, three bulleted items, a closing sentence).
+   varying, plus a folio), `pdf_with_rotated_text` (a sideways stamp and an
+   inclined watermark, or a page laid out entirely sideways), `pdf_with_list`
+   (a colon lead-in, three bulleted items, a closing sentence),
+   `pdf_with_table_gap` (a table with its caption held back by a configurable
+   gap, for the edge-trimming rule) and `pdf_with_equation` (a display formula
+   set apart from body prose, for equation detection).
 
    Navigation over tables is tested two ways on purpose. The mapping from
    detected boxes to line ranges (`content_objects`) is a pure function tested
@@ -77,6 +80,7 @@ QT_QPA_PLATFORM=offscreen ./build/ui-qt/syodep --smoke-test /tmp/f.pdf
 | `qt-build-linux` | CMake configure + build of the Qt shell, then the offscreen smoke test |
 | `qt-build-windows` | same on Windows (Qt via aqtinstall, MSVC + Ninja); smoke test judged by exit code (GUI-subsystem exe has no stdout) |
 | `docs` | `scripts/check-docs.sh`: required docs exist; every command, default keybinding and config option is documented |
+| `build-artifact` | packages the build as a downloadable CI artifact on every push (see `docs/packaging.md`) |
 
 The release workflow additionally smoke-tests the staged Windows portable
 tree with Qt removed from PATH, catching missing bundled DLLs
@@ -84,7 +88,7 @@ tree with Qt removed from PATH, catching missing bundled DLLs
 
 Release pipeline: see `docs/packaging.md`.
 
-## Current coverage snapshot (milestone 1)
+## Current coverage snapshot
 
-88 Rust tests: 15 config, 48 core, 12 pdf, 9 storage, 4 ffi — plus the CI
+452 Rust tests: 30 config, 275 core, 119 pdf, 15 storage, 13 ffi — plus the CI
 smoke test and docs checks.
