@@ -206,8 +206,8 @@ normal behavior. Like `[keys]`, entries overlay the defaults — list only
 changes.
 
 Defaults: `h`/`j`/`k`/`l` (and the arrow keys) move the highlight by one unit
-of the active scope, `w`/`e`/`b` move by word runs whatever the scope, and
-`<Esc>` exits.
+of the active scope, `w`/`b` move by word runs whatever the scope, `e` by
+lines, and `<Esc>` exits.
 
 **One table covers all five scopes.** The motion commands dispatch on the
 active scope — `focus_left` is a character in char scope, a word in word scope,

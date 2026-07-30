@@ -296,11 +296,13 @@ pub fn default_focus_keybindings() -> BTreeMap<String, String> {
         ("<Up>", "focus_up"),
         ("<Right>", "focus_right"),
         ("w", "focus_next_word"),
-        ("e", "focus_end_word"),
         ("b", "focus_prev_word"),
-        // Sentence and paragraph get a forward motion each, the same way `w`
-        // is the word one. `cs`/`cp` still switch scope: `s` *moves* by a
-        // sentence, `cs` *focuses by* sentence.
+        // Line, sentence and paragraph each get a forward motion, the same way
+        // `w` is the word one -- and `e` is the line letter for the same
+        // reason `ce` is: `l` is the forward motion in every mode, so line
+        // scope's own letter can't be `l`. `ce`/`cs`/`cp` still switch scope:
+        // `e` *moves* by a line, `ce` *focuses by* line.
+        ("e", "focus_next_line"),
         ("s", "focus_next_sentence"),
         ("p", "focus_next_paragraph"),
         // `a` for annotate. Bound here and in `[visual_keys]` rather than on the
@@ -333,8 +335,8 @@ pub fn default_visual_keybindings() -> BTreeMap<String, String> {
         ("<Up>", "visual_up"),
         ("<Right>", "visual_right"),
         ("w", "visual_next_word"),
-        ("e", "visual_end_word"),
         ("b", "visual_prev_word"),
+        ("e", "visual_next_line"),
         ("s", "visual_next_sentence"),
         ("p", "visual_next_paragraph"),
         ("o", "visual_swap_ends"),
@@ -384,8 +386,8 @@ pub fn default_highlight_keybindings() -> BTreeMap<String, String> {
         ("<Up>", "visual_up"),
         ("<Right>", "visual_right"),
         ("w", "visual_next_word"),
-        ("e", "visual_end_word"),
         ("b", "visual_prev_word"),
+        ("e", "visual_next_line"),
         ("s", "visual_next_sentence"),
         ("p", "visual_next_paragraph"),
         ("o", "visual_swap_ends"),
@@ -814,7 +816,7 @@ mod tests {
         );
         assert_eq!(
             config.focus_keys.get("e").map(String::as_str),
-            Some("focus_end_word")
+            Some("focus_next_line")
         );
         assert_eq!(
             config.focus_keys.get("b").map(String::as_str),

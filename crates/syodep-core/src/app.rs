@@ -703,7 +703,9 @@ impl App {
             Command::FocusPrevWord => {
                 return self.focus_scope_motion(Scope::Word, Dir::Left, count)
             }
-            Command::FocusEndWord => return self.focus_word_end(count),
+            Command::FocusNextLine => {
+                return self.focus_scope_motion(Scope::Line, Dir::Down, count)
+            }
             Command::FocusNextSentence => {
                 return self.focus_scope_motion(Scope::Sentence, Dir::Right, count)
             }
@@ -727,7 +729,9 @@ impl App {
             Command::VisualPrevWord => {
                 return self.visual_scope_motion(Scope::Word, Dir::Left, count)
             }
-            Command::VisualEndWord => return self.visual_word_end(count),
+            Command::VisualNextLine => {
+                return self.visual_scope_motion(Scope::Line, Dir::Down, count)
+            }
             Command::VisualNextSentence => {
                 return self.visual_scope_motion(Scope::Sentence, Dir::Right, count)
             }
@@ -797,7 +801,7 @@ impl App {
             | Command::FocusDown
             | Command::FocusNextWord
             | Command::FocusPrevWord
-            | Command::FocusEndWord
+            | Command::FocusNextLine
             | Command::FocusNextSentence
             | Command::FocusNextParagraph
             | Command::VisualEnter
@@ -813,7 +817,7 @@ impl App {
             | Command::VisualDown
             | Command::VisualNextWord
             | Command::VisualPrevWord
-            | Command::VisualEndWord
+            | Command::VisualNextLine
             | Command::VisualNextSentence
             | Command::VisualNextParagraph
             | Command::VisualSwapEnds
@@ -1486,33 +1490,6 @@ impl App {
             return false;
         };
         *caret = target;
-        true
-    }
-
-    fn step_word_end(&mut self, caret: &mut Caret) -> bool {
-        let Some(current_class) = self.word_class_at(*caret) else {
-            return false;
-        };
-        let target = if is_word_target(current_class) {
-            let end = self.word_run_end(*caret);
-            if end != *caret {
-                *caret = end;
-                return true;
-            }
-            let Some(next) = self.next_cell(*caret) else {
-                return false;
-            };
-            self.next_word_target_from(next)
-        } else {
-            let Some(next) = self.next_cell(*caret) else {
-                return false;
-            };
-            self.next_word_target_from(next)
-        };
-        let Some(target) = target else {
-            return false;
-        };
-        *caret = self.word_run_end(target);
         true
     }
 
@@ -2199,29 +2176,6 @@ impl App {
         true
     }
 
-    /// `e`, counting a whole table or image as one word.
-    fn step_word_end_atomic(&mut self, caret: &mut Caret) -> bool {
-        let from = self.atomic_id_at(*caret);
-        if !self.step_word_end(caret) {
-            self.land_on_object(caret, Landing::End);
-            return false;
-        }
-        if from.is_some() {
-            let mut guard = 0;
-            while self.atomic_id_at(*caret) == from {
-                guard += 1;
-                if guard > MAX_ATOMIC_STEPS || !self.step_word_end(caret) {
-                    self.land_on_object(caret, Landing::End);
-                    return false;
-                }
-            }
-        }
-        // Landing on the object's *end* means the next `e` leaves it, instead
-        // of walking back through the words inside.
-        self.land_on_object(caret, Landing::End);
-        true
-    }
-
     /// If `caret` sits inside an object, move it to that object's canonical
     /// position, so a caret never rests part-way through one.
     fn land_on_object(&mut self, caret: &mut Caret, land: Landing) {
@@ -2572,14 +2526,16 @@ impl App {
         Effects::redraw()
     }
 
-    /// `w`/`b`/`e` move a word at a time in *every* scope: they are word-named
-    /// motions, and the highlight still snaps to the active scope.
-    /// Move by `count` units of `scope`, *whatever the active scope is*.
+    /// `w`/`b`/`e`/`s`/`p` move by their own named unit in *every* scope: a
+    /// motion names its unit, and the highlight still snaps back out to the
+    /// active scope afterwards. Move by `count` units of `scope`, *whatever
+    /// the active scope is*.
     ///
-    /// This is what `w`/`b`/`s`/`p` are: a motion names its own unit, and the
-    /// highlight still snaps back out to the active scope afterwards. It is
-    /// the same [`Self::step_scope`] table `hjkl` use — the only difference is
-    /// that the scope comes from the command rather than from the mode.
+    /// It is the same [`Self::step_scope`] table `hjkl` use — the only
+    /// difference is that the scope comes from the command rather than from
+    /// the mode. `e` (line) always lands at column 0, since a line's start
+    /// *is* column 0, so the goal-column update below still does the right
+    /// thing without a line-shaped exception.
     fn focus_scope_motion(&mut self, scope: Scope, dir: Dir, count: Option<u32>) -> Effects {
         if self.session.is_none() {
             return Effects::default();
@@ -2596,32 +2552,7 @@ impl App {
             }
         }
         self.focus = Some(at);
-        // These are horizontal motions, so they redefine the column `j`/`k`
-        // aim at.
-        self.update_focus_goal_x(at);
-        self.refresh_focus_span();
-        self.ensure_focus_visible();
-        self.save_position();
-        Effects::redraw()
-    }
-
-    /// `e`: the end of the current word run, or the next run's end if already
-    /// there. The one motion no scope expresses — every scope motion lands on a
-    /// unit *start*.
-    fn focus_word_end(&mut self, count: Option<u32>) -> Effects {
-        if self.session.is_none() {
-            return Effects::default();
-        }
-        let Some(mut at) = self.focus else {
-            return self.enter_focus(self.focus_scope);
-        };
-        let steps = count.unwrap_or(1).max(1);
-        for _ in 0..steps {
-            if !self.step_word_end_atomic(&mut at) {
-                break;
-            }
-        }
-        self.focus = Some(at);
+        // Landing at a new unit's start redefines the column `j`/`k` aim at.
         self.update_focus_goal_x(at);
         self.refresh_focus_span();
         self.ensure_focus_visible();
@@ -2882,8 +2813,9 @@ impl App {
         Effects::redraw()
     }
 
-    /// `w`/`b`/`e` move the head a word at a time in *every* scope: they are
-    /// word-named motions, and the edge still snaps to the active scope.
+    /// `w`/`b`/`e`/`s`/`p` move the head by their own named unit in *every*
+    /// scope: see [`Self::focus_scope_motion`], which this mirrors for the
+    /// selection's moving end.
     fn visual_scope_motion(&mut self, scope: Scope, dir: Dir, count: Option<u32>) -> Effects {
         let (Some(_), Some(mut head)) = (self.visual, self.focus) else {
             return Effects::default();
@@ -2893,25 +2825,6 @@ impl App {
         let goal_y = self.focus_goal_y;
         for _ in 0..steps {
             if !self.step_scope_atomic(&mut head, scope, dir, goal_x, goal_y) {
-                break;
-            }
-        }
-        self.focus = Some(head);
-        self.update_focus_goal_x(head);
-        self.refresh_visual_span();
-        self.ensure_visual_head_visible();
-        self.save_position();
-        Effects::redraw()
-    }
-
-    /// `e` in visual mode: see [`Self::focus_word_end`].
-    fn visual_word_end(&mut self, count: Option<u32>) -> Effects {
-        let (Some(_), Some(mut head)) = (self.visual, self.focus) else {
-            return Effects::default();
-        };
-        let steps = count.unwrap_or(1).max(1);
-        for _ in 0..steps {
-            if !self.step_word_end_atomic(&mut head) {
                 break;
             }
         }
@@ -3756,14 +3669,29 @@ mod tests {
     }
 
     #[test]
-    fn caret_end_word_uses_current_then_next_run() {
+    fn caret_next_line_moves_to_the_start_of_the_next_line() {
         let dir = tempfile::tempdir().unwrap();
-        let mut app = app_with_text_pages(dir.path(), &["alpha beta"]);
+        let mut app = app_with_two_line_pdf(dir.path(), "alpha beta", "gamma delta");
+        press(&mut app, "cc");
+        press(&mut app, "3l"); // partway into the first line
+        press(&mut app, "e");
+        // `e` always lands at column 0 of the next line, whatever the active
+        // scope is -- here char, unaffected by where on the line it started.
+        assert_caret(&app, 0, 1, 0);
+        assert_eq!(
+            app.focus_scope(),
+            Scope::Char,
+            "e does not change the scope"
+        );
+    }
+
+    #[test]
+    fn caret_next_line_clamps_at_the_last_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["only line"]);
         press(&mut app, "cc");
         press(&mut app, "e");
-        assert_caret(&app, 0, 0, 4);
-        press(&mut app, "e");
-        assert_caret(&app, 0, 0, 9);
+        assert_caret(&app, 0, 0, 0);
     }
 
     #[test]
@@ -3801,12 +3729,10 @@ mod tests {
         press(&mut app, "cc");
         press(&mut app, "b");
         assert_caret(&app, 0, 0, 0);
-        press(&mut app, "e");
-        assert_caret(&app, 0, 0, 2);
-        press(&mut app, "e");
-        assert_caret(&app, 0, 0, 2);
+        // A single word has no next run either, so `w` clamps at the same
+        // start it began on rather than moving anywhere.
         press(&mut app, "w");
-        assert_caret(&app, 0, 0, 2);
+        assert_caret(&app, 0, 0, 0);
     }
 
     // ---- Lists ------------------------------------------------------------
@@ -5076,13 +5002,16 @@ mod tests {
     }
 
     #[test]
-    fn word_end_lands_on_the_table_end_then_leaves() {
+    fn next_line_treats_the_table_as_a_single_step() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_table_page(dir.path());
         press(&mut app, "cw");
         press_into_table(&mut app, "e");
         let caret = app.caret().unwrap();
-        assert_eq!(caret.line, 5, "e should rest on the table's last line");
+        // Every scope stepper lands on a unit's *start*, and a table is one
+        // unit: `e` steps onto its first line rather than walking through it
+        // line by line.
+        assert_eq!(caret.line, 2, "e should land on the table's first line");
         press(&mut app, "e");
         assert_eq!(app.caret().unwrap().line, 6, "next e must leave the table");
     }

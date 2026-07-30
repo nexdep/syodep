@@ -7,6 +7,67 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-07-30 — `e` moves to the next line instead of a word's end
+
+`e` used to be the odd one out: every scope-entry letter names a granularity
+consistently (`cc`/`cw`/`ce`/`cs`/`cp` = char/word/**line**/sentence/paragraph),
+but the standalone motion on those same letters only matched four of the
+five — `w`/`s`/`p` move by word/sentence/paragraph, while `e` moved to a
+*word*'s end rather than the next line, the one granularity with no
+always-move-forward motion of its own. `e` is line's letter for the same
+reason `ce` is (`l` is the forward motion in every mode, so line scope
+couldn't use it either), so the fix is to give it the motion that matches:
+`e` now moves to the start of the next line, whatever the active scope, the
+same way `w`/`s`/`p` already moved by their own unit regardless of scope.
+
+### Falls out of existing machinery, not new code
+
+`focus_scope_motion(scope, dir, count)` was already "move by this scope's
+unit, whatever the active scope is" — exactly what `w`/`b`/`s`/`p` are built
+from. `e` becoming `focus_scope_motion(Scope::Line, Dir::Down, count)` (and
+`visual_scope_motion` for the selection head) needed no new motion code at
+all. It deleted some: `focus_word_end`/`visual_word_end` and their shared
+`step_word_end_atomic`/`step_word_end` helpers existed only to give `e` its
+old meaning, including the one exception to "every scope stepper lands on a
+unit's start" (`Landing::End`, so a second `e` would leave a table instead of
+walking back through it). That exception is gone along with the old
+behavior: landing on a line's start is column 0, which is exactly what
+`update_focus_goal_x` already does with any other unit's start, so a table in
+`e`'s path is now skipped the same way `step_scope_atomic` already skips one
+for `w`/`s`/`p` — no special case survives to describe.
+
+`Landing::End` is not dead, though: `scope_span` still uses it to resolve the
+*other* edge of an atomic object's highlight, which was always independent of
+what any single motion does.
+
+### If you rebound `e`
+
+A `[focus_keys]`/`[visual_keys]`/`[highlight_keys]` entry naming
+`focus_end_word`/`visual_end_word` will fail to load — those commands no
+longer exist — and be reported as a startup warning rather than silently
+kept, same as any other unknown command name. Rebind to `focus_next_line` /
+`visual_next_line` for the closest available motion, or to another command
+entirely if you were using `e` for something else.
+
+### Tests
+
+`caret_end_word_uses_current_then_next_run` became
+`caret_next_line_moves_to_the_start_of_the_next_line` (asserting the new
+column-0 landing from partway into a line, and that the active scope is
+untouched) plus a new `caret_next_line_clamps_at_the_last_line`.
+`caret_word_motions_clamp_at_document_edges` dropped its `e`-specific
+assertions, since that motion is no longer word-shaped.
+`word_end_lands_on_the_table_end_then_leaves` became
+`next_line_treats_the_table_as_a_single_step`, asserting a `Landing::Start`
+arrival (the table's first line) instead of `Landing::End` (its last) before
+the following `e` clears it — the existing highlight/visual reshape-parity
+test already exercises `e` as one of its nine keys, so it needed no change:
+both modes route it to the same renamed command.
+
+275 core tests (was 274 — one net test added), 30 config, unchanged elsewhere.
+
+---
+
 ## 2026-07-30 — `open_file` moves from `<C-o>` to `<leader>o`
 
 `<C-o>` was the open-file binding since it moved off a bare `o` in the

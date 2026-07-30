@@ -145,7 +145,7 @@ move it:
 | `k`, `<Up>` | `focus_up` — up a line, or the previous unit |
 | `j`, `<Down>` | `focus_down` — down a line, or the next unit |
 | `w` | `focus_next_word` — next word start |
-| `e` | `focus_end_word` — current/next word end |
+| `e` | `focus_next_line` — next line start |
 | `s` | `focus_next_sentence` — next sentence start |
 | `p` | `focus_next_paragraph` — next paragraph start |
 | `b` | `focus_prev_word` — current/previous word start |
@@ -164,11 +164,14 @@ keys keep doing the same thing as you change granularity:
 | `cs` | sentence | previous/next sentence | previous/next sentence |
 | `cp` | paragraph | previous/next paragraph | previous/next paragraph |
 
-Line scope is `ce`, not `cl`: `l` is the forward motion in every mode.
+Line scope is `ce`, not `cl`: `l` is the forward motion in every mode — and `e`
+is the line letter for the same reason, since `l` was already taken.
 
-`w`/`e`/`b` move by Vim-like word runs in *every* scope: letters/digits/
-underscore together, punctuation/symbols separately, whitespace skipped. Each
-image is a single stop. `s` and `p` do the same for sentences and paragraphs.
+`w`/`b` move by Vim-like word runs in *every* scope: letters/digits/underscore
+together, punctuation/symbols separately, whitespace skipped. Each image is a
+single stop. `e` does the same for lines, `s` and `p` for sentences and
+paragraphs — `e` always lands at column 0, a line's own start, rather than
+keeping the goal column `hjkl` was aiming for.
 
 **These are motions, not scope changes.** In word focus, `s` jumps to the first
 word of the next sentence and the highlight stays word-sized; `cs` stays put and
@@ -209,7 +212,7 @@ anchored:
 | `j`, `<Down>` | `visual_down` — down a line, or forward one unit for sentence/paragraph |
 | `w` | `visual_next_word` — next word, whatever the scope |
 | `b` | `visual_prev_word` — previous word, whatever the scope |
-| `e` | `visual_end_word` — end of the current word, whatever the scope |
+| `e` | `visual_next_line` — next line start, whatever the scope |
 | `s` | `visual_next_sentence` — next sentence start, whatever the scope |
 | `p` | `visual_next_paragraph` — next paragraph start, whatever the scope |
 | `<Esc>` | `visual_exit` — back to the mode visual mode was entered from |
@@ -250,7 +253,7 @@ so a key cannot mean one thing while selecting and another while highlighting.
 | Keys | Command |
 |---|---|
 | `h`, `j`, `k`, `l` and the arrows | `visual_left`, `visual_down`, `visual_up`, `visual_right` |
-| `w`, `b`, `e` | `visual_next_word`, `visual_prev_word`, `visual_end_word` |
+| `w`, `b`, `e` | `visual_next_word`, `visual_prev_word`, `visual_next_line` |
 | `s`, `p` | `visual_next_sentence`, `visual_next_paragraph` |
 | `o`, `oo` | `visual_swap_ends` |
 | `oc`, `oe`, `ow`, `os`, `op` | `visual_other_char`, `visual_other_line`, `visual_other_word`, `visual_other_sentence`, `visual_other_paragraph` |

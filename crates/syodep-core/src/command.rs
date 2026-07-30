@@ -65,8 +65,8 @@ pub enum Command {
     FocusNextWord,
     /// Move to the start of the previous word, whatever the scope.
     FocusPrevWord,
-    /// Move to the end of the current word, whatever the scope.
-    FocusEndWord,
+    /// Move to the start of the next line, whatever the scope.
+    FocusNextLine,
     /// Move to the start of the next sentence, whatever the scope.
     FocusNextSentence,
     /// Move to the start of the next paragraph, whatever the scope.
@@ -98,8 +98,8 @@ pub enum Command {
     VisualNextWord,
     /// Move the active end to the start of the previous word, whatever the scope.
     VisualPrevWord,
-    /// Move the active end to the end of the current word, whatever the scope.
-    VisualEndWord,
+    /// Move the active end to the start of the next line, whatever the scope.
+    VisualNextLine,
     /// Move the active end to the start of the next sentence, whatever the scope.
     VisualNextSentence,
     /// Move the active end to the start of the next paragraph, whatever the scope.
@@ -179,7 +179,7 @@ pub const ALL_COMMANDS: &[(&str, Command)] = &[
     ("focus_down", Command::FocusDown),
     ("focus_next_word", Command::FocusNextWord),
     ("focus_prev_word", Command::FocusPrevWord),
-    ("focus_end_word", Command::FocusEndWord),
+    ("focus_next_line", Command::FocusNextLine),
     ("focus_next_sentence", Command::FocusNextSentence),
     ("focus_next_paragraph", Command::FocusNextParagraph),
     ("visual_enter", Command::VisualEnter),
@@ -195,7 +195,7 @@ pub const ALL_COMMANDS: &[(&str, Command)] = &[
     ("visual_down", Command::VisualDown),
     ("visual_next_word", Command::VisualNextWord),
     ("visual_prev_word", Command::VisualPrevWord),
-    ("visual_end_word", Command::VisualEndWord),
+    ("visual_next_line", Command::VisualNextLine),
     ("visual_next_sentence", Command::VisualNextSentence),
     ("visual_next_paragraph", Command::VisualNextParagraph),
     ("visual_swap_ends", Command::VisualSwapEnds),

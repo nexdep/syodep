@@ -56,7 +56,7 @@ granularity.)
 | `focus_down` | move down a line, or forward one unit for the linear scopes | repeats N times |
 | `focus_next_word` | move to the start of the next word run | repeats N times |
 | `focus_prev_word` | move to the start of the current word run, or the previous run if already at a start | repeats N times |
-| `focus_end_word` | move to the end of the current word run, or the next run if already at an end | repeats N times |
+| `focus_next_line` | move to the start of the next line | repeats N times |
 | `focus_next_sentence` | move to the start of the next sentence | repeats N times |
 | `focus_next_paragraph` | move to the start of the next paragraph | repeats N times |
 
@@ -82,9 +82,14 @@ scope afterwards. This mirrors visual mode exactly.
 | Key | Moves by |
 |---|---|
 | `w` / `b` | next / previous word start |
-| `e` | end of the current word run |
+| `e` | next line start |
 | `s` | next sentence |
 | `p` | next paragraph |
+
+`e` is the line letter for the same reason `ce` is: `l` is the forward motion
+in every mode, so line scope's own letter can't be `l`. This is also why `e`
+always lands at column 0 — a line's start *is* column 0 — rather than
+preserving whatever column `hjkl` was aiming for.
 
 **A motion is not a scope change.** In word focus, `s` jumps to the first word
 of the next sentence and the highlight stays *word*-sized; `cs` stays where you

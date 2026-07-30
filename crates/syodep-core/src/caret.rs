@@ -194,9 +194,10 @@ pub struct ObjectId {
 /// Which end of an atomic object a motion should land on.
 ///
 /// Every scope stepper lands on unit *starts*, so [`Landing::Start`] is the
-/// rule; `e` is the one motion that lands on a unit end, and uses
-/// [`Landing::End`] so a following `e` leaves the object instead of walking
-/// back through it.
+/// rule everywhere a motion moves the caret. [`Landing::End`] is used only to
+/// resolve the *other* edge of a span (`scope_span`, for an atomic object
+/// covered at a scope above char): a highlight needs both edges, even though
+/// no motion ever lands on the second one directly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Landing {
     Start,

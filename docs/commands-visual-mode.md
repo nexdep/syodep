@@ -46,7 +46,7 @@ swaps the ends without needing `oo`.
 | `visual_down` | move the active end down a line, or forward one unit for the linear scopes | repeats N times |
 | `visual_next_word` | move the active end to the start of the next word | repeats N times |
 | `visual_prev_word` | move the active end to the start of the previous word | repeats N times |
-| `visual_end_word` | move the active end to the end of the current word | repeats N times |
+| `visual_next_line` | move the active end to the start of the next line | repeats N times |
 | `visual_next_sentence` | move the active end to the start of the next sentence | repeats N times |
 | `visual_next_paragraph` | move the active end to the start of the next paragraph | repeats N times |
 
@@ -56,9 +56,9 @@ and paragraph scope the unit is a linear sequence, so all four directions
 collapse to previous/next - the same shape as focus mode at those scopes.
 
 `w`, `b`, `e`, `s` and `p` always move by their own unit, whatever the active
-end's scope is: word, word, word-end, sentence and paragraph respectively. In
-line scope the head still moves a word (or a sentence) at a time while the edge
-snaps out to the whole line.
+end's scope is: word, word, line, sentence and paragraph respectively. In word
+scope the head still moves to the next line's start (or a sentence, or a
+paragraph) while the edge snaps back out to the whole word it lands on.
 
 `s` and `p` do not change either end's scope — `vs` and `vp` do that. So `s`
 grows the selection by a sentence while keeping word-granular edges.
