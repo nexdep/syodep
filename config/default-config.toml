@@ -42,11 +42,11 @@ visual_opacity = 0.55
 # Colour of a highlight (#rrggbb), while you place it and once it is
 # stored. This is also the colour written into the PDF by the save
 # command, so it is what other readers show too.
-highlight_color = "#ffe066"
+highlight_color = "#ffd400"
 # Opacity of the highlight overlay, 0.0 to 1.0. Applies to syodep's own
 # overlay only: a highlight saved into the PDF is painted by the reader
 # with Multiply blending, which has no opacity of its own.
-highlight_opacity = 0.55
+highlight_opacity = 0.4
 # Treat each detected table as one stop from line scope up, drawn as
 # a single box (word and char scope still step through its cells).
 # Images are always single stops; this only controls table detection,

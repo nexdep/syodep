@@ -14,7 +14,7 @@ CanvasWidget::CanvasWidget(SyoApp *app, QWidget *parent)
     , m_background(QStringLiteral("#1e1e1e"))
     , m_focusColor(0xad, 0xd8, 0xe6, 102)
     , m_visualColor(0xd3, 0xd3, 0xd3, 102)
-    , m_highlightColor(0xff, 0xe0, 0x66, 140)
+    , m_highlightColor(0xff, 0xd4, 0x00, 102)
 {
     setFocusPolicy(Qt::StrongFocus);
     // Single-shot: each key press re-arms it, so the pause is measured from

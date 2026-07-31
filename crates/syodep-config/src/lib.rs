@@ -187,10 +187,11 @@ impl Default for ViewConfig {
             focus_opacity: 0.55,
             visual_color: "#8a8a8a".to_owned(),
             visual_opacity: 0.55,
-            // The classic highlighter yellow, a touch desaturated so black text
-            // on top of it stays comfortable to read.
-            highlight_color: "#ffe066".to_owned(),
-            highlight_opacity: 0.55,
+            // Pure highlighter yellow at 40%: over a white page that blends to
+            // #ffee99 (0.4 × #ffd400 + 0.6 × #ffffff), which reads as a yellow
+            // mark without washing out the black text sitting on it.
+            highlight_color: "#ffd400".to_owned(),
+            highlight_opacity: 0.4,
             detect_tables: true,
             detect_headings: true,
             detect_equations: true,
@@ -303,9 +304,9 @@ pub fn default_keybindings() -> BTreeMap<String, String> {
 ///
 /// The shape deliberately mirrors [`default_visual_keybindings`]: the same keys
 /// do the same things to one position that they do to the moving end of a
-/// selection. Scope-specific meanings (line scope's `h`/`l` jumping columns,
-/// sentence and paragraph collapsing all four directions to previous/next) come
-/// from the commands, not from the bindings.
+/// selection. Scope-specific meanings (line/sentence/paragraph `h`/`l` jumping
+/// columns, with `j`/`k` stepping the unit) come from the commands, not from
+/// the bindings.
 ///
 /// Every entry here must be documented in `docs/keybindings.md`.
 pub fn default_focus_keybindings() -> BTreeMap<String, String> {
@@ -688,8 +689,8 @@ pub fn default_config_doc() -> String {
          # the arrows move the highlight by one unit of the active scope, w/e/b move a\n\
          # word at a time whatever the scope, and <Esc> exits.\n\
          # One table covers every scope, because the commands dispatch on the scope:\n\
-         # \"focus_left\" is a character in char scope, a word in word scope, a column\n\
-         # jump in line scope and the previous unit in sentence/paragraph scope.\n",
+         # \"focus_left\" is a character in char scope, a word in word scope, and a\n\
+         # column jump in line/sentence/paragraph scope.\n",
     );
     push_keytable(&mut out, "focus_keys", &default_focus_keybindings());
 

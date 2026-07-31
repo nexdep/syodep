@@ -7,6 +7,91 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-07-31 — Sentence and paragraph jump columns too
+
+Line scope's axis swap — `h`/`l` jump columns on a multi-column page, `j`/`k`
+step the unit and set the goal row — now applies to sentence and paragraph
+as well. Focus, visual and highlight all share `step_scope`, so one change
+covers them. Horizontal motion lands via `line_step_column` then
+`snap_to_scope`, so the caret ends on the sentence or paragraph that contains
+the line nearest the goal row in the adjacent column. Single-column pages and
+edge columns stay no-ops, same as line.
+
+`s` and `p` keep meaning next sentence/paragraph: they now dispatch through
+`Dir::Down` (like line's `e`), not `Dir::Right`, so they are not mistaken for
+a column jump. Goal-row tracking in `focus_move` / `visual_move` treats
+line, sentence and paragraph together.
+
+### Tests
+
+`sentence_horizontal_jumps_columns`, `paragraph_horizontal_jumps_columns` and
+`sentence_column_jump_tracks_goal_row` on the two-column fixture. Existing
+sentence prev/next tests that used `h`/`l` for unit steps now use `j`/`k`.
+The fixture's cell labels gained a trailing `.` so each line is its own
+sentence.
+
+---
+
+## 2026-07-31 — List items end where paragraphs begin
+
+Selecting the last item of a hanging-indent list in the ENDFtk article still
+ran one line into the prose that followed — twice on page 3 (the prerequisites
+list ending `• Python 3.5 or higher`, and the CMake-flags list ending
+`• -DENDFtk.tests=ON`), even after the same-day calibration pass below. Page 7's
+list of reaction parameters was already fine.
+
+The calibration pass only tightens the last item when some *other* item in
+the page-wide marker group wraps. The prerequisites list is all single-line
+items, so it had nothing to calibrate against and fell back to
+`LIST_GAP_FACTOR * previous_height` at `1.5×` — about 14pt for a 9pt body —
+while the inter-paragraph gap after the list is ~12pt. The indent guard
+cannot fire either: the following paragraph's first line hangs to the right
+of the markers, exactly like a genuine wrap. The CMake-flags list *did* have
+a wrapping peer, but the prerequisites spill had already been recorded as a
+"continuation" gap inside an earlier non-last item of the same marker group,
+and that ~12pt poison set the calibrated cap above the real paragraph gap
+that followed the second list.
+
+Paragraph motion never had this problem: it splits on `0.75×` the page's
+median line height (~7pt here), and both ~12pt gaps clear that cleanly. The
+fix is to use the same factor and the same median basis for list extents.
+`LIST_GAP_FACTOR` drops from `1.5` to `0.75`; `extend_item` thresholds
+against the page median height rather than the previous line's own height.
+A gap that opens a new paragraph now ends a list item with no extra signal.
+Calibration against observed wraps stays as a *tighter* second guard for
+the last item — it can only shorten further, never loosen past the
+paragraph threshold.
+
+### Tests
+
+`the_last_item_stops_at_a_paragraph_gap_without_wrap_peers` is the ENDFtk
+prerequisites shape: three single-line hanging-indent bullets, then prose
+whose opener sits past the markers with a 10pt gap — under the old 12pt
+threshold, over the new 6pt one. `a_later_list_is_not_poisoned_by_an_earlier_lists_gap`
+pins the two-lists-on-one-page failure mode that calibration alone made
+worse. Existing continuation fixtures that used a 20pt step (12pt gap, over
+the new threshold) move to a 12pt step (4pt gap) so they still exercise
+wrapping rather than the gap guard. The rest of the `list_items` suite and
+the sentence-level list tests in `syodep-core` re-pass unchanged.
+
+---
+
+## 2026-07-31 — Default highlight colour: `#ffd400` at 40%
+
+The built-in highlight default moves from the desaturated `#ffe066` at
+`0.55` to pure highlighter yellow `#ffd400` at `0.4`. Over a white page
+that is the same tint either way you look at it — plain alpha blend or
+Multiply-then-fade both give `0.4 × #ffd400 + 0.6 × #ffffff = #ffee99` —
+so the live overlay and a saved annotation stay in agreement with the
+formula the colour was chosen by.
+
+Touched: `ViewConfig::default`, `config/default-config.toml`, the FFI
+fallback hex, the Qt constructor fallback alpha (`0.4 × 255 ≈ 102`), and
+`docs/config.md`. No behaviour change beyond the default; existing user
+configs keep whatever they set.
+
+---
+
 ## 2026-07-31 — The furniture cap, scoped to the text that actually floods
 
 Re-verifying "A drifted running head is still the running head" (below)

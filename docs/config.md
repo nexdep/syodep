@@ -41,8 +41,8 @@ bookmarks, highlights, notes, history. That lives in the SQLite database
 | `focus_opacity` | float | `0.55` | opacity of the focus highlight, `0.0`-`1.0` |
 | `visual_color` | string | `"#8a8a8a"` | highlight for the visual-mode selection, `#rrggbb` |
 | `visual_opacity` | float | `0.55` | opacity of the selection highlight, `0.0`-`1.0` |
-| `highlight_color` | string | `"#ffe066"` | colour of a highlight, `#rrggbb` — also what is written into the PDF on save |
-| `highlight_opacity` | float | `0.55` | opacity of the highlight overlay, `0.0`-`1.0` |
+| `highlight_color` | string | `"#ffd400"` | colour of a highlight, `#rrggbb` — also what is written into the PDF on save |
+| `highlight_opacity` | float | `0.4` | opacity of the highlight overlay, `0.0`-`1.0` |
 | `detect_tables` | bool | `true` | treat each detected table as one stop from line scope up, drawn as one box |
 | `detect_headings` | bool | `true` | treat each detected heading as one step at sentence and paragraph scope |
 | `detect_equations` | bool | `true` | treat each detected display equation as one stop from line scope up, drawn as one box |
@@ -179,8 +179,9 @@ than a ladder of edges with darker seams.
 The defaults are mid-tone colours at `0.55` opacity, which over a white page
 blend to about `#a5c8e8` (focus) and `#bfbfbf` (selection) — clearly visible at
 a glance while leaving the text under them fully legible. The highlight
-default is the classic highlighter yellow, `#ffe066`. Lower the opacity for a
-fainter tint, or raise it towards `1.0` for a solid block.
+default is pure highlighter yellow `#ffd400` at `0.4` opacity, which over a
+white page blends to `#ffee99`. Lower the opacity for a fainter tint, or raise
+it towards `1.0` for a solid block.
 
 `highlight_opacity` also carries over into a saved PDF: a highlight
 annotation is always painted with Multiply blending (every reader does this,

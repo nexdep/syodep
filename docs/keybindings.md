@@ -140,8 +140,8 @@ move it:
 
 | Keys | Command |
 |---|---|
-| `h`, `<Left>` | `focus_left` — back one unit of the active scope |
-| `l`, `<Right>` | `focus_right` — forward one unit of the active scope |
+| `h`, `<Left>` | `focus_left` — back one unit, or previous column for line/sentence/paragraph |
+| `l`, `<Right>` | `focus_right` — forward one unit, or next column for line/sentence/paragraph |
 | `k`, `<Up>` | `focus_up` — up a line, or the previous unit |
 | `j`, `<Down>` | `focus_down` — down a line, or the next unit |
 | `w` | `focus_next_word` — next word start |
@@ -152,17 +152,17 @@ move it:
 | `<Esc>` | `focus_exit` — back to normal mode |
 
 **One keymap covers every scope.** `focus_left` is a character in char scope, a
-word in word scope, a column jump in line scope and the previous unit in
-sentence or paragraph scope — the command dispatches on the scope, so the same
-keys keep doing the same thing as you change granularity:
+word in word scope, and a column jump in line, sentence or paragraph scope —
+the command dispatches on the scope, so the same keys keep doing the same
+thing as you change granularity:
 
 | Keys | Scope | `h` / `l` | `j` / `k` |
 |---|---|---|---|
 | `cc` | char | one character (wraps across lines and pages) | one line, keeping the goal column |
 | `cw` | word | one word run | one line, nearest the goal column |
 | `ce` | line | previous/next **column** (multi-column pages) | one line |
-| `cs` | sentence | previous/next sentence | previous/next sentence |
-| `cp` | paragraph | previous/next paragraph | previous/next paragraph |
+| `cs` | sentence | previous/next **column** (multi-column pages) | previous/next sentence |
+| `cp` | paragraph | previous/next **column** (multi-column pages) | previous/next paragraph |
 
 Line scope is `ce`, not `cl`: `l` is the forward motion in every mode — and `e`
 is the line letter for the same reason, since `l` was already taken.
@@ -207,8 +207,8 @@ anchored:
 
 | Keys | Command |
 |---|---|
-| `h`, `<Left>` | `visual_left` — back one unit of the active scope |
-| `l`, `<Right>` | `visual_right` — forward one unit of the active scope |
+| `h`, `<Left>` | `visual_left` — back one unit, or previous column for line/sentence/paragraph |
+| `l`, `<Right>` | `visual_right` — forward one unit, or next column for line/sentence/paragraph |
 | `k`, `<Up>` | `visual_up` — up a line, or back one unit for sentence/paragraph |
 | `j`, `<Down>` | `visual_down` — down a line, or forward one unit for sentence/paragraph |
 | `w` | `visual_next_word` — next word, whatever the scope |

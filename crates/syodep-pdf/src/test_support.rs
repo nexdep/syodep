@@ -103,7 +103,7 @@ pub fn pdf_two_column_page(rows: usize) -> Vec<u8> {
     for (col, x) in [72.0_f32, 340.0_f32].into_iter().enumerate() {
         for r in 0..rows {
             let y = 750.0 - r as f32 * 40.0;
-            let text = format!("C{}L{}", col + 1, r + 1);
+            let text = format!("C{}L{}.", col + 1, r + 1);
             runs.push_str(&format!("BT /F1 18 Tf {x} {y} Td ({text}) Tj ET\n"));
         }
     }

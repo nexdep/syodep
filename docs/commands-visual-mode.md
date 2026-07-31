@@ -40,10 +40,10 @@ swaps the ends without needing `oo`.
 
 | Command | Effect | Count |
 |---|---|---|
-| `visual_left` | move the active end back one unit of its scope | repeats N times |
-| `visual_right` | move the active end forward one unit of its scope | repeats N times |
-| `visual_up` | move the active end up a line, or back one unit for the linear scopes | repeats N times |
-| `visual_down` | move the active end down a line, or forward one unit for the linear scopes | repeats N times |
+| `visual_left` | move the active end back one unit of its scope, or to the previous column for line/sentence/paragraph | repeats N times |
+| `visual_right` | move the active end forward one unit of its scope, or to the next column for line/sentence/paragraph | repeats N times |
+| `visual_up` | move the active end up a line, or back one unit for sentence/paragraph | repeats N times |
+| `visual_down` | move the active end down a line, or forward one unit for sentence/paragraph | repeats N times |
 | `visual_next_word` | move the active end to the start of the next word | repeats N times |
 | `visual_prev_word` | move the active end to the start of the previous word | repeats N times |
 | `visual_next_line` | move the active end to the start of the next line | repeats N times |
@@ -51,9 +51,12 @@ swaps the ends without needing `oo`.
 | `visual_next_paragraph` | move the active end to the start of the next paragraph | repeats N times |
 
 `hjkl` and the arrow keys move by the active end's scope: one character in char
-scope, one word in word scope, one line in line scope, and so on. In sentence
-and paragraph scope the unit is a linear sequence, so all four directions
-collapse to previous/next - the same shape as focus mode at those scopes.
+scope, one word in word scope, one line in line scope, and so on. Line,
+sentence and paragraph swap the axes on multi-column pages — `h`/`l` jump
+columns (landing on the unit at the goal row) while `j`/`k` step
+previous/next — the same shape as focus mode at those scopes. On a
+single-column page `h`/`l` are a no-op there; use `j`/`k` (or `s`/`p`) to
+grow the selection by a unit.
 
 `w`, `b`, `e`, `s` and `p` always move by their own unit, whatever the active
 end's scope is: word, word, line, sentence and paragraph respectively. In word

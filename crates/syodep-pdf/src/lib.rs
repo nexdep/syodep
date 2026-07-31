@@ -1296,15 +1296,23 @@ const MIN_LIST_ITEMS: usize = 2;
 /// while over-reaching swallows the prose after the list.
 const LIST_INDENT_EPS: f32 = 1.0;
 
-/// A gap larger than this many line heights ends the item: an indented block
-/// that far below merely follows the list.
-const LIST_GAP_FACTOR: f32 = 1.5;
+/// A gap larger than this many median line heights ends the item: an indented
+/// block that far below merely follows the list.
+///
+/// Same numeric factor paragraph splitting uses in `syodep-core` (`0.75`).
+/// List items used to run looser (`1.5×` the previous line's own height),
+/// which let a modest inter-paragraph gap — common after a hanging-indent
+/// list, where the indent guard cannot fire — slip into the last item.
+/// Matching the paragraph threshold means a gap that starts a new paragraph
+/// also ends a list item, with no extra signal required.
+const LIST_GAP_FACTOR: f32 = 0.75;
 
 /// Multiplier applied to the largest continuation gap actually observed
 /// elsewhere in the same list, when calibrating the *last* item's own gap
 /// guard (see [`list_items`]). Looser than 1.0 so the last item's own
 /// leading, which can run a touch larger than another item's by ordinary
-/// typesetting jitter, is not itself mistaken for a paragraph break.
+/// typesetting jitter, is not itself mistaken for a paragraph break. Applied
+/// *alongside* [`LIST_GAP_FACTOR`]: whichever fires first ends the item.
 const LIST_GAP_CALIBRATION_SLACK: f32 = 1.5;
 
 /// No item may claim more than this many lines beyond its marker. Marker
@@ -1414,6 +1422,17 @@ fn list_items(lines: &[ContentLine], blocked: &[ContentObject]) -> Vec<(usize, u
         .map(|&(i, _, x0)| (i, x0))
         .collect();
 
+    // Median height of non-empty lines — same basis paragraph splitting uses
+    // for its gap threshold, so a gap that opens a new paragraph also ends an
+    // item here.
+    let mut heights: Vec<f32> = lines
+        .iter()
+        .filter(|l| !l.cells.is_empty())
+        .map(|l| (l.bbox.y1 - l.bbox.y0).max(1.0))
+        .collect();
+    heights.sort_by(f32::total_cmp);
+    let median_height = heights.get(heights.len() / 2).copied().unwrap_or(1.0);
+
     // An item runs from its marker through the lines indented past that
     // marker: its own text where extraction split the bullet off, and any
     // wrapped continuation. The prose after a list returns to the marker's own
@@ -1424,7 +1443,15 @@ fn list_items(lines: &[ContentLine], blocked: &[ContentObject]) -> Vec<(usize, u
         .map(|&(start, marker_x)| {
             (
                 start,
-                extend_item(lines, &is_marker, &blocked_at, start, marker_x, None),
+                extend_item(
+                    lines,
+                    &is_marker,
+                    &blocked_at,
+                    start,
+                    marker_x,
+                    median_height,
+                    None,
+                ),
             )
         })
         .collect();
@@ -1434,22 +1461,19 @@ fn list_items(lines: &[ContentLine], blocked: &[ContentObject]) -> Vec<(usize, u
     // and on a list whose marker sits left of the body column, ordinary
     // prose (including a new paragraph's own first line) can sit to the
     // right of the marker exactly like a genuine continuation would,
-    // leaving the gap guard as the only real defence. `LIST_GAP_FACTOR`,
-    // calibrated against one line's own height, is looser than the leading
-    // between an item's *own* wrapped lines tends to be — loose enough that
-    // a modest inter-paragraph gap slips underneath it.
+    // leaving the gap guard as the only real defence.
     //
-    // Other items in the same list are trustworthy calibration evidence for
-    // what a genuine continuation gap looks like here: a non-last item is
-    // always ultimately bounded by the next marker regardless of the gap
-    // guard, so an imprecise guard can only ever under-extend it, never
-    // swallow a real paragraph the way it can for the last item. Recompute
-    // only the last item, with its gap guard tightened to a multiple of the
-    // largest continuation gap actually observed among the others — the
-    // max, not a median, biased toward not over-tightening a genuine
-    // continuation. A list with nothing to calibrate against (no other item
-    // wraps) is left exactly as computed above: zero behaviour change when
-    // there is no evidence to act on.
+    // `LIST_GAP_FACTOR` already matches the paragraph threshold, which is
+    // what stops the common case. Other items in the same list can still
+    // tighten that further: a non-last item is always ultimately bounded by
+    // the next marker regardless of the gap guard, so an imprecise guard can
+    // only ever under-extend it, never swallow a real paragraph the way it
+    // can for the last item. Recompute only the last item, with its gap
+    // guard tightened to a multiple of the largest continuation gap actually
+    // observed among the others — the max, not a median, biased toward not
+    // over-tightening a genuine continuation. A list with nothing to
+    // calibrate against (no other item wraps) is left exactly as computed
+    // above: zero behaviour change when there is no evidence to act on.
     if let Some(last_idx) = items.len().checked_sub(1) {
         let max_observed_gap = items[..last_idx]
             .iter()
@@ -1463,7 +1487,15 @@ fn list_items(lines: &[ContentLine], blocked: &[ContentObject]) -> Vec<(usize, u
             let cap = LIST_GAP_CALIBRATION_SLACK * max_observed_gap;
             items[last_idx] = (
                 start,
-                extend_item(lines, &is_marker, &blocked_at, start, marker_x, Some(cap)),
+                extend_item(
+                    lines,
+                    &is_marker,
+                    &blocked_at,
+                    start,
+                    marker_x,
+                    median_height,
+                    Some(cap),
+                ),
             );
         }
     }
@@ -1482,6 +1514,7 @@ fn extend_item(
     blocked_at: &impl Fn(usize) -> bool,
     start: usize,
     marker_x: f32,
+    median_height: f32,
     gap_cap: Option<f32>,
 ) -> usize {
     let mut end = start;
@@ -1508,8 +1541,10 @@ fn extend_item(
             break;
         }
         // A wide gap means the block below merely follows the list rather
-        // than belonging to its last item.
-        if current.y0 - previous.y1 > LIST_GAP_FACTOR * height {
+        // than belonging to its last item. Uses the page median height at
+        // the same factor paragraph splitting does, so the two agree on
+        // where a new block of prose begins.
+        if current.y0 - previous.y1 > LIST_GAP_FACTOR * median_height {
             break;
         }
         if let Some(cap) = gap_cap {
@@ -4054,10 +4089,13 @@ mod tests {
 
     #[test]
     fn an_item_covers_its_indented_continuation() {
+        // Continuation leading must sit under LIST_GAP_FACTOR * median height
+        // (0.75 * 8 = 6 here). A 12pt step gives a 4pt gap — real wrapped
+        // items run tighter still.
         let mut lines = vec![
             text_line_at(20.0, "\u{2022} the first file"),
-            text_line_at(40.0, "wrapped onto a second line"),
-            text_line_at(60.0, "\u{2022} the second file"),
+            text_line_at(32.0, "wrapped onto a second line"),
+            text_line_at(44.0, "\u{2022} the second file"),
         ];
         indent(&mut lines[1], 10.0);
         assert_eq!(list_items(&lines, &[]), vec![(0, 1), (2, 2)]);
@@ -4069,9 +4107,9 @@ mod tests {
         // part of the final item.
         let mut lines = vec![
             text_line_at(20.0, "\u{2022} the first file"),
-            text_line_at(40.0, "\u{2022} the second file"),
-            text_line_at(60.0, "wrapped onto a second line"),
-            text_line_at(80.0, "Each of them is regenerated in turn."),
+            text_line_at(32.0, "\u{2022} the second file"),
+            text_line_at(44.0, "wrapped onto a second line"),
+            text_line_at(56.0, "Each of them is regenerated in turn."),
         ];
         indent(&mut lines[2], 10.0);
         assert_eq!(list_items(&lines, &[]), vec![(0, 0), (1, 2)]);
@@ -4085,9 +4123,9 @@ mod tests {
         // "A list item always starts a sentence" in the dev log for the
         // same shape. Both items wrap with a tight ~4pt continuation gap;
         // the prose that follows the list sits at that same indent, with an
-        // 8pt gap -- under LIST_GAP_FACTOR * height (12pt here, so the old,
-        // uncalibrated guard lets it through) but over the item's own
-        // observed ~4pt continuation gap once calibrated.
+        // 8pt gap. Calibration against the observed ~4pt continuation
+        // (× LIST_GAP_CALIBRATION_SLACK → 6pt) stops it; so does the
+        // paragraph-matched LIST_GAP_FACTOR * median height (also 6pt here).
         let mut lines = vec![
             text_line_at(20.0, "\u{2022} the first file"),
             text_line_at(32.0, "wrapped onto a second line"),
@@ -4099,6 +4137,56 @@ mod tests {
         indent(&mut lines[3], 10.0);
         indent(&mut lines[4], 10.0);
         assert_eq!(list_items(&lines, &[]), vec![(0, 1), (2, 3)]);
+    }
+
+    #[test]
+    fn the_last_item_stops_at_a_paragraph_gap_without_wrap_peers() {
+        // The ENDFtk shape: a hanging-indent list of single-line items (no
+        // wrap peers to calibrate against), then prose whose first line sits
+        // to the right of the markers with a modest inter-paragraph gap.
+        // Height is 8pt; gap is 10pt — under the old 1.5× previous-line
+        // threshold (12pt) that used to swallow the opener, over the
+        // paragraph-matched 0.75× median (6pt).
+        let mut lines = vec![
+            text_line_at(20.0, "\u{2022} git"),
+            text_line_at(32.0, "\u{2022} CMake 3.15 or higher"),
+            text_line_at(44.0, "\u{2022} Python 3.5 or higher"),
+            text_line_at(62.0, "The interface is available as a header-only library."),
+            text_line_at(74.0, "It does not require compilation."),
+        ];
+        indent(&mut lines[3], 10.0);
+        // Second line of the following paragraph returns to the body margin,
+        // mirroring the real layout where only the opener hangs.
+        assert_eq!(list_items(&lines, &[]), vec![(0, 0), (1, 1), (2, 2)]);
+    }
+
+    #[test]
+    fn a_later_list_is_not_poisoned_by_an_earlier_lists_gap() {
+        // Two hanging-indent lists on one page, same marker column. The first
+        // list's items do not wrap; under the old loose gap guard its last
+        // item would absorb the prose opener between the lists, and that
+        // wrong ~10pt gap would then calibrate the *second* list's last item
+        // so loosely it absorbed *its* following prose too. With the
+        // paragraph-matched threshold neither absorption happens, and each
+        // list ends where its paragraph does.
+        let mut lines = vec![
+            text_line_at(20.0, "\u{2022} git"),
+            text_line_at(32.0, "\u{2022} CMake"),
+            text_line_at(50.0, "Prose between the two lists starts here."),
+            text_line_at(62.0, "And continues on the body margin."),
+            text_line_at(80.0, "\u{2022} -Dpython=OFF turns the binding off"),
+            text_line_at(92.0, "and wraps onto a second line"),
+            text_line_at(104.0, "\u{2022} -Dtests=ON turns the tests on"),
+            text_line_at(122.0, "Prose after the second list starts here."),
+            text_line_at(134.0, "And continues on the body margin."),
+        ];
+        indent(&mut lines[2], 10.0);
+        indent(&mut lines[5], 10.0);
+        indent(&mut lines[7], 10.0);
+        assert_eq!(
+            list_items(&lines, &[]),
+            vec![(0, 0), (1, 1), (4, 5), (6, 6)]
+        );
     }
 
     #[test]
@@ -4142,8 +4230,8 @@ mod tests {
     fn an_item_stops_at_a_table_or_an_image() {
         let mut lines = vec![
             text_line_at(20.0, "\u{2022} the first file"),
-            text_line_at(40.0, "a figure caption below it"),
-            text_line_at(60.0, "\u{2022} the second file"),
+            text_line_at(32.0, "a figure caption below it"),
+            text_line_at(44.0, "\u{2022} the second file"),
         ];
         indent(&mut lines[1], 10.0);
         let table = blocking(&lines, ObjectKind::Table, 1, 1);

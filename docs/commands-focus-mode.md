@@ -51,10 +51,10 @@ granularity.)
 
 | Command | Effect | Count |
 |---|---|---|
-| `focus_left` | move back one unit of the active scope | repeats N times |
-| `focus_right` | move forward one unit of the active scope | repeats N times |
-| `focus_up` | move up a line, or back one unit for the linear scopes | repeats N times |
-| `focus_down` | move down a line, or forward one unit for the linear scopes | repeats N times |
+| `focus_left` | move back one unit of the active scope, or to the previous column for line/sentence/paragraph | repeats N times |
+| `focus_right` | move forward one unit of the active scope, or to the next column for line/sentence/paragraph | repeats N times |
+| `focus_up` | move up a line, or back one unit for sentence/paragraph | repeats N times |
+| `focus_down` | move down a line, or forward one unit for sentence/paragraph | repeats N times |
 | `focus_next_word` | move to the start of the next word run | repeats N times |
 | `focus_prev_word` | move to the start of the current word run, or the previous run if already at a start | repeats N times |
 | `focus_next_line` | move to the start of the next line | repeats N times |
@@ -68,13 +68,14 @@ granularity.)
 | char | one character (wraps to the previous/next line and page) | one line, keeping the goal column |
 | word | one word run | one line, landing on the word nearest the goal column |
 | line | the line in the previous/next **column** (multi-column pages only) | one line |
-| sentence | previous/next sentence | previous/next sentence |
-| paragraph | previous/next paragraph | previous/next paragraph |
+| sentence | the sentence in the previous/next **column** (multi-column pages only) | previous/next sentence |
+| paragraph | the paragraph in the previous/next **column** (multi-column pages only) | previous/next paragraph |
 
-Two of those are worth spelling out. **Line scope swaps the axes**: `h`/`l` jump
-between columns on a multi-column page rather than moving within the line, and
-`j`/`k` set the row those jumps aim at. **Sentence and paragraph have no second
-axis**, so all four directions collapse to previous/next.
+Two of those are worth spelling out. **Line, sentence and paragraph swap the
+axes**: `h`/`l` jump between columns on a multi-column page (landing on the
+unit that contains the line nearest the goal row), and `j`/`k` set the row
+those jumps aim at while also stepping previous/next unit. On a single-column
+page `h`/`l` are a no-op at those scopes; use `j`/`k` (or `s`/`p`) to move.
 
 `w`, `b`, `e`, `s` and `p` always move by their own unit, whatever the active
 scope is — they are *motions*, and the highlight still snaps out to the active
@@ -95,8 +96,8 @@ preserving whatever column `hjkl` was aiming for.
 **A motion is not a scope change.** In word focus, `s` jumps to the first word
 of the next sentence and the highlight stays *word*-sized; `cs` stays where you
 are and makes the highlight a whole sentence. Sentence and paragraph have no
-backward motion — press `cs` or `cp` and use `h`, which walks backwards a unit
-at a time.
+dedicated backward motion key — press `cs` or `cp` and use `k`, which walks
+backwards a unit at a time.
 
 Word motions use Vim-like lowercase boundaries: letters/digits/underscore form
 word runs, punctuation/symbols form separate runs, whitespace is skipped, and
@@ -107,8 +108,10 @@ stopping on the words inside them.
 item even though items rarely end in a full stop. The line introducing a list
 does not run into its first item, and the last item does not run on into the
 prose after the list: an item covers its marker and the lines wrapped under it,
-and ends where the text returns to the marker's own margin. A numbered item is
-one sentence including its `1.`, not two.
+and ends where the text returns to the marker's own margin or where a
+paragraph-sized gap opens — the same threshold paragraph motion uses, so a
+hanging-indent list whose following prose sits past the marker still stops
+cleanly. A numbered item is one sentence including its `1.`, not two.
 
 Both shapes of item count: a bullet followed by its text, and a bullet that
 extraction leaves on a line of its own with the text below it. A marker counts

@@ -777,10 +777,10 @@ impl App {
                 return self.focus_scope_motion(Scope::Line, Dir::Down, count)
             }
             Command::FocusNextSentence => {
-                return self.focus_scope_motion(Scope::Sentence, Dir::Right, count)
+                return self.focus_scope_motion(Scope::Sentence, Dir::Down, count)
             }
             Command::FocusNextParagraph => {
-                return self.focus_scope_motion(Scope::Paragraph, Dir::Right, count)
+                return self.focus_scope_motion(Scope::Paragraph, Dir::Down, count)
             }
             Command::VisualEnter => return self.enter_visual(None),
             Command::VisualEnterChar => return self.enter_visual(Some(Scope::Char)),
@@ -803,10 +803,10 @@ impl App {
                 return self.visual_scope_motion(Scope::Line, Dir::Down, count)
             }
             Command::VisualNextSentence => {
-                return self.visual_scope_motion(Scope::Sentence, Dir::Right, count)
+                return self.visual_scope_motion(Scope::Sentence, Dir::Down, count)
             }
             Command::VisualNextParagraph => {
-                return self.visual_scope_motion(Scope::Paragraph, Dir::Right, count)
+                return self.visual_scope_motion(Scope::Paragraph, Dir::Down, count)
             }
             Command::VisualSwapEnds => return self.visual_swap_ends(),
             Command::VisualScopeChar => return self.set_head_scope(Scope::Char, false),
@@ -2543,12 +2543,10 @@ impl App {
     /// Move `caret` one unit of `scope` in `dir`. Returns false at a document
     /// edge, so callers can stop early on a repeated motion.
     ///
-    /// This is the single per-scope motion table. Note two deliberate
-    /// asymmetries, both pre-existing:
-    ///   * line scope uses `h`/`l` for *column* jumps on multi-column pages
-    ///     (keyed on the goal row) and `j`/`k` for lines,
-    ///   * sentence and paragraph have no second axis, so all four directions
-    ///     collapse to previous/next.
+    /// This is the single per-scope motion table. One deliberate asymmetry:
+    /// line, sentence and paragraph swap the axes on multi-column pages —
+    /// `h`/`l` jump columns (keyed on the goal row) while `j`/`k` step the
+    /// unit vertically. Char and word keep the ordinary reading axes.
     fn step_scope(
         &mut self,
         caret: &mut Caret,
@@ -2593,36 +2591,77 @@ impl App {
                 };
                 moved
             }
-            Scope::Sentence => {
-                let mut mark = self.sentence_mark_from_caret(*caret);
-                let moved = if forward {
-                    self.sentence_step_next(&mut mark)
-                } else {
-                    self.sentence_step_prev(&mut mark)
-                };
-                *caret = Caret {
-                    page: mark.page,
-                    line: mark.start_line,
-                    cell: mark.start_cell,
-                };
-                moved
-            }
-            Scope::Paragraph => {
-                let Some(mut mark) = self.paragraph_mark_containing(caret.page, caret.line) else {
-                    return false;
-                };
-                let moved = if forward {
-                    self.paragraph_step_next(&mut mark)
-                } else {
-                    self.paragraph_step_prev(&mut mark)
-                };
-                *caret = Caret {
-                    page: mark.page,
-                    line: mark.start_line,
-                    cell: 0,
-                };
-                moved
-            }
+            Scope::Sentence => match dir {
+                Dir::Left | Dir::Right => {
+                    let mut mark = LineMark {
+                        page: caret.page,
+                        line: caret.line,
+                    };
+                    if !self.line_step_column(&mut mark, goal_y, forward) {
+                        return false;
+                    }
+                    *caret = self.snap_to_scope(
+                        Caret {
+                            page: mark.page,
+                            line: mark.line,
+                            cell: 0,
+                        },
+                        Scope::Sentence,
+                    );
+                    true
+                }
+                Dir::Up | Dir::Down => {
+                    let mut mark = self.sentence_mark_from_caret(*caret);
+                    let moved = if forward {
+                        self.sentence_step_next(&mut mark)
+                    } else {
+                        self.sentence_step_prev(&mut mark)
+                    };
+                    *caret = Caret {
+                        page: mark.page,
+                        line: mark.start_line,
+                        cell: mark.start_cell,
+                    };
+                    moved
+                }
+            },
+            Scope::Paragraph => match dir {
+                Dir::Left | Dir::Right => {
+                    let mut mark = LineMark {
+                        page: caret.page,
+                        line: caret.line,
+                    };
+                    if !self.line_step_column(&mut mark, goal_y, forward) {
+                        return false;
+                    }
+                    *caret = self.snap_to_scope(
+                        Caret {
+                            page: mark.page,
+                            line: mark.line,
+                            cell: 0,
+                        },
+                        Scope::Paragraph,
+                    );
+                    true
+                }
+                Dir::Up | Dir::Down => {
+                    let Some(mut mark) = self.paragraph_mark_containing(caret.page, caret.line)
+                    else {
+                        return false;
+                    };
+                    let moved = if forward {
+                        self.paragraph_step_next(&mut mark)
+                    } else {
+                        self.paragraph_step_prev(&mut mark)
+                    };
+                    *caret = Caret {
+                        page: mark.page,
+                        line: mark.start_line,
+                        cell: 0,
+                    };
+                    moved
+                }
+            },
         }
     }
 
@@ -2828,8 +2867,8 @@ impl App {
         }
     }
 
-    /// Update the remembered goal row from the focused line, for line-scope
-    /// column motion.
+    /// Update the remembered goal row from the focused line, for
+    /// line/sentence/paragraph column motion.
     fn update_focus_goal_y(&mut self, at: Caret) {
         if let Some(b) = self.line_bbox(at.page, at.line) {
             self.focus_goal_y = (b.y0 + b.y1) / 2.0;
@@ -2890,9 +2929,9 @@ impl App {
         }
         self.focus = Some(at);
         // Horizontal motion redefines the column vertical motion aims for --
-        // except in line scope, where the axes are swapped: there `h`/`l` jump
-        // columns and `j`/`k` set the row those jumps aim at.
-        if scope == Scope::Line {
+        // except at line/sentence/paragraph, where the axes are swapped: there
+        // `h`/`l` jump columns and `j`/`k` set the row those jumps aim at.
+        if matches!(scope, Scope::Line | Scope::Sentence | Scope::Paragraph) {
             if matches!(dir, Dir::Up | Dir::Down) {
                 self.update_focus_goal_y(at);
             }
@@ -3176,9 +3215,9 @@ impl App {
         }
         self.focus = Some(head);
         // Horizontal motion redefines the column vertical motion aims for --
-        // except in line scope, where the axes are swapped: there `h`/`l` jump
-        // columns and `j`/`k` set the row those jumps aim at.
-        if scope == Scope::Line {
+        // except at line/sentence/paragraph, where the axes are swapped: there
+        // `h`/`l` jump columns and `j`/`k` set the row those jumps aim at.
+        if matches!(scope, Scope::Line | Scope::Sentence | Scope::Paragraph) {
             if matches!(dir, Dir::Up | Dir::Down) {
                 self.update_focus_goal_y(head);
             }
@@ -6098,6 +6137,64 @@ mod tests {
     }
 
     #[test]
+    fn sentence_horizontal_jumps_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_two_column_page(dir.path());
+        press(&mut app, "cs");
+        let start = app.sentence_mark().unwrap();
+        press(&mut app, "l");
+        let right = app.sentence_mark().unwrap();
+        assert_ne!(
+            (right.start_line, right.start_cell),
+            (start.start_line, start.start_cell),
+            "should move to a right-column sentence"
+        );
+        press(&mut app, "l");
+        assert_eq!(app.sentence_mark().unwrap(), right);
+        press(&mut app, "h");
+        assert_eq!(app.sentence_mark().unwrap(), start);
+    }
+
+    #[test]
+    fn paragraph_horizontal_jumps_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_two_column_page(dir.path());
+        press(&mut app, "cp");
+        let start = app.paragraph_mark().unwrap();
+        press(&mut app, "l");
+        let right = app.paragraph_mark().unwrap();
+        assert_ne!(
+            (right.start_line, right.end_line),
+            (start.start_line, start.end_line),
+            "should move to a right-column paragraph"
+        );
+        press(&mut app, "l");
+        assert_eq!(app.paragraph_mark().unwrap(), right);
+        press(&mut app, "h");
+        assert_eq!(app.paragraph_mark().unwrap(), start);
+    }
+
+    #[test]
+    fn sentence_column_jump_tracks_goal_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_two_column_page(dir.path());
+        press(&mut app, "cs");
+        // Drop one sentence in the left column, then jump across: land on the
+        // right-column sentence nearest that new row, not the top one.
+        press(&mut app, "j");
+        let left = app.sentence_mark().unwrap();
+        press(&mut app, "l");
+        let right = app.sentence_mark().unwrap();
+        assert_ne!(right.start_line, left.start_line);
+        // The left column's second sentence and the right column's second
+        // sentence sit on matching rows in the fixture.
+        assert_ne!(
+            right.start_line, 0,
+            "must not reset to the top of the column"
+        );
+    }
+
+    #[test]
     fn line_without_document_does_not_crash() {
         let mut app = App::new(Config::default(), None);
         press(&mut app, "ce");
@@ -6629,11 +6726,12 @@ mod tests {
         let mut app = app_with_text_pages(dir.path(), &["Alpha beta. Gamma delta."]);
         press(&mut app, "cs");
         assert_eq!(app.sentence_mark().unwrap().start_cell, 0);
-        // `l`/`j` advance to the next sentence ("Gamma delta." starting at G).
-        press(&mut app, "l");
+        // `j` advances to the next sentence ("Gamma delta." starting at G);
+        // `h`/`l` are reserved for column jumps on multi-column pages.
+        press(&mut app, "j");
         assert_eq!(app.sentence_mark().unwrap().start_cell, 12);
-        // `h`/`k` move back to the first sentence.
-        press(&mut app, "h");
+        // `k` moves back to the first sentence.
+        press(&mut app, "k");
         assert_eq!(app.sentence_mark().unwrap().start_cell, 0);
     }
 
@@ -6657,13 +6755,13 @@ mod tests {
         let mut app = app_with_text_pages(dir.path(), &["One sentence.", "Second sentence."]);
         press(&mut app, "cs");
         assert_eq!(app.sentence_mark().unwrap().page, 0);
-        // The page has a single sentence, so `l` crosses to the next page.
-        press(&mut app, "l");
+        // The page has a single sentence, so `j` crosses to the next page.
+        press(&mut app, "j");
         assert_eq!(app.sentence_mark().unwrap().page, 1);
-        press(&mut app, "h");
+        press(&mut app, "k");
         assert_eq!(app.sentence_mark().unwrap().page, 0);
-        // `h` at the document start is clamped.
-        press(&mut app, "h");
+        // `k` at the document start is clamped.
+        press(&mut app, "k");
         assert_eq!(app.sentence_mark().unwrap().page, 0);
     }
 

@@ -299,7 +299,7 @@ pub unsafe extern "C" fn syo_app_new(
             "highlight_color",
             &config.view.highlight_color,
             config.view.highlight_opacity,
-            "#ffe066",
+            "#ffd400",
         );
         warnings.extend(w);
         let key_timeout_ms = config.input.timeout_ms;
