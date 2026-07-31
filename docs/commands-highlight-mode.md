@@ -23,7 +23,7 @@ Counts work here too (`3l`, `2w`).
 | Command | Effect | Count |
 |---|---|---|
 | `highlight_enter` | turn the focus highlight or selection into a pending highlight | - |
-| `highlight_commit` | store the highlight and return to visual mode, still selected | - |
+| `highlight_commit` | store the highlight and return to focus mode on the moving end | - |
 | `highlight_discard` | throw the highlight away, restoring the mode and selection `a` was pressed on | - |
 
 Bound to `a` (from focus and visual mode), `a` again (to keep it), and `<Esc>`
@@ -48,7 +48,7 @@ store the pending highlight on the way out.
 
 | Keys | Effect |
 |---|---|
-| `a` | keep it, back to visual mode with the same text selected |
+| `a` | keep it, back to focus mode on the moving end |
 | `v` | keep it, back to visual mode with the same text selected |
 | `vw` (`vc`/`ve`/`vs`/`vp`) | keep it, visual mode with the moving end at that scope |
 | `c`, `cw` (`cc`/`ce`/`cs`/`cp`) | keep it, focus mode at that scope on the moving end |

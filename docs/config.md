@@ -316,7 +316,7 @@ The defaults are the visual-mode motions bound to *the same commands* —
 `hjkl`/arrows, `w`/`b`/`e`/`s`/`p`, `o`, `oo` and `oc`/`oe`/`ow`/`os`/`op` — since
 a pending highlight is a selection and reshaping it must not be a second
 implementation of reshaping a selection. Only three keys are specific to it: `a`
-(`highlight_commit`) keeps the highlight, and `<Esc>` or `<BS>`
+(`highlight_commit`) keeps the highlight and returns to focus mode, and `<Esc>` or `<BS>`
 (`highlight_discard`) throws it away.
 
 `v` and `c` are deliberately absent, so they fall through to `[keys]` and store

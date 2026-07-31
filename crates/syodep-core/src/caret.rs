@@ -714,31 +714,116 @@ pub fn nearest_line_in_column(lines: &[ContentLine], candidates: &[usize], goal_
 /// returned left-to-right as `(x0, x1)` x-ranges. Fewer than two ranges means
 /// the page is single-column.
 ///
-/// Lines are grouped greedily by horizontal overlap: a line joins an existing
-/// column when its x-span overlaps that column's accumulated span, otherwise it
-/// starts a new one. This is intentionally simple — it recognizes the common
-/// multi-column article layout where columns occupy disjoint x-bands — and is
-/// pure so it can be unit-tested in isolation.
+/// Lines are grouped greedily by horizontal overlap. A line that overlaps
+/// several columns merges them: keeping only the first match left nested
+/// fragments that confused [`column_index_of`].
+///
+/// Spanning lines — figures, captions, keywords, table titles that cross the
+/// page midpoint — are ignored when both sides of the midpoint already have
+/// enough non-spanning text. Without that filter a single gutter-crossing
+/// line collapses a two-column article into one column and `h`/`l` stop
+/// jumping. Image lines are ignored for the same reason. If either side is
+/// too thin, detection falls back to every non-empty line so a single-column
+/// page stays one column.
 pub fn column_ranges(lines: &[ContentLine]) -> Vec<(f32, f32)> {
+    let non_empty: Vec<&ContentLine> = lines.iter().filter(|l| !l.cells.is_empty()).collect();
+    if non_empty.is_empty() {
+        return Vec::new();
+    }
+
+    let text_lines: Vec<&ContentLine> = non_empty
+        .iter()
+        .copied()
+        .filter(|l| !l.cells.iter().any(|c| matches!(c.kind, CellKind::Image)))
+        .collect();
+
+    let cols = if let Some(seed) = column_seed_lines(&text_lines) {
+        accumulate_column_ranges(&seed)
+    } else {
+        accumulate_column_ranges(&non_empty)
+    };
+    coalesce_column_ranges(cols)
+}
+
+/// Non-spanning text lines to seed column detection, when both sides of the
+/// page midpoint look like real columns.
+fn column_seed_lines<'a>(text_lines: &[&'a ContentLine]) -> Option<Vec<&'a ContentLine>> {
+    if text_lines.len() < 4 {
+        return None;
+    }
+    let page_x0 = text_lines
+        .iter()
+        .map(|l| l.bbox.x0)
+        .fold(f32::INFINITY, f32::min);
+    let page_x1 = text_lines
+        .iter()
+        .map(|l| l.bbox.x1)
+        .fold(f32::NEG_INFINITY, f32::max);
+    if !page_x0.is_finite() || page_x1 <= page_x0 {
+        return None;
+    }
+    let mid = (page_x0 + page_x1) * 0.5;
+    let columnar: Vec<&ContentLine> = text_lines
+        .iter()
+        .copied()
+        .filter(|l| !(l.bbox.x0 < mid && l.bbox.x1 > mid))
+        .collect();
+    let left = columnar.iter().filter(|l| l.bbox.x1 <= mid).count();
+    let right = columnar.iter().filter(|l| l.bbox.x0 >= mid).count();
+    (left >= 2 && right >= 2).then_some(columnar)
+}
+
+/// Greedy overlap grouping: a line starts a column or merges into every
+/// column it overlaps.
+fn accumulate_column_ranges(lines: &[&ContentLine]) -> Vec<(f32, f32)> {
     let mut cols: Vec<(f32, f32)> = Vec::new();
     for line in lines {
-        if line.cells.is_empty() {
-            continue;
-        }
         let (lx0, lx1) = (line.bbox.x0, line.bbox.x1);
-        match cols
-            .iter_mut()
-            .find(|(cx0, cx1)| lx0 <= *cx1 && lx1 >= *cx0)
-        {
-            Some((cx0, cx1)) => {
-                *cx0 = cx0.min(lx0);
-                *cx1 = cx1.max(lx1);
+        let overlapping: Vec<usize> = cols
+            .iter()
+            .enumerate()
+            .filter(|(_, (cx0, cx1))| lx0 <= *cx1 && lx1 >= *cx0)
+            .map(|(i, _)| i)
+            .collect();
+        match overlapping.as_slice() {
+            [] => cols.push((lx0, lx1)),
+            &[i] => {
+                cols[i].0 = cols[i].0.min(lx0);
+                cols[i].1 = cols[i].1.max(lx1);
             }
-            None => cols.push((lx0, lx1)),
+            _ => {
+                let mut nx0 = lx0;
+                let mut nx1 = lx1;
+                for &i in &overlapping {
+                    nx0 = nx0.min(cols[i].0);
+                    nx1 = nx1.max(cols[i].1);
+                }
+                let mut idxs = overlapping;
+                idxs.sort_unstable_by(|a, b| b.cmp(a));
+                for i in idxs {
+                    cols.remove(i);
+                }
+                cols.push((nx0, nx1));
+            }
         }
     }
     cols.sort_by(|a, b| a.0.total_cmp(&b.0));
     cols
+}
+
+/// Collapse nested or overlapping column ranges left by processing order.
+fn coalesce_column_ranges(cols: Vec<(f32, f32)>) -> Vec<(f32, f32)> {
+    let mut merged: Vec<(f32, f32)> = Vec::new();
+    for (x0, x1) in cols {
+        if let Some(last) = merged.last_mut() {
+            if x0 <= last.1 {
+                last.1 = last.1.max(x1);
+                continue;
+            }
+        }
+        merged.push((x0, x1));
+    }
+    merged
 }
 
 /// The index of the column in `cols` (from [`column_ranges`]) that contains
@@ -980,6 +1065,59 @@ mod tests {
             line(0.0, 0.0, 100.0, 10.0),
             line(200.0, 0.0, 300.0, 10.0),
             line(0.0, 20.0, 100.0, 30.0),
+            line(200.0, 20.0, 300.0, 30.0),
+        ];
+        let cols = column_ranges(&lines);
+        assert_eq!(cols.len(), 2);
+        assert_eq!(cols[0], (0.0, 100.0));
+        assert_eq!(cols[1], (200.0, 300.0));
+    }
+
+    #[test]
+    fn column_ranges_ignores_a_gutter_spanning_line() {
+        // IOP shape: two columns of body text plus a Keywords / caption line
+        // that crosses the gutter. Without filtering, that one line merges
+        // both columns and `h`/`l` stop jumping.
+        let lines = [
+            line(0.0, 0.0, 100.0, 10.0),
+            line(200.0, 0.0, 300.0, 10.0),
+            line(0.0, 20.0, 100.0, 30.0),
+            line(200.0, 20.0, 300.0, 30.0),
+            line(40.0, 40.0, 260.0, 50.0), // spans the midpoint
+        ];
+        let cols = column_ranges(&lines);
+        assert_eq!(cols.len(), 2);
+        assert_eq!(cols[0], (0.0, 100.0));
+        assert_eq!(cols[1], (200.0, 300.0));
+    }
+
+    #[test]
+    fn column_ranges_ignores_images_when_seeding() {
+        let mut image = line(50.0, 40.0, 250.0, 120.0);
+        image.cells = vec![image_cell()];
+        image.cells[0].bbox = image.bbox;
+        let lines = [
+            line(0.0, 0.0, 100.0, 10.0),
+            line(200.0, 0.0, 300.0, 10.0),
+            line(0.0, 20.0, 100.0, 30.0),
+            line(200.0, 20.0, 300.0, 30.0),
+            image,
+        ];
+        let cols = column_ranges(&lines);
+        assert_eq!(cols.len(), 2);
+        assert_eq!(cols[0], (0.0, 100.0));
+        assert_eq!(cols[1], (200.0, 300.0));
+    }
+
+    #[test]
+    fn column_ranges_merges_nested_fragments() {
+        // A short mid-column line processed before its full-width neighbour
+        // used to leave a nested second column inside the left band.
+        let lines = [
+            line(0.0, 0.0, 60.0, 10.0),
+            line(40.0, 20.0, 100.0, 30.0),
+            line(0.0, 40.0, 100.0, 50.0),
+            line(200.0, 0.0, 300.0, 10.0),
             line(200.0, 20.0, 300.0, 30.0),
         ];
         let cols = column_ranges(&lines);

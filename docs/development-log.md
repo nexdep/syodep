@@ -7,6 +7,84 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-07-31 — Column detection ignores gutter-spanning lines
+
+On the ST-E1 IOP paper, `h`/`l` never jumped columns on body pages:
+one Keywords line, figure, or caption crossing the gutter made
+`column_ranges` merge both x-bands into one, so `line_step_column`
+no-oped. Detection now seeds from text lines that do not straddle the
+page midpoint when both sides already look like columns, skips image
+lines, merges every overlapping column (not just the first), and
+coalesces nested fragments. Single-column pages still fall back to
+every non-empty line, so full-width prose stays one column.
+
+### Tests
+
+`column_ranges_ignores_a_gutter_spanning_line`,
+`column_ranges_ignores_images_when_seeding`, and
+`column_ranges_merges_nested_fragments`. Existing two-column jump
+tests are unchanged.
+
+---
+
+## 2026-07-31 — Sentence ends survive MuPDF's synthetic gaps
+
+Same-line sentence stops on IOP two-column PDFs were being swallowed:
+MuPDF often flags the gap after `.` as synthetic, and
+`is_number_interior` peeked through it so `reactor. Efficacy` looked like
+a dotted token (`r` + `.` + `E`). Word motion still needs that peek for
+DOI fragments (`9p4kxc2cvd .1`); sentence boundaries now use a tight
+neighbour check that treats any intervening space — synthetic or
+authored — as ending the sentence.
+
+### Tests
+
+`a_sentence_ends_across_a_synthetic_space_after_the_stop` is the abstract
+shape from the ST-E1 paper. Existing DOI synthetic-space word tests are
+unchanged.
+
+---
+
+## 2026-07-31 — Committing a highlight returns to focus mode
+
+`highlight_commit` (`a` again), and the incidental keep-and-leave paths on
+save and quit, now land in focus mode on the moving end instead of visual
+mode with the selection kept. They share `enter_focus`, which already stores
+the pending highlight and drops the selection — the same cleanup `c` used.
+Discard (`<Esc>` / `<BS>`) still restores the pre-`a` mode; explicit `v`
+still goes to visual.
+
+### Tests
+
+`a_second_a_stores_the_highlight_and_returns_to_focus_mode`,
+`saving_from_highlight_mode_keeps_the_pending_highlight`, and
+`quit_commits_a_pending_highlight_before_deciding` assert `Mode::Focus`.
+
+---
+
+## 2026-07-31 — A numbered heading that wraps stays one heading
+
+Section `2.3.2` in the ENDFtk article is two lines — `2.3.2. Application:
+inserting the reconstructed cross section data in the` / `evaluated file` —
+but sentence selection stopped after the first. The opener is flagged by
+`is_numbered_heading_text`; the wrap is ordinary body-size prose with no
+section number, so the post-typography numbered pass added `(i, i)` and
+left the leftover as its own sentence.
+
+Typography-flagged headings already merge adjacent same-size/weight lines;
+numbered ones now do the analogous extension, but only onto lines that do
+*not* fill the column (`width < 0.9 × widest`). That is what joins a short
+title leftover without swallowing the full-width paragraph under a short
+opener like `2.3.1. Interface overview`.
+
+### Tests
+
+`heading_ranges_extends_a_numbered_heading_that_wraps` is the ENDFtk shape;
+`heading_ranges_does_not_extend_a_numbered_heading_into_body` pins the
+short-opener / full-width-body case.
+
+---
+
 ## 2026-07-31 — Sentence and paragraph jump columns too
 
 Line scope's axis swap — `h`/`l` jump columns on a multi-column page, `j`/`k`

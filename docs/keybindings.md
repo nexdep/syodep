@@ -263,7 +263,7 @@ Only three keys mean something specific to a highlight:
 
 | Keys | Command |
 |---|---|
-| `a` | `highlight_commit` — keep it, back to visual mode with the same text selected |
+| `a` | `highlight_commit` — keep it, back to focus mode on the moving end |
 | `<Esc>` | `highlight_discard` — throw it away, restoring the mode and selection `a` was pressed on |
 | `<BS>` | `highlight_discard` |
 

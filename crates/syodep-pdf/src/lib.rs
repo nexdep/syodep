@@ -1614,7 +1614,11 @@ const HEADING_MAX_SHARE: f32 = 0.5;
 ///
 /// Typography-flagged lines still face the share and length caps; numbered
 /// headings are high-precision and are added afterwards, so a page of false
-/// bold flags cannot erase a real `1.1. Methods`.
+/// bold flags cannot erase a real `1.1. Methods`. A numbered opener that
+/// fills its measure may still wrap onto a short continuation that is not
+/// itself numbered and is invisible to the size/weight vote — those
+/// continuations are claimed with the opener, so a two-line title stays one
+/// heading.
 fn heading_ranges(lines: &[ContentLine], styles: &[LineStyle]) -> Vec<(usize, usize)> {
     let inked: Vec<usize> = (0..lines.len())
         .filter(|&i| !lines[i].cells.is_empty() && styles.get(i).is_some_and(|s| s.size > 0.0))
@@ -1669,14 +1673,32 @@ fn heading_ranges(lines: &[ContentLine], styles: &[LineStyle]) -> Vec<(usize, us
     }
 
     // Numbered subsection headings, independent of the typography vote.
+    // Claim short wrap continuations too: a line that fills the column is
+    // body prose, not title leftover — that is what keeps
+    // `2.3.1. Interface overview` from swallowing the paragraph under it
+    // while still joining `… in the` / `evaluated file`.
+    let claimed = |ranges: &[(usize, usize)], i: usize| {
+        ranges.iter().any(|&(start, end)| i >= start && i <= end)
+    };
     for &i in &inked {
-        if !is_numbered_heading_text(&line_text(&lines[i])) {
+        if !is_numbered_heading_text(&line_text(&lines[i])) || claimed(&ranges, i) {
             continue;
         }
-        if ranges.iter().any(|&(start, end)| i >= start && i <= end) {
-            continue;
+        let mut end = i;
+        while end + 1 < lines.len()
+            && end - i + 1 < HEADING_MAX_LINES
+            && !lines[end + 1].cells.is_empty()
+            && !claimed(&ranges, end + 1)
+            && styles
+                .get(end + 1)
+                .is_some_and(|s| (s.size - styles[i].size).abs() < 0.05 && s.bold == styles[i].bold)
+            && !is_numbered_heading_text(&line_text(&lines[end + 1]))
+            && !is_typography_heading(end + 1)
+            && (lines[end + 1].bbox.x1 - lines[end + 1].bbox.x0) < 0.9 * widest
+        {
+            end += 1;
         }
-        ranges.push((i, i));
+        ranges.push((i, end));
     }
     ranges.sort_by_key(|&(start, _)| start);
     ranges
@@ -3373,6 +3395,56 @@ mod tests {
             3,
             "1.1. The ENDF format and nuclear data libraries",
             380.0,
+            0.0,
+        );
+        assert_eq!(heading_ranges(&lines, &styles), vec![(3, 3)]);
+    }
+
+    #[test]
+    fn heading_ranges_extends_a_numbered_heading_that_wraps() {
+        // The ENDFtk 2.3.2 shape: opener fills the measure mid-phrase, then a
+        // short leftover on the next line. Without claiming the leftover,
+        // sentence scope splits the title in half.
+        let (mut lines, mut styles) = body_lines(10, 400.0);
+        set_text(
+            &mut lines,
+            &mut styles,
+            3,
+            "2.3.2. Application: inserting the reconstructed cross section data in the ",
+            395.0,
+            0.0,
+        );
+        set_text(&mut lines, &mut styles, 4, "evaluated file", 80.0, 0.0);
+        set_text(
+            &mut lines,
+            &mut styles,
+            5,
+            "With the functionality presented above, we can now develop a sim-",
+            400.0,
+            0.0,
+        );
+        assert_eq!(heading_ranges(&lines, &styles), vec![(3, 4)]);
+    }
+
+    #[test]
+    fn heading_ranges_does_not_extend_a_numbered_heading_into_body() {
+        // A short opener followed by a full-width paragraph must stay one
+        // line: the body fills the column, so it is not a title wrap.
+        let (mut lines, mut styles) = body_lines(10, 400.0);
+        set_text(
+            &mut lines,
+            &mut styles,
+            3,
+            "2.3.1. Interface overview",
+            180.0,
+            0.0,
+        );
+        set_text(
+            &mut lines,
+            &mut styles,
+            4,
+            "In addition to functions used to navigate and traverse an ENDF tree,",
+            400.0,
             0.0,
         );
         assert_eq!(heading_ranges(&lines, &styles), vec![(3, 3)]);

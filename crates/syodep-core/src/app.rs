@@ -472,10 +472,9 @@ impl App {
     /// and the overlay must stop drawing them.
     fn save_document(&mut self) -> Effects {
         // Saving keeps a highlight in progress rather than losing it, the same
-        // way `a`, `v` and `c` do.
-        self.store_pending_highlight();
+        // way `a`, `v` and `c` do — and lands in focus, like `a` and `c`.
         if self.mode == Mode::Highlight {
-            self.mode = Mode::Visual;
+            let _ = self.enter_focus(self.focus_scope);
         }
         match self.write_document() {
             Ok(count) => {
@@ -733,9 +732,11 @@ impl App {
 
         match command {
             Command::Quit => {
-                self.store_pending_highlight();
+                // Quitting keeps a highlight in progress, same as save/`a`/`c`,
+                // and lands in focus so the confirm prompt is never stranded in
+                // highlight mode.
                 if self.mode == Mode::Highlight {
-                    self.mode = Mode::Visual;
+                    let _ = self.enter_focus(self.focus_scope);
                 }
                 if self.highlights.is_empty() {
                     return self.quit_discarding_highlights();
@@ -1363,23 +1364,58 @@ impl App {
     /// Only the same line counts: a figure is not carried across a line break,
     /// and treating one as though it were would join text that merely happens
     /// to end and begin with digits.
+    ///
+    /// Neighbours skip one synthetic-space cell so a DOI fragment drawn as
+    /// `9p4kxc2cvd` + gap + `.1` still joins for word motion. Sentence
+    /// boundaries use [`Self::is_number_interior_tight`] instead: any space
+    /// after a stop — synthetic or authored — must end the sentence.
     fn is_number_interior(&mut self, c: Caret) -> bool {
+        self.number_interior(c, true)
+    }
+
+    /// Like [`Self::is_number_interior`], but neighbours are the immediate
+    /// same-line cells — a synthetic space is not peeked through.
+    ///
+    /// Used only by sentence-boundary detection. Looking through MuPDF's
+    /// guessed gaps is correct for welding DOI fragments into one *word*, but
+    /// turns an ordinary `reactor. Efficacy` into a false dotted token and
+    /// swallows the sentence end.
+    fn is_number_interior_tight(&mut self, c: Caret) -> bool {
+        self.number_interior(c, false)
+    }
+
+    fn number_interior(&mut self, c: Caret, skip_synthetic: bool) -> bool {
         let Some(here) = self.char_at(c) else {
             return false;
         };
         if !(is_numeric_separator(here) || is_exponent_sign(here)) {
             return false;
         }
-        let prev = self.prev_real_cell_on_line(c);
+        let prev = if skip_synthetic {
+            self.prev_real_cell_on_line(c)
+        } else {
+            self.prev_cell_on_line(c)
+        };
         let before = prev.and_then(|p| self.char_at(p));
-        let after = self.next_real_cell_on_line(c).and_then(|n| self.char_at(n));
+        let after = if skip_synthetic {
+            self.next_real_cell_on_line(c)
+        } else {
+            self.next_cell_on_line(c)
+        }
+        .and_then(|n| self.char_at(n));
         if is_inside_number(before, here, after) || is_inside_dotted_token(before, here, after) {
             return true;
         }
         // `2.3E+5`: the sign needs the exponent marker behind it and a digit
         // behind that, which is what tells a number from `cache+1`.
         let before2 = prev
-            .and_then(|p| self.prev_real_cell_on_line(p))
+            .and_then(|p| {
+                if skip_synthetic {
+                    self.prev_real_cell_on_line(p)
+                } else {
+                    self.prev_cell_on_line(p)
+                }
+            })
             .and_then(|p| self.char_at(p));
         is_inside_scientific_exponent(before2, before, here, after)
     }
@@ -1978,8 +2014,9 @@ impl App {
         // A full stop with alphanumeric sides is inside a number or dotted
         // identifier, not the end of anything: `3.14` and `ENDF/B-VII.0` sit
         // in the middle of a sentence. The stop in `costs 3.` still ends it,
-        // because nothing follows.
-        if self.is_number_interior(c) {
+        // because nothing follows. Immediate neighbours only — peeking through
+        // a synthetic space would swallow `reactor. Efficacy` on IOP layouts.
+        if self.is_number_interior_tight(c) {
             return false;
         }
         // Nor a stop belonging to `e.g.`, `Fig.` and friends. The stops inside
@@ -3324,15 +3361,13 @@ impl App {
         Effects::redraw()
     }
 
-    /// `a` again: keep the highlight and go back to selecting the same text.
+    /// `a` again: keep the highlight and return to focus on the moving end.
     fn commit_highlight(&mut self) -> Effects {
         if self.pending.is_none() {
             return Effects::default();
         }
-        self.store_pending_highlight();
-        self.mode = Mode::Visual;
-        self.refresh_visual_span();
-        Effects::redraw()
+        // `enter_focus` stores the pending highlight and drops the selection.
+        self.enter_focus(self.focus_scope)
     }
 
     /// `<Esc>` / `<BS>`: throw the highlight away and put back the mode and
@@ -4697,6 +4732,22 @@ mod tests {
         assert_eq!(span_text(&mut app), "word.");
         press(&mut app, "s");
         assert_eq!(span_text(&mut app), "Next");
+    }
+
+    #[test]
+    fn a_sentence_ends_across_a_synthetic_space_after_the_stop() {
+        // IOP-style layout: MuPDF draws `reactor.` and `Efficacy` as separate
+        // runs and flags the gap synthetic. Word motion may still peek through
+        // for DOI fragments, but sentence boundaries must not — otherwise the
+        // stop is mistaken for a dotted token (`r` + `.` + `E`).
+        let dir = tempfile::tempdir().unwrap();
+        let text = "reactor. Efficacy next.";
+        let synthetic_space = text.find(". ").unwrap() + 1;
+        let mut app = app_with_synthetic_line(dir.path(), text, &[synthetic_space]);
+        press(&mut app, "cs");
+        assert_eq!(span_text(&mut app), "reactor.");
+        press(&mut app, "s");
+        assert_eq!(span_text(&mut app), "Efficacy next.");
     }
 
     #[test]
@@ -7345,19 +7396,20 @@ mod tests {
     }
 
     #[test]
-    fn a_second_a_stores_the_highlight_and_returns_to_visual_mode() {
+    fn a_second_a_stores_the_highlight_and_returns_to_focus_mode() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma"]);
         press(&mut app, "cw");
         press(&mut app, "a");
         press(&mut app, "w");
-        let span = app.visual_span().expect("selection grown");
+        let head = app.focus_caret().expect("head after growing");
 
         press(&mut app, "a");
-        assert_eq!(app.mode(), Mode::Visual, "back to selecting");
+        assert_eq!(app.mode(), Mode::Focus, "back to focus on the moving end");
         assert!(!app.has_pending_highlight());
-        // "with the same text still selected".
-        assert_eq!(app.visual_span(), Some(span));
+        assert!(app.visual_selection().is_none());
+        assert!(app.visual_span().is_none());
+        assert_eq!(app.focus_caret(), Some(head));
 
         assert_eq!(app.highlights().len(), 1);
         let stored = &app.highlights()[0];
@@ -7564,8 +7616,8 @@ mod tests {
 
         press(&mut app, "cw");
         press(&mut app, "aa");
-        assert_eq!(app.mode(), Mode::Visual);
-        let span = app.visual_span().unwrap();
+        assert_eq!(app.mode(), Mode::Focus);
+        let caret = app.focus_caret().unwrap();
         let zoom = app.zoom();
 
         let effects = press(&mut app, "<Space>w");
@@ -7586,8 +7638,8 @@ mod tests {
         );
 
         // Where you were survived the reload.
-        assert_eq!(app.mode(), Mode::Visual);
-        assert_eq!(app.visual_span(), Some(span));
+        assert_eq!(app.mode(), Mode::Focus);
+        assert_eq!(app.focus_caret(), Some(caret));
         assert_eq!(app.zoom(), zoom);
         // The highlight lives in the PDF now, so the overlay stops drawing it —
         // otherwise it would be painted twice.
@@ -7648,8 +7700,9 @@ mod tests {
         press(&mut app, "a");
         press(&mut app, "<Space>w");
         assert!(app.last_error().is_none(), "{:?}", app.last_error());
-        assert_eq!(app.mode(), Mode::Visual, "the highlight was committed");
+        assert_eq!(app.mode(), Mode::Focus, "the highlight was committed");
         assert!(!app.has_pending_highlight());
+        assert!(app.visual_selection().is_none());
         assert_eq!(syodep_pdf::page_highlights(&path, 0).unwrap().len(), 1);
     }
 
@@ -7753,8 +7806,9 @@ mod tests {
 
         let effects = press(&mut app, "<Space>q");
         assert!(effects.confirm_quit);
-        assert_eq!(app.mode(), Mode::Visual, "the mode fixup ran");
+        assert_eq!(app.mode(), Mode::Focus, "the mode fixup ran");
         assert!(!app.has_pending_highlight(), "the highlight was committed");
+        assert!(app.visual_selection().is_none());
         assert_eq!(app.highlights().len(), 1);
     }
 

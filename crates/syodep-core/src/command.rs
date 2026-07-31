@@ -133,7 +133,7 @@ pub enum Command {
     // `visual_*` motions rather than duplicating them.
     /// Turn the focus highlight or selection into a pending highlight.
     HighlightEnter,
-    /// Store the pending highlight and return to visual mode, still selected.
+    /// Store the pending highlight and return to focus mode on the moving end.
     HighlightCommit,
     /// Throw the pending highlight away, restoring the mode and selection that
     /// were in effect when it was started.
