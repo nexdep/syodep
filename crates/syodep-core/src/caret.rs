@@ -606,6 +606,34 @@ pub fn is_sentence_trailer(c: char) -> bool {
     matches!(c, '"' | '\'' | ')' | ']' | '}' | '»' | '”' | '’')
 }
 
+/// Whether cell `idx` is a colon whose only followers on the line are
+/// whitespace characters — the line ends at that colon.
+///
+/// Image cells count as non-whitespace, so `colon` + image does not qualify.
+/// Used by sentence-boundary detection and by [`line_ends_with_colon`].
+pub fn is_line_final_colon(cells: &[Cell], idx: usize) -> bool {
+    matches!(cells.get(idx).map(|c| &c.kind), Some(CellKind::Char(':')))
+        && cells[idx + 1..].iter().all(|c| match c.kind {
+            CellKind::Char(ch) => ch.is_whitespace(),
+            CellKind::Image => false,
+        })
+}
+
+/// Whether the last non-whitespace cell of `cells` is a colon.
+///
+/// The paragraph-break form of [`is_line_final_colon`]: a line that ends in
+/// `:` (optionally followed by spaces) starts a new paragraph at the next
+/// line.
+pub fn line_ends_with_colon(cells: &[Cell]) -> bool {
+    cells
+        .iter()
+        .rposition(|c| match c.kind {
+            CellKind::Char(ch) => !ch.is_whitespace(),
+            CellKind::Image => true,
+        })
+        .is_some_and(|i| is_line_final_colon(cells, i))
+}
+
 /// A new paragraph starts when the vertical gap between consecutive lines
 /// exceeds this fraction of the median line height.
 pub const PARAGRAPH_GAP_FACTOR: f32 = 0.75;
@@ -616,7 +644,8 @@ pub const PARAGRAPH_GAP_FACTOR: f32 = 0.75;
 /// Consecutive non-empty lines belong to the same paragraph until a break is
 /// detected: a column change (reusing [`column_ranges`]/[`column_index_of`]), a
 /// vertical gap larger than [`PARAGRAPH_GAP_FACTOR`] times the median line
-/// height, or the y-coordinate jumping back upward (a column/region reset).
+/// height, the y-coordinate jumping back upward (a column/region reset), or
+/// the previous line ending in a colon (optionally followed by spaces).
 /// Empty lines are skipped, mirroring the rest of the navigation code.
 ///
 /// Pure so it can be unit-tested in isolation, like [`column_ranges`].
@@ -648,7 +677,10 @@ pub fn paragraph_segments(lines: &[ContentLine]) -> Vec<(usize, usize)> {
         let (prev, cur) = (w[0], w[1]);
         let pb = lines[prev].bbox;
         let cb = lines[cur].bbox;
-        let breaks = col_of(prev) != col_of(cur) || cb.y0 - pb.y1 > threshold || cb.y0 < pb.y0;
+        let breaks = col_of(prev) != col_of(cur)
+            || cb.y0 - pb.y1 > threshold
+            || cb.y0 < pb.y0
+            || line_ends_with_colon(&lines[prev].cells);
         if breaks {
             segments.push((start, prev));
             start = cur;
@@ -1191,6 +1223,82 @@ mod tests {
             vec![(0, 0)]
         );
         assert!(paragraph_segments(&[]).is_empty());
+    }
+
+    /// One content line of `text` at `y`, with a 6pt-wide cell per character.
+    fn text_line(y: f32, text: &str) -> ContentLine {
+        let cells: Vec<Cell> = text
+            .chars()
+            .enumerate()
+            .map(|(i, ch)| {
+                let x = i as f32 * 6.0;
+                Cell {
+                    kind: CellKind::Char(ch),
+                    bbox: Rect {
+                        x0: x,
+                        y0: y,
+                        x1: x + 6.0,
+                        y1: y + 10.0,
+                    },
+                    synthetic: false,
+                }
+            })
+            .collect();
+        ContentLine {
+            bbox: Rect {
+                x0: 0.0,
+                y0: y,
+                x1: text.chars().count() as f32 * 6.0,
+                y1: y + 10.0,
+            },
+            cells,
+        }
+    }
+
+    #[test]
+    fn line_final_colon_at_eol_and_with_trailing_spaces() {
+        let cells = text_line(0.0, "lead-in:").cells;
+        assert!(is_line_final_colon(&cells, cells.len() - 1));
+        assert!(line_ends_with_colon(&cells));
+
+        let cells = text_line(0.0, "lead-in:  ").cells;
+        assert!(is_line_final_colon(&cells, 7));
+        assert!(!is_line_final_colon(&cells, 8)); // a trailing space
+        assert!(line_ends_with_colon(&cells));
+    }
+
+    #[test]
+    fn mid_line_colon_is_not_line_final() {
+        let cells = text_line(0.0, "Note: more.").cells;
+        assert!(!is_line_final_colon(&cells, 4));
+        assert!(!line_ends_with_colon(&cells));
+    }
+
+    #[test]
+    fn colon_followed_by_an_image_is_not_line_final() {
+        let mut cells = text_line(0.0, "lead-in:").cells;
+        cells.push(image_cell());
+        assert!(!is_line_final_colon(&cells, 7));
+        assert!(!line_ends_with_colon(&cells));
+    }
+
+    #[test]
+    fn paragraph_segments_splits_after_a_line_final_colon() {
+        // Tightly spaced — no vertical gap — but the colon line still breaks.
+        let lines = [
+            text_line(0.0, "A lead-in:"),
+            text_line(12.0, "Continued here."),
+        ];
+        assert_eq!(paragraph_segments(&lines), vec![(0, 0), (1, 1)]);
+    }
+
+    #[test]
+    fn paragraph_segments_keeps_a_mid_line_colon_together() {
+        let lines = [
+            text_line(0.0, "Note: more words."),
+            text_line(12.0, "Still same para."),
+        ];
+        assert_eq!(paragraph_segments(&lines), vec![(0, 1)]);
     }
 
     #[test]

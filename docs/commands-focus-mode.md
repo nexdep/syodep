@@ -104,6 +104,13 @@ word runs, punctuation/symbols form separate runs, whitespace is skipped, and
 each image is a single stop. Word motions run *through* a table or an equation,
 stopping on the words inside them.
 
+**Line-final colons.** A colon whose only followers on its line are spaces (or
+nothing) ends the sentence and starts a new paragraph at the next line:
+`A lead-in:` then `Continued text.` are two sentences and two paragraphs, even
+when the vertical gap between the lines is tight. A mid-line colon stays inert
+— `Note: more words here.` is still one sentence — and a colon inside a URL is
+unchanged.
+
 **Lists.** Each list item is one sentence, so `s` steps through a list item by
 item even though items rarely end in a full stop. The line introducing a list
 does not run into its first item, and the last item does not run on into the
@@ -120,7 +127,9 @@ merely opens with a numeral is not a list.
 
 Items bound sentences only. `w` still walks the marker and the words after it,
 and items do not split a list into paragraphs — though a list set with generous
-space between items may still be split by the ordinary paragraph-gap rule.
+space between items may still be split by the ordinary paragraph-gap rule. A
+colon lead-in before a list is its own paragraph (and sentence) by the
+line-final-colon rule above; `p` then skips the list that follows in one step.
 
 **Abbreviations.** `e.g.`, `i.e.`, `U.S.`, `Ph.D.` and the like are one word and
 never break a sentence: the stops inside them are inert. Runs of initials

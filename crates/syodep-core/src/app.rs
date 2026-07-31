@@ -24,12 +24,12 @@ use syodep_storage::{HighlightRect, Position, Storage};
 use crate::caret::{
     column_index_of, column_ranges, continues_word_run, is_abbreviation, is_attached_number_suffix,
     is_exponent_sign, is_inside_dotted_token, is_inside_hyphenated_word, is_inside_number,
-    is_inside_scientific_exponent, is_number_suffix, is_numeric_separator, is_sentence_terminator,
-    is_sentence_trailer, is_word_hyphen, is_word_target, link_span, nearest_cell_in_line,
-    nearest_line_in_column, opens_a_sentence, page_span_rects, paragraph_segments,
-    split_segments_at_objects, word_class, Caret, Dir, Landing, LineMark, Mode, ObjectId,
-    ParagraphMark, PendingHighlight, Scope, SentenceMark, VisualAnchor, VisualSelection, WordClass,
-    WordMark,
+    is_inside_scientific_exponent, is_line_final_colon, is_number_suffix, is_numeric_separator,
+    is_sentence_terminator, is_sentence_trailer, is_word_hyphen, is_word_target, link_span,
+    nearest_cell_in_line, nearest_line_in_column, opens_a_sentence, page_span_rects,
+    paragraph_segments, split_segments_at_objects, word_class, Caret, Dir, Landing, LineMark, Mode,
+    ObjectId, ParagraphMark, PendingHighlight, Scope, SentenceMark, VisualAnchor, VisualSelection,
+    WordClass, WordMark,
 };
 use crate::command::Command;
 use crate::input::{InputState, KeyOutcome, Keymap, KeymapError};
@@ -2008,6 +2008,20 @@ impl App {
         // sentence, not an enumerator followed by a sentence.
         if self.in_list_marker(c) {
             return false;
+        }
+        // A colon that ends its line (optional trailing spaces only) is a
+        // sentence boundary: "A lead-in:\nContinued." is two sentences. A
+        // mid-line colon stays inert. Links keep their own rule below.
+        if self.char_at(c) == Some(':') {
+            self.ensure_content(c.page);
+            let cells = self
+                .content(c.page)
+                .get(c.line)
+                .map(|l| l.cells.as_slice())
+                .unwrap_or(&[]);
+            if is_line_final_colon(cells, c.cell) && !self.is_inside_link(c) {
+                return true;
+            }
         }
         let here = match self.char_at(c) {
             Some(ch) if is_sentence_terminator(ch) || is_sentence_trailer(ch) => ch,
@@ -4460,12 +4474,25 @@ mod tests {
 
     #[test]
     fn a_list_is_still_one_paragraph() {
-        // Items bound sentences, not paragraphs: `p` skips the whole list.
+        // Items bound sentences, not paragraphs: after the colon lead-in (its
+        // own paragraph by the line-final-colon rule), `p` skips the whole
+        // list plus the closing prose in one step.
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_list_page(dir.path());
         press(&mut app, "cp");
         let (start, end) = app.focus_span().unwrap();
-        assert_eq!((start.line, end.line), (0, 5));
+        assert_eq!(
+            (start.line, end.line),
+            (0, 0),
+            "colon lead-in is its own paragraph"
+        );
+        press(&mut app, "j");
+        let (start, end) = app.focus_span().unwrap();
+        assert_eq!(
+            (start.line, end.line),
+            (1, 5),
+            "list items must not split the paragraph that follows the lead-in"
+        );
     }
 
     #[test]
@@ -4537,6 +4564,19 @@ mod tests {
             0,
             PageContent {
                 lines: vec![text_line(100.0, text)],
+                ..Default::default()
+            },
+        );
+        app
+    }
+
+    /// Two tightly-spaced lines on one page (no paragraph-sized vertical gap).
+    fn app_with_two_lines(dir: &Path, first: &str, second: &str) -> App {
+        let mut app = app_with_text_pages(dir, &["placeholder page"]);
+        app.set_page_content(
+            0,
+            PageContent {
+                lines: vec![text_line(100.0, first), text_line(112.0, second)],
                 ..Default::default()
             },
         );
@@ -6892,6 +6932,51 @@ mod tests {
         // A multi-line sentence yields one rect per spanned line.
         let rects = app.focus_screen_rects().unwrap();
         assert!(rects.len() >= 2);
+    }
+
+    #[test]
+    fn a_line_final_colon_ends_the_sentence() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_two_lines(dir.path(), "A lead-in:", "Continued text here.");
+        press(&mut app, "cs");
+        assert_eq!(span_text(&mut app), "A lead-in:");
+        press(&mut app, "s");
+        assert_eq!(span_text(&mut app), "Continued text here.");
+    }
+
+    #[test]
+    fn a_line_final_colon_with_trailing_spaces_ends_the_sentence() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_two_lines(dir.path(), "A lead-in:  ", "Continued text here.");
+        press(&mut app, "cs");
+        assert_eq!(span_text(&mut app), "A lead-in:");
+        press(&mut app, "s");
+        assert_eq!(span_text(&mut app), "Continued text here.");
+    }
+
+    #[test]
+    fn a_mid_line_colon_does_not_end_a_sentence() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_line(dir.path(), "Note: more words here.");
+        press(&mut app, "cs");
+        assert_eq!(span_text(&mut app), "Note: more words here.");
+    }
+
+    #[test]
+    fn a_line_final_colon_starts_a_new_paragraph() {
+        let dir = tempfile::tempdir().unwrap();
+        // Tight spacing: without the colon rule these would be one paragraph.
+        let mut app = app_with_two_lines(dir.path(), "A lead-in:", "Continued text here.");
+        press(&mut app, "cp");
+        let mark = app.paragraph_mark().unwrap();
+        assert_eq!(
+            (mark.start_line, mark.end_line),
+            (0, 0),
+            "colon line should be its own paragraph"
+        );
+        press(&mut app, "j");
+        let next = app.paragraph_mark().unwrap();
+        assert_eq!((next.start_line, next.end_line), (1, 1));
     }
 
     #[test]

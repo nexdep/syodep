@@ -7,6 +7,35 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-07-31 — Line-final colon breaks sentence and paragraph
+
+A colon that ends its line — optionally followed only by spaces — is now a
+sentence boundary and a paragraph break. `A lead-in:` then `Continued text.`
+are two sentences and two paragraphs under `s`/`p`, even when the vertical gap
+is too small for the ordinary paragraph heuristic. Mid-line colons
+(`Note: more words.`) and colons inside links stay inert; headings already
+ignore internal punctuation via the single-sentence-region guard.
+
+Helpers live in `caret.rs` (`is_line_final_colon`, `line_ends_with_colon`);
+`paragraph_segments` uses the latter, and `sentence_boundary_after` uses the
+former. A list lead-in that ends in `:` is therefore its own paragraph; list
+items still do not split the paragraph that follows (`a_list_is_still_one_paragraph`
+updated accordingly).
+
+### Tests
+
+`line_final_colon_at_eol_and_with_trailing_spaces`,
+`mid_line_colon_is_not_line_final`,
+`colon_followed_by_an_image_is_not_line_final`,
+`paragraph_segments_splits_after_a_line_final_colon`,
+`paragraph_segments_keeps_a_mid_line_colon_together`,
+`a_line_final_colon_ends_the_sentence`,
+`a_line_final_colon_with_trailing_spaces_ends_the_sentence`,
+`a_mid_line_colon_does_not_end_a_sentence`,
+`a_line_final_colon_starts_a_new_paragraph`.
+
+---
+
 ## 2026-07-31 — Zoom chords under `z`, plus `center_view`
 
 Bare `+`/`=`/`-` no longer zoom: `z+`/`z=` zoom in, `z-` zooms out, and the
