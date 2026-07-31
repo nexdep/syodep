@@ -824,6 +824,7 @@ impl App {
             Command::HighlightCommit => return self.commit_highlight(),
             Command::HighlightDiscard => return self.discard_highlight(),
             Command::SaveDocument => return self.save_document(),
+            Command::CenterView => return self.center_view(),
             _ => {}
         }
 
@@ -905,7 +906,8 @@ impl App {
             | Command::HighlightEnter
             | Command::HighlightCommit
             | Command::HighlightDiscard
-            | Command::SaveDocument => unreachable!("handled above"),
+            | Command::SaveDocument
+            | Command::CenterView => unreachable!("handled above"),
         }
         // In focus mode, scroll and page jumps carry the highlight to the newly
         // visible content; zoom commands leave it where it is.
@@ -2735,6 +2737,20 @@ impl App {
         })
     }
 
+    /// Scroll so a page-space rectangle's center sits at the viewport center
+    /// (both axes), then clamp. No scroll-off margin — true centering.
+    fn center_page_rect(&mut self, page: usize, rect: Rect) {
+        let Some(session) = &mut self.session else {
+            return;
+        };
+        let Some(page) = session.view.layout().page(page) else {
+            return;
+        };
+        let cx = page.x + (rect.x0 + rect.x1) / 2.0;
+        let cy = page.y + (rect.y0 + rect.y1) / 2.0;
+        session.view.center_on_doc_point(cx, cy);
+    }
+
     /// Scroll the minimum amount needed to bring a page-space rectangle on
     /// `page` into view, keeping `view.scroll_off` pixels of context above and
     /// below it.
@@ -3037,6 +3053,43 @@ impl App {
         let at = self.snap_to_scope(Caret { page, line, cell }, scope);
         self.focus = Some(at);
         self.refresh_focus_span();
+    }
+
+    /// Scroll so the current highlight is centered in the viewport (Vim `zz`).
+    ///
+    /// Target by mode: focus span (or caret) in focus mode; visual span (or
+    /// head) in visual/highlight; remembered focus in normal mode. No-op when
+    /// there is nothing to center on. Uses true centering — no scroll-off.
+    fn center_view(&mut self) -> Effects {
+        if self.session.is_none() {
+            return Effects::default();
+        }
+        let (start, end) = match self.mode {
+            Mode::Focus => match self.focus_span {
+                Some(span) => span,
+                None => match self.focus {
+                    Some(at) => (at, at),
+                    None => return Effects::default(),
+                },
+            },
+            Mode::Visual | Mode::Highlight => match self.visual_span {
+                Some(span) => span,
+                None => match self.focus {
+                    Some(at) => (at, at),
+                    None => return Effects::default(),
+                },
+            },
+            Mode::Normal => match self.focus {
+                Some(at) => self.focus_span.unwrap_or((at, at)),
+                None => return Effects::default(),
+            },
+        };
+        let Some(rect) = self.span_bbox(start, end) else {
+            return Effects::default();
+        };
+        self.center_page_rect(start.page, rect);
+        self.save_position();
+        Effects::redraw()
     }
 
     /// Scroll the minimum amount needed to keep the focus highlight on screen.
@@ -3839,7 +3892,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_doc(dir.path(), 2);
         let z0 = app.zoom();
-        press(&mut app, "+");
+        press(&mut app, "z+");
         assert!(app.zoom() > z0);
         press(&mut app, "z0");
         assert!((app.zoom() - 1.0).abs() < 1e-6);
@@ -3891,7 +3944,7 @@ mod tests {
             app.set_viewport_size(595.0, 600.0);
             app.open_document(&pdf).unwrap();
             press(&mut app, "3G");
-            press(&mut app, "+");
+            press(&mut app, "z+");
             assert_eq!(app.current_page(), 2);
         }
 
@@ -4102,10 +4155,51 @@ mod tests {
         press(&mut app, "cc");
         press(&mut app, "3l"); // move within the line
         let before = app.caret().unwrap();
-        press(&mut app, "+"); // zoom_in does not move the caret
+        press(&mut app, "z+"); // zoom_in does not move the caret
         assert_eq!(app.caret().unwrap(), before);
         press(&mut app, "zw"); // fit_width does not move the caret
         assert_eq!(app.caret().unwrap(), before);
+    }
+
+    #[test]
+    fn center_view_centers_the_focus_span() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_stacked_lines(dir.path(), 80.0);
+        press(&mut app, "ce");
+        press(&mut app, "20j");
+        // Scroll away without a focus-repositioning command so the highlight
+        // is left off-center (and possibly off-screen).
+        app.session.as_mut().unwrap().view.scroll_by_px(0.0, 350.0);
+        let (start, end) = app.focus_span().unwrap();
+        let page_rect = app.span_bbox(start, end).unwrap();
+        let before = app
+            .session
+            .as_ref()
+            .unwrap()
+            .view
+            .page_rect_to_screen(
+                start.page,
+                page_rect.x0,
+                page_rect.y0,
+                page_rect.x1,
+                page_rect.y1,
+            )
+            .unwrap();
+        let before_cy = before.y + before.height / 2.0;
+        assert!(
+            (before_cy - 300.0).abs() > 50.0,
+            "precondition: focus should not already be centered, got cy={before_cy}"
+        );
+        press(&mut app, "zc");
+        let (_, rect) = app.focus_screen_rect().unwrap();
+        let cy = rect.y + rect.height / 2.0;
+        assert!(
+            (cy - 300.0).abs() < 2.0,
+            "focus span center y should be near viewport center, got {cy} (rect={rect:?})"
+        );
+        // Horizontal centering is requested too, but when the page already
+        // fills the viewport width the scroll clamp refuses to move — same
+        // as every other scroll. The fixture is fit-width, so only y moves.
     }
 
     /// A single page of 48 stacked lines, tall enough that the highlight can

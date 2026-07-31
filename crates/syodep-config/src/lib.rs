@@ -250,11 +250,12 @@ pub fn default_keybindings() -> BTreeMap<String, String> {
         ("<C-b>", "scroll_page_up"),
         ("gg", "goto_first_page"),
         ("G", "goto_last_page"),
-        ("+", "zoom_in"),
-        ("=", "zoom_in"),
-        ("-", "zoom_out"),
+        ("z+", "zoom_in"),
+        ("z=", "zoom_in"),
+        ("z-", "zoom_out"),
         ("zw", "fit_width"),
         ("z0", "zoom_reset"),
+        ("zc", "center_view"),
         // `c` plus a scope letter focuses at that granularity. The same
         // bindings work *inside* focus mode, where they change the scope
         // without moving the highlight.
@@ -797,6 +798,20 @@ mod tests {
         assert_eq!(keys.get("j").map(String::as_str), Some("scroll_down"));
         assert_eq!(keys.get("gg").map(String::as_str), Some("goto_first_page"));
         assert_eq!(keys.get("G").map(String::as_str), Some("goto_last_page"));
+    }
+
+    #[test]
+    fn zoom_and_center_view_keybindings() {
+        let keys = default_keybindings();
+        assert_eq!(keys.get("z+").map(String::as_str), Some("zoom_in"));
+        assert_eq!(keys.get("z=").map(String::as_str), Some("zoom_in"));
+        assert_eq!(keys.get("z-").map(String::as_str), Some("zoom_out"));
+        assert_eq!(keys.get("zw").map(String::as_str), Some("fit_width"));
+        assert_eq!(keys.get("z0").map(String::as_str), Some("zoom_reset"));
+        assert_eq!(keys.get("zc").map(String::as_str), Some("center_view"));
+        assert!(!keys.contains_key("+"));
+        assert!(!keys.contains_key("-"));
+        assert!(!keys.contains_key("="));
     }
 
     #[test]

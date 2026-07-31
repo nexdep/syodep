@@ -80,10 +80,11 @@ Zoom:
 
 | Keys | Command |
 |---|---|
-| `+`, `=` | `zoom_in` |
-| `-` | `zoom_out` |
+| `z+`, `z=` | `zoom_in` |
+| `z-` | `zoom_out` |
 | `zw` | `fit_width` |
 | `z0` | `zoom_reset` |
+| `zc` | `center_view` |
 
 Focus (see "Focus mode" below). The same chords change the scope from inside
 focus mode:

@@ -33,6 +33,8 @@ pub enum Command {
     ZoomOut,
     FitWidth,
     ZoomReset,
+    /// Scroll so the current highlight is centered in the viewport (Vim `zz`).
+    CenterView,
     // Focus mode (one highlighted position at the active scope).
     //
     // Entering is also how the scope is changed: `cw` from normal mode enters
@@ -166,6 +168,7 @@ pub const ALL_COMMANDS: &[(&str, Command)] = &[
     ("zoom_out", Command::ZoomOut),
     ("fit_width", Command::FitWidth),
     ("zoom_reset", Command::ZoomReset),
+    ("center_view", Command::CenterView),
     ("focus_enter", Command::FocusEnter),
     ("focus_enter_char", Command::FocusEnterChar),
     ("focus_enter_word", Command::FocusEnterWord),

@@ -7,6 +7,21 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-07-31 — Zoom chords under `z`, plus `center_view`
+
+Bare `+`/`=`/`-` no longer zoom: `z+`/`z=` zoom in, `z-` zooms out, and the
+existing `zw`/`z0` stay. New `center_view` (`zc`) scrolls so the current
+highlight sits at the viewport center on both axes — focus span in focus mode,
+visual span in visual/highlight, remembered focus in normal mode — with true
+centering (no `scroll_off` margin), Vim `zz`-style.
+
+### Tests
+
+`zoom_and_center_view_keybindings`, `center_view_centers_the_focus_span`;
+existing zoom presses updated from bare `+` to `z+`.
+
+---
+
 ## 2026-07-31 — Column detection ignores gutter-spanning lines
 
 On the ST-E1 IOP paper, `h`/`l` never jumped columns on body pages:

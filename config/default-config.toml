@@ -98,8 +98,6 @@ leader = "<Space>"
 # ("<C-d>" = ctrl+d, "<A-x>" = alt+x, "<C-A-Left>").
 # Command names are listed in docs/commands.md.
 [keys]
-"+" = "zoom_in"
-"-" = "zoom_out"
 "<C-b>" = "scroll_page_up"
 "<C-d>" = "scroll_half_page_down"
 "<C-f>" = "scroll_page_down"
@@ -114,7 +112,6 @@ leader = "<Space>"
 "<leader>o" = "open_file"
 "<leader>q" = "quit"
 "<leader>w" = "save_document"
-"=" = "zoom_in"
 "G" = "goto_last_page"
 "J" = "next_page"
 "K" = "prev_page"
@@ -135,7 +132,11 @@ leader = "<Space>"
 "vp" = "visual_enter_paragraph"
 "vs" = "visual_enter_sentence"
 "vw" = "visual_enter_word"
+"z+" = "zoom_in"
+"z-" = "zoom_out"
 "z0" = "zoom_reset"
+"z=" = "zoom_in"
+"zc" = "center_view"
 "zw" = "fit_width"
 
 # Focus-mode keybindings (active after pressing "cc", "cw", "ce", "cs" or

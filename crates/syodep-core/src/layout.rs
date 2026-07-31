@@ -246,6 +246,15 @@ impl View {
         })
     }
 
+    /// Scroll so document-space point `(x, y)` sits at the viewport center,
+    /// then clamp. Unlike [`Self::scroll_doc_rect_into_view`], this ignores
+    /// scroll-off margins — true centering (Vim `zz`).
+    pub fn center_on_doc_point(&mut self, x: f32, y: f32) {
+        self.scroll_x = x - self.viewport_width / self.zoom / 2.0;
+        self.scroll_y = y - self.viewport_height / self.zoom / 2.0;
+        self.clamp_scroll();
+    }
+
     /// Scroll the minimum amount so that a document-space rectangle is fully
     /// within the viewport, plus `margin_px` screen pixels of clearance above
     /// and below it. A rectangle larger than the viewport aligns to its

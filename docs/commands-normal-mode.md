@@ -46,9 +46,12 @@ The "current page" is the page under the center of the window.
 | `zoom_out` | divide zoom by `view.zoom_step` | applies N times |
 | `fit_width` | fit the widest page to the window width | — |
 | `zoom_reset` | set zoom to 100% (72 dpi) | — |
+| `center_view` | scroll so the remembered focus position is at the viewport center | — |
 
 Zoom keeps the document point at the window center fixed and is clamped to
-5%–1600%.
+5%–1600%. `center_view` is a no-op in normal mode when there is no remembered
+focus position; in focus/visual/highlight it centers the current highlight
+(true centering, ignoring `view.scroll_off`).
 
 ## Focus mode
 

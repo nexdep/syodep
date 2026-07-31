@@ -131,6 +131,8 @@ too.
 scrolling does not drag the selection to the newly visible content - a
 selection is an explicit range, and moving it out from under the reader would
 lose work. Only the parts of the selection on screen are drawn.
+`center_view` scrolls so the selection is at the viewport center without
+moving either end.
 
 **Entering focus mode discards the selection but keeps your place.** The
 focus entry chords (`cc`, `ce`, `cw`, `cs`, `cp`) still work in visual mode;

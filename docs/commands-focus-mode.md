@@ -311,6 +311,7 @@ window center; the highlight stays on the same content.
 | `zoom_out` | divide zoom by `view.zoom_step` | applies N times |
 | `fit_width` | fit the widest page to the window width | — |
 | `zoom_reset` | set zoom to 100% (72 dpi) | — |
+| `center_view` | scroll so the focus highlight is at the viewport center (Vim `zz`) | — |
 
 The application commands `open_file`, `quit` and `cancel` also keep their
 normal-mode behavior. See `docs/commands-normal-mode.md` for those.

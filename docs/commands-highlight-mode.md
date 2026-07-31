@@ -87,7 +87,8 @@ mode — see `docs/commands-normal-mode.md`.
 Every normal-mode command stays available with its normal binding; only the keys
 listed in `[highlight_keys]` are remapped. So page scrolling, page navigation
 and zoom all work while a highlight is pending, and — as in visual mode — they
-leave the highlight where it is.
+leave the highlight where it is. `center_view` scrolls so the pending highlight
+is at the viewport center without reshaping it.
 
 ## Customizing
 
