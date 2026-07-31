@@ -104,6 +104,15 @@ pub enum CellKind {
 pub struct Cell {
     pub kind: CellKind,
     pub bbox: Rect,
+    /// Whether MuPDF guessed this character rather than reading it from the
+    /// content stream — set from `TextCharFlags::SYNTHETIC`. MuPDF inserts a
+    /// guessed space between two glyphs drawn by separate positioning
+    /// operations when the gap between them, as a fraction of font size,
+    /// looks space-shaped. Common in hyperlinked URLs/DOIs, whose path
+    /// segments a PDF producer often draws as separate runs: the gap is real
+    /// ink-to-ink space on the page, but it is not an authored word
+    /// boundary. Always `false` for [`CellKind::Image`].
+    pub synthetic: bool,
 }
 
 /// A line of content in reading order — a run of character cells, or a single
@@ -122,6 +131,7 @@ pub enum ObjectKind {
     Heading,
     ListItem,
     Equation,
+    Footnote,
 }
 
 impl ObjectKind {
@@ -142,11 +152,18 @@ impl ObjectKind {
     /// stopping on row two of an aligned system, or tinting only the text
     /// cells of a table and leaving its rules unpainted, is never what the
     /// reader meant. Word and char scope still walk inside both, so a single
-    /// coefficient or table cell stays reachable.
+    /// coefficient or table cell stays reachable. A footnote is the same
+    /// shape for a different reason: it is real prose, not a table, but it
+    /// is meant to be reachable only by deliberately walking into it —
+    /// `hjkl` at line scope skip over it as one stop rather than reading it
+    /// row by row, the same as a table's rows.
     ///
     /// Every atomic kind is also a block — the two nest, coarsest last.
     pub fn is_block(self) -> bool {
-        matches!(self, Self::Image | Self::Table | Self::Equation)
+        matches!(
+            self,
+            Self::Image | Self::Table | Self::Equation | Self::Footnote
+        )
     }
 
     /// Whether every sentence terminator inside this is inert, making the whole
@@ -154,7 +171,12 @@ impl ObjectKind {
     ///
     /// A heading needs it because `3.1. Methods` is not three sentences, and an
     /// equation because `f(x) = 0.` is not two. Prose kinds do not: a list item
-    /// is walked sentence by sentence on purpose.
+    /// is walked sentence by sentence on purpose, and so is a footnote once a
+    /// reader has deliberately stepped into one — unlike `is_block`, this
+    /// predicate is about what happens *inside* the region, not whether normal
+    /// reading order stops there at all (see the sentence/paragraph
+    /// auto-search logic in `syodep-core`, which is what actually keeps a
+    /// footnote out of ordinary reading).
     pub fn is_one_sentence(self) -> bool {
         matches!(self, Self::Heading | Self::Equation)
     }
@@ -238,6 +260,14 @@ pub struct ContentOptions {
     /// Drop running heads, folios and text that does not run in the page's
     /// reading direction, so the caret never traverses them.
     pub skip_page_furniture: bool,
+    /// Detect footnote blocks — text set smaller than the body in the bottom
+    /// margin — so each is one stop from line scope up, drawn as one box,
+    /// while staying walkable by word and character (the same shape as a
+    /// table). Sentence and paragraph motion additionally skip a footnote
+    /// entirely while auto-searching from ordinary body text, so reading a
+    /// page's prose never lands on one; a caret placed there deliberately
+    /// still reads normally once inside. Free, like headings and equations.
+    pub detect_footnotes: bool,
 }
 
 impl Default for ContentOptions {
@@ -247,6 +277,7 @@ impl Default for ContentOptions {
             detect_headings: true,
             detect_equations: true,
             skip_page_furniture: true,
+            detect_footnotes: true,
         }
     }
 }
@@ -341,6 +372,21 @@ const FOLIO_BAND_SHARE: f32 = 0.20;
 
 /// How far two baselines may differ and still be the same running element.
 const BASELINE_TOLERANCE: f32 = 2.5;
+
+/// Fallback tolerance for a line already inside the margin band whose
+/// baseline still drifted off the profile by more than
+/// [`BASELINE_TOLERANCE`] — own-page content or a MediaBox/rounding quirk
+/// can shift a header a few points from its siblings even though it is
+/// plainly still in the margin. Only reached once the strict offset match
+/// has already failed for a line [`band_of_with_folio`] still accepted, and
+/// only ever applied alongside an *exact* normalised-text match against an
+/// established profile entry (see [`furniture_mask`]) — text equality is
+/// what makes the wider window safe. This never widens the margin band
+/// itself: a line [`band_of_with_folio`] rejects outright stays rejected,
+/// exactly as strict as before (see
+/// `mask_does_not_use_the_deeper_band_for_non_folio_text`, which pins that a
+/// text+offset coincidence outside the band must never become furniture).
+const RELAXED_BASELINE_TOLERANCE: f32 = 8.0;
 
 /// A margin entry must recur on at least this many sampled pages, and this
 /// share of them. Two rather than one is what stops a one-off title being read
@@ -549,6 +595,7 @@ impl Document {
                     cells: vec![Cell {
                         kind: CellKind::Image,
                         bbox,
+                        synthetic: false,
                     }],
                 });
                 styles.push(LineStyle {
@@ -578,6 +625,7 @@ impl Document {
                     cells.push(Cell {
                         kind: CellKind::Char(c),
                         bbox: rect_from_quad(&quad),
+                        synthetic: ch.flags().contains(TextCharFlags::SYNTHETIC),
                     });
                     if c.is_whitespace() {
                         continue;
@@ -693,6 +741,11 @@ impl Document {
         } else {
             Vec::new()
         };
+        let footnotes = if opts.detect_footnotes {
+            footnote_ranges(&lines, &styles, self.page_size(page)?.height)
+        } else {
+            Vec::new()
+        };
 
         let objects = content_objects(
             &lines,
@@ -700,6 +753,7 @@ impl Document {
             &tables,
             &headings,
             &equations,
+            &footnotes,
             &furniture,
         );
         Ok(PageContent {
@@ -1063,7 +1117,16 @@ fn furniture_mask(
     let Some(profile) = profile.filter(|p| !p.is_empty()) else {
         return mask;
     };
-    let mut repeated: Vec<usize> = Vec::new();
+    // Each match keeps the (edge, text) it matched against, not just its
+    // line index: a bare folio digit ("#") is generic enough that a run of
+    // ordinary numbered content elsewhere on the page -- a code listing's own
+    // line numbers, say -- can coincidentally recur across several *sampled*
+    // pages too, at a handful of similar-looking bottom-band offsets, and
+    // enter the profile as several more "#" entries alongside the real
+    // folio. That flood must not cost the page its genuine, independently
+    // corroborated matches (the running head, the byline) sharing the same
+    // edge -- see `too_many_for` below.
+    let mut repeated: Vec<(usize, Edge, String)> = Vec::new();
     for (i, line) in lines.iter().enumerate() {
         if mask[i] {
             continue;
@@ -1072,52 +1135,69 @@ fn furniture_mask(
             CellKind::Char(c) => Some((cell.bbox.x0, c)),
             CellKind::Image => None,
         });
-        let matched = text_segments(chars).into_iter().any(|segment| {
+        let matched = text_segments(chars).into_iter().find_map(|segment| {
             let text = normalise_furniture_text(&segment);
             if text.is_empty() {
-                return false;
+                return None;
             }
             let folio = is_folio_text(&text);
-            let Some((edge, offset)) = band_of_with_folio(styles[i].baseline, page_height, folio)
-            else {
-                return false;
-            };
-            profile.entries.iter().any(|e| {
+            let (edge, offset) = band_of_with_folio(styles[i].baseline, page_height, folio)?;
+            // Outside the margin band entirely: never furniture, no matter
+            // how well the text matches -- the band gate itself never
+            // widens (see `mask_does_not_use_the_deeper_band_for_non_folio_text`).
+            let strict = profile.entries.iter().any(|e| {
                 e.text == text && e.edge == edge && (e.offset - offset).abs() <= BASELINE_TOLERANCE
-            })
+            });
+            // Still in the margin band, but the strict offset match failed --
+            // this page's own margin baseline may simply have drifted a few
+            // points from its siblings. An exact text match against an
+            // already-established profile entry is corroboration enough to
+            // accept a looser offset window here; it never accepts on
+            // position alone, and a line the band gate above already
+            // rejected never reaches this fallback at all.
+            let relaxed = strict
+                || profile.entries.iter().any(|e| {
+                    e.text == text
+                        && e.edge == edge
+                        && (e.offset - offset).abs() <= RELAXED_BASELINE_TOLERANCE
+                });
+            relaxed.then_some((edge, text))
         });
-        if matched {
-            repeated.push(i);
+        if let Some((edge, text)) = matched {
+            repeated.push((i, edge, text));
         }
     }
 
-    // Beyond these bounds the evidence is not credible: leave the page alone.
-    let per_edge = |edge: Edge| {
+    // Beyond these bounds the evidence for *this text* is not credible on
+    // this edge: leave those lines alone. Scoped per (edge, text) rather
+    // than to the edge as a whole, so a generic, over-matching text like a
+    // bare folio digit cannot take a differently-texted, individually
+    // credible match down with it.
+    let too_many_for = |edge: Edge, text: &str| {
         repeated
             .iter()
-            .filter(|&&i| {
-                let folio = is_folio_text(&normalise_furniture_text(&line_text(&lines[i])));
-                band_of_with_folio(styles[i].baseline, page_height, folio).map(|b| b.0)
-                    == Some(edge)
-            })
+            .filter(|(_, e, t)| *e == edge && t == text)
             .count()
+            > MAX_FURNITURE_PER_EDGE
     };
-    // The per-edge cap is the real bound and applies always. The share cap is
-    // only meaningful once a page has enough lines for a share to mean
-    // anything — a short page is legitimately a third furniture.
-    //
-    // The repetition rule may never take a page's last line. A margin is only
-    // a margin if there is something it is in the margin *of*, and the failure
-    // this prevents is the worst one available: text plainly visible on the
-    // page that the caret cannot reach at all.
+    // The whole-page guards stay aggregate: text plainly visible on the page
+    // that the caret cannot reach at all is the worst failure this feature
+    // could produce, and a page that is *mostly* repeated lines, whatever
+    // their text, is exactly that failure regardless of how the matches are
+    // spread across texts. The share cap only applies once a page has enough
+    // lines for a share to mean anything -- a short page is legitimately a
+    // third furniture.
     let share_applies = lines.len() >= MIN_LINES_FOR_SHARE_CAP;
-    let too_many = repeated.len() == lines.len()
-        || per_edge(Edge::Top) > MAX_FURNITURE_PER_EDGE
-        || per_edge(Edge::Bottom) > MAX_FURNITURE_PER_EDGE
-        || (share_applies && repeated.len() as f32 > MAX_FURNITURE_SHARE * lines.len() as f32);
-    if !too_many {
-        for i in repeated {
-            mask[i] = true;
+    if repeated.len() == lines.len()
+        || (share_applies && repeated.len() as f32 > MAX_FURNITURE_SHARE * lines.len() as f32)
+    {
+        return mask;
+    }
+    // The repetition rule may never take a page's last line. A margin is only
+    // a margin if there is something it is in the margin *of*.
+    for (i, edge, text) in &repeated {
+        if !too_many_for(*edge, text) {
+            mask[*i] = true;
         }
     }
     mask
@@ -1219,6 +1299,13 @@ const LIST_INDENT_EPS: f32 = 1.0;
 /// A gap larger than this many line heights ends the item: an indented block
 /// that far below merely follows the list.
 const LIST_GAP_FACTOR: f32 = 1.5;
+
+/// Multiplier applied to the largest continuation gap actually observed
+/// elsewhere in the same list, when calibrating the *last* item's own gap
+/// guard (see [`list_items`]). Looser than 1.0 so the last item's own
+/// leading, which can run a touch larger than another item's by ordinary
+/// typesetting jitter, is not itself mistaken for a paragraph break.
+const LIST_GAP_CALIBRATION_SLACK: f32 = 1.5;
 
 /// No item may claim more than this many lines beyond its marker. Marker
 /// corroboration is page-wide, so a stray pair of marker-shaped lines can
@@ -1332,45 +1419,134 @@ fn list_items(lines: &[ContentLine], blocked: &[ContentObject]) -> Vec<(usize, u
     // wrapped continuation. The prose after a list returns to the marker's own
     // margin, which is precisely where the last item has to stop.
     let is_marker = |i: usize| starts.iter().any(|&(s, _)| s == i);
-    starts
+    let mut items: Vec<(usize, usize)> = starts
         .iter()
         .map(|&(start, marker_x)| {
-            let mut end = start;
-            for j in start + 1..lines.len() {
-                // Corroboration is page-wide, so a stray pair of marker-shaped
-                // lines can exist. Cap how much one is allowed to claim.
-                if j - start > LIST_ITEM_MAX_LINES {
-                    break;
-                }
-                if is_marker(j) || blocked_at(j) || lines[j].cells.is_empty() {
-                    break;
-                }
-                let previous = lines[end].bbox;
-                let current = lines[j].bbox;
-                let height = (previous.y1 - previous.y0).max(1.0);
-                // Moving back up the page by more than a line is a new column
-                // or region, and the top of the next column is trivially
-                // "indented past" a marker in the left one — without this an
-                // item swallows it. The tolerance matters: a bullet's own box
-                // starts a point or two below its text's, because the glyph is
-                // small and the text has ascenders, so an exact test would cut
-                // every item off at its marker.
-                if previous.y0 - current.y0 > height {
-                    break;
-                }
-                // A wide gap means the block below merely follows the list
-                // rather than belonging to its last item.
-                if current.y0 - previous.y1 > LIST_GAP_FACTOR * height {
-                    break;
-                }
-                if current.x0 <= marker_x + LIST_INDENT_EPS {
-                    break;
-                }
-                end = j;
-            }
-            (start, end)
+            (
+                start,
+                extend_item(lines, &is_marker, &blocked_at, start, marker_x, None),
+            )
         })
-        .collect()
+        .collect();
+
+    // Every item but the last stops at a hard boundary: the next marker. The
+    // last has none, so it falls back to the gap and indent guards above —
+    // and on a list whose marker sits left of the body column, ordinary
+    // prose (including a new paragraph's own first line) can sit to the
+    // right of the marker exactly like a genuine continuation would,
+    // leaving the gap guard as the only real defence. `LIST_GAP_FACTOR`,
+    // calibrated against one line's own height, is looser than the leading
+    // between an item's *own* wrapped lines tends to be — loose enough that
+    // a modest inter-paragraph gap slips underneath it.
+    //
+    // Other items in the same list are trustworthy calibration evidence for
+    // what a genuine continuation gap looks like here: a non-last item is
+    // always ultimately bounded by the next marker regardless of the gap
+    // guard, so an imprecise guard can only ever under-extend it, never
+    // swallow a real paragraph the way it can for the last item. Recompute
+    // only the last item, with its gap guard tightened to a multiple of the
+    // largest continuation gap actually observed among the others — the
+    // max, not a median, biased toward not over-tightening a genuine
+    // continuation. A list with nothing to calibrate against (no other item
+    // wraps) is left exactly as computed above: zero behaviour change when
+    // there is no evidence to act on.
+    if let Some(last_idx) = items.len().checked_sub(1) {
+        let max_observed_gap = items[..last_idx]
+            .iter()
+            .filter(|&&(s, e)| e > s)
+            .flat_map(|&(s, e)| (s..e).map(move |k| lines[k + 1].bbox.y0 - lines[k].bbox.y1))
+            .fold(None::<f32>, |acc, gap| {
+                Some(acc.map_or(gap, |a| a.max(gap)))
+            });
+        if let Some(max_observed_gap) = max_observed_gap {
+            let (start, marker_x) = starts[last_idx];
+            let cap = LIST_GAP_CALIBRATION_SLACK * max_observed_gap;
+            items[last_idx] = (
+                start,
+                extend_item(lines, &is_marker, &blocked_at, start, marker_x, Some(cap)),
+            );
+        }
+    }
+    items
+}
+
+/// One list item's line extent, from its marker through however many
+/// following lines are indented past it — see [`list_items`].
+///
+/// `gap_cap`, when given, is an additional break threshold checked alongside
+/// [`LIST_GAP_FACTOR`]: whichever guard fires first ends the item. `None`
+/// reproduces the plain, uncalibrated extent every item starts from.
+fn extend_item(
+    lines: &[ContentLine],
+    is_marker: &impl Fn(usize) -> bool,
+    blocked_at: &impl Fn(usize) -> bool,
+    start: usize,
+    marker_x: f32,
+    gap_cap: Option<f32>,
+) -> usize {
+    let mut end = start;
+    for j in start + 1..lines.len() {
+        // Corroboration is page-wide, so a stray pair of marker-shaped lines
+        // can exist. Cap how much one is allowed to claim.
+        if j - start > LIST_ITEM_MAX_LINES {
+            break;
+        }
+        if is_marker(j) || blocked_at(j) || lines[j].cells.is_empty() {
+            break;
+        }
+        let previous = lines[end].bbox;
+        let current = lines[j].bbox;
+        let height = (previous.y1 - previous.y0).max(1.0);
+        // Moving back up the page by more than a line is a new column or
+        // region, and the top of the next column is trivially "indented
+        // past" a marker in the left one — without this an item swallows
+        // it. The tolerance matters: a bullet's own box starts a point or
+        // two below its text's, because the glyph is small and the text has
+        // ascenders, so an exact test would cut every item off at its
+        // marker.
+        if previous.y0 - current.y0 > height {
+            break;
+        }
+        // A wide gap means the block below merely follows the list rather
+        // than belonging to its last item.
+        if current.y0 - previous.y1 > LIST_GAP_FACTOR * height {
+            break;
+        }
+        if let Some(cap) = gap_cap {
+            if current.y0 - previous.y1 > cap {
+                break;
+            }
+        }
+        if current.x0 <= marker_x + LIST_INDENT_EPS {
+            break;
+        }
+        end = j;
+    }
+    end
+}
+
+/// The type size most of a page's characters are set in, weighted by
+/// character count over the given `inked` (non-blank, sized) lines.
+///
+/// Body text dominates by character count on essentially every page,
+/// including title pages, which makes this far steadier than an average or a
+/// median. Shared by [`heading_ranges`] (a heading reads noticeably *larger*
+/// than this) and [`footnote_ranges`] (a footnote reads noticeably
+/// *smaller*) so the two detectors' notion of "the body" cannot drift apart.
+fn dominant_body_size(lines: &[ContentLine], styles: &[LineStyle], inked: &[usize]) -> f32 {
+    let mut weights: Vec<(i32, usize)> = Vec::new();
+    for &i in inked {
+        let bucket = (styles[i].size * 10.0).round() as i32;
+        let weight = lines[i].cells.len();
+        match weights.iter_mut().find(|(b, _)| *b == bucket) {
+            Some((_, w)) => *w += weight,
+            None => weights.push((bucket, weight)),
+        }
+    }
+    weights
+        .iter()
+        .max_by_key(|(bucket, w)| (*w, *bucket))
+        .map_or(0.0, |(bucket, _)| *bucket as f32 / 10.0)
 }
 
 /// How much larger than the body text a line must be set to read as a heading.
@@ -1412,22 +1588,7 @@ fn heading_ranges(lines: &[ContentLine], styles: &[LineStyle]) -> Vec<(usize, us
         return Vec::new();
     }
 
-    // Body size: the size most of the page's characters are set in. Body text
-    // dominates by character count on essentially every page, including title
-    // pages, which makes this far steadier than an average or a median.
-    let mut weights: Vec<(i32, usize)> = Vec::new();
-    for &i in &inked {
-        let bucket = (styles[i].size * 10.0).round() as i32;
-        let weight = lines[i].cells.len();
-        match weights.iter_mut().find(|(b, _)| *b == bucket) {
-            Some((_, w)) => *w += weight,
-            None => weights.push((bucket, weight)),
-        }
-    }
-    let body = weights
-        .iter()
-        .max_by_key(|(bucket, w)| (*w, *bucket))
-        .map_or(0.0, |(bucket, _)| *bucket as f32 / 10.0);
+    let body = dominant_body_size(lines, styles, &inked);
     let widest = inked
         .iter()
         .map(|&i| lines[i].bbox.x1 - lines[i].bbox.x0)
@@ -1535,6 +1696,75 @@ fn is_numbered_heading_text(text: &str) -> bool {
         chars.next();
     }
     saw_space && chars.next().is_some_and(|c| c.is_alphanumeric())
+}
+
+/// How much smaller than the body text a line must be set to read as a
+/// footnote — the mirror of [`HEADING_SIZE_FACTOR`].
+const FOOTNOTE_SIZE_FACTOR: f32 = 0.92;
+
+/// How much of the bottom of the page counts as footnote territory. Deeper
+/// than a folio's margin band: a footnote block is often several lines tall
+/// and can start well above the strict margin a running head or page number
+/// sits in.
+const FOOTNOTE_BAND_SHARE: f32 = 0.30;
+
+/// If more than this share of a page's lines look like footnotes, none of
+/// them do — the same escape hatch [`HEADING_MAX_SHARE`] and
+/// `EQUATION_MAX_SHARE` give their own detectors.
+const FOOTNOTE_MAX_SHARE: f32 = 0.5;
+
+/// Find footnote blocks at the foot of a page, as inclusive
+/// `(start_line, end_line)` ranges.
+///
+/// Pure, like [`heading_ranges`]/`equation_ranges`, so the thresholds below
+/// are testable without MuPDF.
+///
+/// A line reads as a footnote when it sits in the page's bottom margin band
+/// *and* is set noticeably smaller than the page's body size — the mirror of
+/// `heading_ranges`' larger-than-body rule. Contiguous flagged lines merge
+/// into one block, the way an aligned equation system does.
+fn footnote_ranges(
+    lines: &[ContentLine],
+    styles: &[LineStyle],
+    page_height: f32,
+) -> Vec<(usize, usize)> {
+    if page_height <= 0.0 {
+        return Vec::new();
+    }
+    let inked: Vec<usize> = (0..lines.len())
+        .filter(|&i| !lines[i].cells.is_empty() && styles.get(i).is_some_and(|s| s.size > 0.0))
+        .collect();
+    if inked.is_empty() {
+        return Vec::new();
+    }
+    let body = dominant_body_size(lines, styles, &inked);
+    if body <= 0.0 {
+        return Vec::new();
+    }
+    let bottom_threshold = (1.0 - FOOTNOTE_BAND_SHARE) * page_height;
+
+    let is_footnote_line = |i: usize| {
+        styles[i].baseline >= bottom_threshold && styles[i].size <= body * FOOTNOTE_SIZE_FACTOR
+    };
+
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    let mut flagged = 0usize;
+    for &i in &inked {
+        if !is_footnote_line(i) {
+            continue;
+        }
+        flagged += 1;
+        let joins_previous = ranges.last().is_some_and(|&(_, end)| end + 1 == i);
+        match ranges.last_mut() {
+            Some(last) if joins_previous => last.1 = i,
+            _ => ranges.push((i, i)),
+        }
+    }
+
+    if flagged == 0 || flagged as f32 > FOOTNOTE_MAX_SHARE * inked.len() as f32 {
+        return Vec::new();
+    }
+    ranges
 }
 
 /// Fonts whose names say "this is mathematics". Matched as lower-case
@@ -1920,6 +2150,7 @@ fn content_objects(
     tables: &[Rect],
     headings: &[(usize, usize)],
     equations: &[(usize, usize)],
+    footnotes: &[(usize, usize)],
     furniture: &[ContentLine],
 ) -> Vec<ContentObject> {
     // The "claims the whole page" guards below must be judged against the
@@ -2030,6 +2261,31 @@ fn content_objects(
             .unwrap_or(lines[start].bbox);
         kept.push(ContentObject {
             kind: ObjectKind::Equation,
+            bbox,
+            start_line: start,
+            end_line: end,
+        });
+    }
+
+    // Footnotes are found before list items, deliberately: a footnote's own
+    // citation-style text (`12. Author, Title`) is often marker-shaped, and
+    // must not be misread as, or corrupt the extent of, an ordinary list —
+    // claiming its lines here keeps `list_items` from ever seeing them.
+    for &(start, end) in footnotes {
+        if end >= lines.len()
+            || kept
+                .iter()
+                .any(|o| start <= o.end_line && end >= o.start_line)
+        {
+            continue;
+        }
+        let bbox = lines[start..=end]
+            .iter()
+            .map(|l| l.bbox)
+            .reduce(|a, b| a.union(b))
+            .unwrap_or(lines[start].bbox);
+        kept.push(ContentObject {
+            kind: ObjectKind::Footnote,
             bbox,
             start_line: start,
             end_line: end,
@@ -2579,6 +2835,7 @@ mod tests {
                     cells: vec![Cell {
                         kind: CellKind::Char('x'),
                         bbox,
+                        synthetic: false,
                     }],
                 }
             })
@@ -2597,7 +2854,7 @@ mod tests {
     #[test]
     fn object_ranges_cover_the_lines_inside_a_table_box() {
         let lines = stacked_lines(10);
-        let objects = content_objects(&lines, &[], &[box_over(&lines, 3..=6)], &[], &[], &[]);
+        let objects = content_objects(&lines, &[], &[box_over(&lines, 3..=6)], &[], &[], &[], &[]);
         assert_eq!(objects.len(), 1);
         assert_eq!(objects[0].kind, ObjectKind::Table);
         assert_eq!((objects[0].start_line, objects[0].end_line), (3, 6));
@@ -2614,7 +2871,7 @@ mod tests {
         // Line 7 is 10pt tall; reach just past its centre, which is what makes
         // centre containment hand it over.
         table.y1 = lines[7].bbox.y0 + 6.0;
-        let objects = content_objects(&lines, &[], &[table], &[], &[], &[]);
+        let objects = content_objects(&lines, &[], &[table], &[], &[], &[], &[]);
         assert_eq!(objects.len(), 1, "objects: {objects:?}");
         assert_eq!((objects[0].start_line, objects[0].end_line), (3, 6));
         assert!(
@@ -2636,7 +2893,7 @@ mod tests {
         lines[7].bbox.y1 += shift;
         lines[7].cells[0].bbox = lines[7].bbox;
         let table = box_over(&lines, 3..=7);
-        let objects = content_objects(&lines, &[], &[table], &[], &[], &[]);
+        let objects = content_objects(&lines, &[], &[table], &[], &[], &[], &[]);
         assert_eq!(objects.len(), 1, "objects: {objects:?}");
         assert_eq!((objects[0].start_line, objects[0].end_line), (3, 6));
         assert!(
@@ -2665,11 +2922,12 @@ mod tests {
                     cells: vec![Cell {
                         kind: CellKind::Char('x'),
                         bbox,
+                        synthetic: false,
                     }],
                 }
             })
             .collect();
-        let objects = content_objects(&lines, &[], &[box_over(&lines, 0..=4)], &[], &[], &[]);
+        let objects = content_objects(&lines, &[], &[box_over(&lines, 0..=4)], &[], &[], &[], &[]);
         // The page is only the table here, so the "claims everything" guard
         // would fire; give it a sixth line of prose well clear of the box.
         assert_eq!(objects, vec![], "sanity: the page-claiming guard fires");
@@ -2687,9 +2945,18 @@ mod tests {
             cells: vec![Cell {
                 kind: CellKind::Char('x'),
                 bbox,
+                synthetic: false,
             }],
         });
-        let objects = content_objects(&with_prose, &[], &[box_over(&lines, 0..=4)], &[], &[], &[]);
+        let objects = content_objects(
+            &with_prose,
+            &[],
+            &[box_over(&lines, 0..=4)],
+            &[],
+            &[],
+            &[],
+            &[],
+        );
         assert_eq!(objects.len(), 1, "objects: {objects:?}");
         assert_eq!((objects[0].start_line, objects[0].end_line), (0, 4));
     }
@@ -2700,7 +2967,7 @@ mod tests {
         let mut table = box_over(&lines, 3..=6);
         // Reach back over line 2, just past its centre.
         table.y0 = lines[2].bbox.y1 - 6.0;
-        let objects = content_objects(&lines, &[], &[table], &[], &[], &[]);
+        let objects = content_objects(&lines, &[], &[table], &[], &[], &[], &[]);
         assert_eq!(objects.len(), 1, "objects: {objects:?}");
         assert_eq!((objects[0].start_line, objects[0].end_line), (3, 6));
         assert!(
@@ -2717,14 +2984,14 @@ mod tests {
         let lines = stacked_lines(10);
         let mut table = box_over(&lines, 4..=5);
         table.y0 = lines[4].bbox.y0 + 7.0;
-        let objects = content_objects(&lines, &[], &[table], &[], &[], &[]);
+        let objects = content_objects(&lines, &[], &[table], &[], &[], &[], &[]);
         assert_eq!(objects, vec![]);
     }
 
     #[test]
     fn object_ranges_reject_a_single_line_table() {
         let lines = stacked_lines(10);
-        let objects = content_objects(&lines, &[], &[box_over(&lines, 4..=4)], &[], &[], &[]);
+        let objects = content_objects(&lines, &[], &[box_over(&lines, 4..=4)], &[], &[], &[], &[]);
         assert_eq!(objects, vec![], "a one-line table is just a line");
     }
 
@@ -2733,7 +3000,7 @@ mod tests {
         // MuPDF's whole-page fallback fires on ordinary prose; this guard is
         // the only thing standing between it and unnavigable pages.
         let lines = stacked_lines(10);
-        let objects = content_objects(&lines, &[], &[box_over(&lines, 0..=9)], &[], &[], &[]);
+        let objects = content_objects(&lines, &[], &[box_over(&lines, 0..=9)], &[], &[], &[], &[]);
         assert_eq!(objects, vec![]);
     }
 
@@ -2749,7 +3016,7 @@ mod tests {
             x1: 210.0,
             y1: 172.0,
         };
-        let objects = content_objects(&lines, &[], &[table], &[], &[], &[]);
+        let objects = content_objects(&lines, &[], &[table], &[], &[], &[], &[]);
         assert_eq!(objects, vec![], "a gapped table must degrade, not guess");
     }
 
@@ -2763,6 +3030,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
         );
         assert_eq!(objects.len(), 1);
         assert_eq!((objects[0].start_line, objects[0].end_line), (2, 8));
@@ -2771,7 +3039,7 @@ mod tests {
     #[test]
     fn object_ranges_make_each_image_its_own_object() {
         let lines = stacked_lines(6);
-        let objects = content_objects(&lines, &[1, 4], &[], &[], &[], &[]);
+        let objects = content_objects(&lines, &[1, 4], &[], &[], &[], &[], &[]);
         assert_eq!(objects.len(), 2);
         assert!(objects.iter().all(|o| o.kind == ObjectKind::Image));
         assert_eq!((objects[0].start_line, objects[0].end_line), (1, 1));
@@ -2781,7 +3049,7 @@ mod tests {
     #[test]
     fn object_ranges_absorb_an_image_inside_a_table() {
         let lines = stacked_lines(10);
-        let objects = content_objects(&lines, &[5], &[box_over(&lines, 3..=6)], &[], &[], &[]);
+        let objects = content_objects(&lines, &[5], &[box_over(&lines, 3..=6)], &[], &[], &[], &[]);
         assert_eq!(objects.len(), 1, "the table is the enclosing unit");
         assert_eq!(objects[0].kind, ObjectKind::Table);
     }
@@ -2794,6 +3062,7 @@ mod tests {
             &[0, 15],
             &[box_over(&lines, 8..=11), box_over(&lines, 3..=5)],
             &[(17, 18)],
+            &[],
             &[],
             &[],
         );
@@ -2830,6 +3099,7 @@ mod tests {
                             x1: 106.0,
                             y1: y + 10.0,
                         },
+                        synthetic: false,
                     };
                     60
                 ],
@@ -2885,6 +3155,7 @@ mod tests {
                         x1: x + step,
                         y1: y + 10.0,
                     },
+                    synthetic: false,
                 };
                 x += step;
                 cell
@@ -3143,7 +3414,7 @@ mod tests {
         );
         let headings = heading_ranges(&lines, &styles);
         assert_eq!(headings, vec![(3, 3)]);
-        let objects = content_objects(&lines, &[], &[], &headings, &[], &[]);
+        let objects = content_objects(&lines, &[], &[], &headings, &[], &[], &[]);
         assert_eq!(objects.len(), 1);
         assert_eq!(objects[0].kind, ObjectKind::Heading);
         assert_eq!((objects[0].start_line, objects[0].end_line), (3, 3));
@@ -3233,7 +3504,15 @@ mod tests {
     fn object_ranges_drop_a_heading_that_overlaps_a_table() {
         // A bold, short line inside a table is a column header.
         let lines = stacked_lines(10);
-        let objects = content_objects(&lines, &[], &[box_over(&lines, 3..=6)], &[(4, 4)], &[], &[]);
+        let objects = content_objects(
+            &lines,
+            &[],
+            &[box_over(&lines, 3..=6)],
+            &[(4, 4)],
+            &[],
+            &[],
+            &[],
+        );
         assert_eq!(objects.len(), 1);
         assert_eq!(objects[0].kind, ObjectKind::Table);
     }
@@ -3241,7 +3520,15 @@ mod tests {
     #[test]
     fn object_ranges_keep_a_heading_outside_every_table() {
         let lines = stacked_lines(10);
-        let objects = content_objects(&lines, &[], &[box_over(&lines, 5..=8)], &[(1, 2)], &[], &[]);
+        let objects = content_objects(
+            &lines,
+            &[],
+            &[box_over(&lines, 5..=8)],
+            &[(1, 2)],
+            &[],
+            &[],
+            &[],
+        );
         assert_eq!(objects.len(), 2);
         assert_eq!(objects[0].kind, ObjectKind::Heading);
         assert_eq!((objects[0].start_line, objects[0].end_line), (1, 2));
@@ -3431,6 +3718,249 @@ mod tests {
             .all(|o| o.kind != ObjectKind::Heading));
     }
 
+    // ---- Footnotes ---------------------------------------------------------
+
+    #[test]
+    fn footnote_ranges_flags_undersized_text_in_the_bottom_band() {
+        let (mut lines, mut styles) = body_lines(10, 400.0);
+        let y = 900.0;
+        lines.push(ContentLine {
+            bbox: Rect {
+                x0: 100.0,
+                y0: y,
+                x1: 180.0,
+                y1: y + 8.0,
+            },
+            cells: vec![
+                Cell {
+                    kind: CellKind::Char('x'),
+                    bbox: Rect {
+                        x0: 100.0,
+                        y0: y,
+                        x1: 106.0,
+                        y1: y + 8.0,
+                    },
+                    synthetic: false,
+                };
+                20
+            ],
+        });
+        styles.push(LineStyle {
+            size: 8.0,
+            bold: false,
+            math: 0.0,
+            angle: Some(0.0),
+            baseline: y + 6.0,
+        });
+        assert_eq!(footnote_ranges(&lines, &styles, 1000.0), vec![(10, 10)]);
+    }
+
+    #[test]
+    fn footnote_ranges_ignore_ordinary_body_text_near_the_foot() {
+        // Same bottom-band position as the line above, but set at the body's
+        // own size: a page that legitimately ends with body prose near the
+        // foot must not lose it to this heuristic.
+        let (mut lines, mut styles) = body_lines(10, 400.0);
+        let y = 900.0;
+        lines.push(ContentLine {
+            bbox: Rect {
+                x0: 100.0,
+                y0: y,
+                x1: 180.0,
+                y1: y + 10.0,
+            },
+            cells: vec![
+                Cell {
+                    kind: CellKind::Char('x'),
+                    bbox: Rect {
+                        x0: 100.0,
+                        y0: y,
+                        x1: 106.0,
+                        y1: y + 10.0,
+                    },
+                    synthetic: false,
+                };
+                20
+            ],
+        });
+        styles.push(LineStyle {
+            size: 10.0,
+            bold: false,
+            math: 0.0,
+            angle: Some(0.0),
+            baseline: y + 8.0,
+        });
+        assert_eq!(
+            footnote_ranges(&lines, &styles, 1000.0),
+            Vec::<(usize, usize)>::new()
+        );
+    }
+
+    #[test]
+    fn footnote_ranges_reject_a_page_that_is_mostly_small_type() {
+        // Two real body lines carry most of the page's character weight, so
+        // the body size is still correctly computed as 10pt even though
+        // three short, small-type lines crowding the bottom band outnumber
+        // them by *line* count -- the same share guard `heading_ranges` and
+        // `equation_ranges` give their own detectors.
+        let mut lines = Vec::new();
+        let mut styles = Vec::new();
+        for i in 0..2 {
+            let y = 100.0 + i as f32 * 12.0;
+            lines.push(ContentLine {
+                bbox: Rect {
+                    x0: 100.0,
+                    y0: y,
+                    x1: 460.0,
+                    y1: y + 10.0,
+                },
+                cells: vec![
+                    Cell {
+                        kind: CellKind::Char('x'),
+                        bbox: Rect {
+                            x0: 100.0,
+                            y0: y,
+                            x1: 106.0,
+                            y1: y + 10.0,
+                        },
+                        synthetic: false,
+                    };
+                    60
+                ],
+            });
+            styles.push(LineStyle {
+                size: 10.0,
+                bold: false,
+                math: 0.0,
+                angle: Some(0.0),
+                baseline: y + 8.0,
+            });
+        }
+        for i in 0..3 {
+            let y = 900.0 + i as f32 * 10.0;
+            lines.push(ContentLine {
+                bbox: Rect {
+                    x0: 100.0,
+                    y0: y,
+                    x1: 140.0,
+                    y1: y + 8.0,
+                },
+                cells: vec![
+                    Cell {
+                        kind: CellKind::Char('x'),
+                        bbox: Rect {
+                            x0: 100.0,
+                            y0: y,
+                            x1: 106.0,
+                            y1: y + 8.0,
+                        },
+                        synthetic: false,
+                    };
+                    5
+                ],
+            });
+            styles.push(LineStyle {
+                size: 8.0,
+                bold: false,
+                math: 0.0,
+                angle: Some(0.0),
+                baseline: y + 6.0,
+            });
+        }
+        assert_eq!(
+            footnote_ranges(&lines, &styles, 1000.0),
+            Vec::<(usize, usize)>::new()
+        );
+    }
+
+    #[test]
+    fn content_objects_promote_a_footnote_range() {
+        let (mut lines, mut styles) = body_lines(10, 400.0);
+        let y = 900.0;
+        lines.push(ContentLine {
+            bbox: Rect {
+                x0: 100.0,
+                y0: y,
+                x1: 180.0,
+                y1: y + 8.0,
+            },
+            cells: vec![
+                Cell {
+                    kind: CellKind::Char('x'),
+                    bbox: Rect {
+                        x0: 100.0,
+                        y0: y,
+                        x1: 106.0,
+                        y1: y + 8.0,
+                    },
+                    synthetic: false,
+                };
+                20
+            ],
+        });
+        styles.push(LineStyle {
+            size: 8.0,
+            bold: false,
+            math: 0.0,
+            angle: Some(0.0),
+            baseline: y + 6.0,
+        });
+        let footnotes = footnote_ranges(&lines, &styles, 1000.0);
+        assert_eq!(footnotes, vec![(10, 10)]);
+        let objects = content_objects(&lines, &[], &[], &[], &[], &footnotes, &[]);
+        assert_eq!(objects.len(), 1);
+        assert_eq!(objects[0].kind, ObjectKind::Footnote);
+        assert_eq!((objects[0].start_line, objects[0].end_line), (10, 10));
+    }
+
+    #[test]
+    fn a_footnote_line_is_never_read_as_a_list_marker() {
+        // A footnote's own citation text is often enumerator-shaped ("12.
+        // Author, Title") and can land aligned with a real list elsewhere on
+        // the page. Footnotes are claimed before list detection runs
+        // precisely so this can never be misread as a third item of that
+        // list -- see the ordering note in `content_objects`.
+        let (mut lines, mut styles) = body_lines(6, 400.0);
+        set_text(&mut lines, &mut styles, 2, "1. first list item", 180.0, 0.0);
+        set_text(
+            &mut lines,
+            &mut styles,
+            3,
+            "2. second list item",
+            180.0,
+            0.0,
+        );
+        let y = 900.0;
+        lines.push(text_line_at(y, "12. Author, Title"));
+        styles.push(LineStyle {
+            size: 8.0,
+            bold: false,
+            math: 0.0,
+            angle: Some(0.0),
+            baseline: y,
+        });
+
+        let footnotes = footnote_ranges(&lines, &styles, 1000.0);
+        assert_eq!(
+            footnotes,
+            vec![(6, 6)],
+            "the footnote line itself must be detected"
+        );
+        let objects = content_objects(&lines, &[], &[], &[], &[], &footnotes, &[]);
+        assert!(
+            objects
+                .iter()
+                .any(|o| o.kind == ObjectKind::Footnote && o.start_line == 6),
+            "objects: {objects:?}"
+        );
+        assert!(
+            !objects
+                .iter()
+                .any(|o| o.kind == ObjectKind::ListItem && o.start_line == 6),
+            "the footnote's own text must not become a third list item: {objects:?}"
+        );
+    }
+
     // ---- Lists -----------------------------------------------------------
 
     #[test]
@@ -3545,6 +4075,30 @@ mod tests {
         ];
         indent(&mut lines[2], 10.0);
         assert_eq!(list_items(&lines, &[]), vec![(0, 0), (1, 2)]);
+    }
+
+    #[test]
+    fn the_last_item_stops_at_a_gap_the_height_guard_would_have_missed() {
+        // A hanging-indent list, as in a real repro: body text (including a
+        // new paragraph's own first line) sits to the right of the markers,
+        // so the indent guard alone can never end the last item there -- see
+        // "A list item always starts a sentence" in the dev log for the
+        // same shape. Both items wrap with a tight ~4pt continuation gap;
+        // the prose that follows the list sits at that same indent, with an
+        // 8pt gap -- under LIST_GAP_FACTOR * height (12pt here, so the old,
+        // uncalibrated guard lets it through) but over the item's own
+        // observed ~4pt continuation gap once calibrated.
+        let mut lines = vec![
+            text_line_at(20.0, "\u{2022} the first file"),
+            text_line_at(32.0, "wrapped onto a second line"),
+            text_line_at(44.0, "\u{2022} the second file"),
+            text_line_at(56.0, "wrapped onto a second line too"),
+            text_line_at(72.0, "Each of them is regenerated in turn."),
+        ];
+        indent(&mut lines[1], 10.0);
+        indent(&mut lines[3], 10.0);
+        indent(&mut lines[4], 10.0);
+        assert_eq!(list_items(&lines, &[]), vec![(0, 1), (2, 3)]);
     }
 
     #[test]
@@ -3672,6 +4226,7 @@ mod tests {
             (ObjectKind::Equation, false, true, true, true),
             (ObjectKind::Heading, false, false, true, true),
             (ObjectKind::ListItem, false, false, false, false),
+            (ObjectKind::Footnote, false, true, false, true),
         ];
         for (kind, atomic, block, one_sentence, splits) in matrix {
             assert_eq!(kind.is_atomic(), atomic, "{kind:?}: is_atomic");
@@ -3925,6 +4480,7 @@ mod tests {
                     x1: 106.0 + i as f32 * 6.0,
                     y1: y,
                 },
+                synthetic: false,
             })
             .collect();
         ContentLine {
@@ -3963,6 +4519,43 @@ mod tests {
         let mask = furniture_mask(&lines, &styles, height, Some(&profile));
         assert!(mask[0]);
         assert!(mask[1..].iter().all(|m| !m));
+    }
+
+    #[test]
+    fn mask_removes_a_running_head_whose_baseline_drifted_off_profile() {
+        // The profile learned this header at baseline 42.0 from other pages,
+        // but this page's own content nudged it to 47.0 -- a 5pt drift, past
+        // BASELINE_TOLERANCE (2.5) but inside RELAXED_BASELINE_TOLERANCE
+        // (8.0), and nowhere near leaving the margin band itself.
+        let height = 842.0;
+        let (mut lines, mut styles) = page_lines(10, height);
+        lines[0] = text_line_at(47.0, "shared mime info database");
+        styles[0].baseline = 47.0;
+        let profile = profile_of(&[("shared mime info database", Edge::Top, 42.0)]);
+        let mask = furniture_mask(&lines, &styles, height, Some(&profile));
+        assert!(
+            mask[0],
+            "a few points of baseline drift must not defeat the match"
+        );
+        assert!(mask[1..].iter().all(|m| !m));
+    }
+
+    #[test]
+    fn mask_still_ignores_text_whose_offset_drifted_past_the_relaxed_tolerance() {
+        // Same profile, but this page's line drifted 20pt from it -- still
+        // comfortably inside the margin band, but past even the relaxed
+        // window. The relaxed fallback must stay bounded, not accept any
+        // in-band drift.
+        let height = 842.0;
+        let (mut lines, mut styles) = page_lines(10, height);
+        lines[0] = text_line_at(62.0, "shared mime info database");
+        styles[0].baseline = 62.0;
+        let profile = profile_of(&[("shared mime info database", Edge::Top, 42.0)]);
+        let mask = furniture_mask(&lines, &styles, height, Some(&profile));
+        assert!(
+            mask.iter().all(|m| !m),
+            "drift beyond the relaxed tolerance must not match: {mask:?}"
+        );
     }
 
     #[test]
@@ -4110,6 +4703,39 @@ mod tests {
     }
 
     #[test]
+    fn mask_caps_the_repetition_rule_per_text_not_per_edge() {
+        // A bare folio digit ("#" once normalised) is generic enough that an
+        // unrelated numbered code listing elsewhere in the document can
+        // coincidentally recur across sampled pages too, entering the
+        // profile as several more "#" entries at various bottom-band
+        // offsets alongside the real folio. On a page whose own numbered
+        // content matches several of those, the flood must not take down a
+        // completely different, individually credible match sharing the
+        // bottom -- or, as here, the top -- edge: the cap is scoped to the
+        // specific text that flooded, not the edge as a whole.
+        let height = 842.0;
+        let (mut lines, mut styles) = page_lines(24, height);
+        lines[0] = text_line_at(20.0, "shared mime info database");
+        styles[0].baseline = 20.0;
+        let mut entries = vec![("shared mime info database", Edge::Top, 20.0)];
+        for (i, y) in [800.0, 808.0, 816.0, 824.0].into_iter().enumerate() {
+            lines[i + 1] = text_line_at(y, "1");
+            styles[i + 1].baseline = y;
+            entries.push(("#", Edge::Bottom, height - y));
+        }
+        let profile = profile_of(&entries);
+        let mask = furniture_mask(&lines, &styles, height, Some(&profile));
+        assert!(
+            mask[0],
+            "the running head must survive an unrelated flood on another edge: {mask:?}"
+        );
+        assert!(
+            mask[1..5].iter().all(|m| !m),
+            "the flooding text itself must still be capped: {mask:?}"
+        );
+    }
+
+    #[test]
     fn mask_caps_the_repetition_rule_by_share() {
         // On a page with enough lines to judge, a quarter of them being
         // furniture means the evidence is not credible.
@@ -4172,6 +4798,7 @@ mod tests {
                     x1: x0 + 6.0 + i as f32 * 6.0,
                     y1: y,
                 },
+                synthetic: false,
             })
             .collect();
         ContentLine {
@@ -4247,7 +4874,7 @@ mod tests {
         ];
         // Pretend line 0 was furniture: the image at old index 2 must land at 1.
         let kept: Vec<ContentLine> = lines[1..].to_vec();
-        let objects = content_objects(&kept, &[1], &[], &[], &[], &lines[..1]);
+        let objects = content_objects(&kept, &[1], &[], &[], &[], &[], &lines[..1]);
         let image = objects
             .iter()
             .find(|o| o.kind == ObjectKind::Image)
@@ -4263,7 +4890,7 @@ mod tests {
         let body: Vec<ContentLine> = all[..10].to_vec();
         let furniture: Vec<ContentLine> = all[10..].to_vec();
         let table = box_over(&body, 0..=9);
-        let objects = content_objects(&body, &[], &[table], &[], &[], &furniture);
+        let objects = content_objects(&body, &[], &[table], &[], &[], &[], &furniture);
         assert_eq!(
             objects
                 .iter()

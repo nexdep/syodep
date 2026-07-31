@@ -7,6 +7,420 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-07-31 — The furniture cap, scoped to the text that actually floods
+
+Re-verifying "A drifted running head is still the running head" (below)
+against the real document it was written for turned up a second page still
+failing — not from baseline drift at all. Every baseline matched the profile
+to a fraction of a point; the actual mechanism was entirely different, and
+this entry is the honest correction.
+
+The page in question carries a long run of bare `#`-normalised line numbers
+from a code listing near its foot — the same shape MuPDF gives a folio. A
+handful of *other* sampled pages carry similar numbered listings at broadly
+similar bottom-band positions, so `build_profile` had learned several extra
+`("#", Bottom, offset)` entries alongside the real folio's — false signal,
+indistinguishable from the genuine one by text or shape alone. On this page,
+most of those extra entries matched too, so `per_edge(Bottom)` sailed past
+`MAX_FURNITURE_PER_EDGE` — and because the cap was all-or-nothing *per edge*,
+tripping it discarded every Bottom match. Collateral damage was the real
+finding: the page's running head and byline sit on the **Top** edge, and
+should never have been touched by a Bottom-edge flood, but `too_many` was a
+single page-wide bool, so one edge's flood took the whole page's evidence
+down with it — the Top matches never even got to `mask[i] = true`.
+
+The fix scopes the cap to `(edge, text)` rather than to the edge alone.
+`repeated` now carries the text each line matched, not just its index, and
+`too_many_for(edge, text)` counts only that specific pairing. A bare `#`
+flooding the bottom is capped on its own; the running head and byline, an
+entirely different text on a different edge, are judged on their own
+evidence and stripped normally. The two whole-page guards — repetition
+claiming every line, and the share cap — stay aggregate on purpose: a page
+that is mostly repeated lines is the failure this feature exists to prevent,
+regardless of how many different texts make up that majority.
+
+One real limitation remains, deliberately not solved here: when the
+*genuine* folio shares its exact normalised text ("#") with the flooding
+entries, as it does on this page, there is no way to tell the two apart from
+text and edge alone, so the folio itself stays capped along with the noise.
+Losing a single-character page number is a far smaller failure than losing a
+multi-line running head and byline, so this was judged an acceptable
+trade — but a future pass could try corroborating on adjacent, *non*-folio
+text sharing the exact same offset, which the flooding entries here did not.
+
+### Tests
+
+`mask_caps_the_repetition_rule_per_text_not_per_edge` pins the fix directly:
+a running head on the Top edge plus four `#`-shaped lines flooding the
+Bottom edge, past the cap. The running head survives; the flooding text
+stays capped. The existing `mask_caps_the_repetition_rule_per_edge` and
+`mask_caps_the_repetition_rule_by_share` re-pass unchanged — both flood a
+single edge with a *single* text, which the new per-text scoping still
+catches identically to the old aggregate one.
+
+---
+
+## 2026-07-31 — Link recognition stitches across a document's own spacing, not only MuPDF's
+
+Re-verifying "A guessed space is not a word boundary" (below) against the
+real document it was written for found the fix incomplete in a specific way:
+neither the DOI in that PDF's "Program summary" box nor the abstract's own
+GitHub link had *any* `SYNTHETIC`-flagged cell in them at all. Every gap —
+`https://doi` |gap| `.org` |gap| `/10` |gap| `.17632` |gap| `/9p4kxc2cvd`
+|gap| `.1` — was a perfectly ordinary, literal space character in the
+content stream, geometrically identical in width to every real word-space on
+the same line (measured directly: both came out to 2.8pt). This document's
+own typesetting draws its URLs and DOIs with genuine spaces between path
+segments — nobody's guess, MuPDF's or otherwise, just how the PDF was made.
+Neither `synthetic` nor any geometric signal can tell such a gap apart from
+an ordinary one; there is no flag to propagate here, so the earlier fix,
+built entirely around MuPDF's `SYNTHETIC` bit, never had a chance to see it.
+
+The first attempt at extending `token_span` itself to swallow such gaps
+(treating a real space exactly like a synthetic one, once shape-gated)
+surfaced a sharper problem first: `token_span`'s *own* synthetic-skipping
+from the earlier fix had a false-positive nobody had hit yet. This document's
+DOI line has exactly one `SYNTHETIC`-flagged cell in it — the space right
+*before* `https`, joining the preceding prose (`files:`) onto the front of
+what should have been an independent link token, corrupting the very string
+`is_url_scheme` needs to see (`files:https` fails outright, since `:` is not
+a scheme character). `token_span` blindly not-splitting on *every* synthetic
+space, regardless of what it joined together, was always going to hit this
+eventually; a real document just got there first. `token_span` now splits on
+every whitespace cell again, synthetic or not — back to the simple, always-
+correct contract it had before that fix.
+
+Both problems point to the same conclusion: bridging a gap has to be a
+*local, re-validated* decision made by the specific rule that benefits from
+it, never a blanket "this kind of space doesn't count" applied at the
+boundary-finding stage. `link_at` now does its own gap-bridging, forward and
+backward, independent of `synthetic`:
+
+- `continuing_link_fragment`/`preceding_link_fragment` admit a *following*
+  or *preceding* token across a space — synthetic or real, no longer
+  distinguished — only when that token's own leading character is `.` or
+  `/`, the shape every continuation seen in practice shares (`.com`,
+  `/njoy`, `.17632`) and an ordinary next word never does.
+- Admission is not enough on its own: `link_at` re-runs `link_span` on the
+  concatenation after every extension and only keeps growing while the
+  match still reaches the far end of what has been gathered. A shape-gated
+  candidate that turns out not to look like a link once joined (`and` +
+  `/` → `and/`, which `link_span` does not recognise) simply stops the
+  extension there — the false-positive backstop is doubled, shape *and*
+  re-validated recognition, not shape alone.
+
+A second, less obvious gap: the shape gate only looks *forward* from
+wherever a caret already sits. `w` walking through a chain asks about the
+boundary between `.org` and the space before `/10` exactly as often as it
+asks about the boundary right after `https://doi` — and `token_span` queried
+from inside `.org` resolves to just that one fragment, with no memory of
+what came before it. `link_at` now walks backward first
+(`preceding_link_fragment`, the mirror image) to find a chain's true
+beginning before extending forward from there, so it resolves to the same
+full span no matter which fragment of the chain the query landed in. And
+because `word_run_end` steps onto the joining space cell itself as it walks
+— at which point `token_span` correctly refuses to resolve *any* token,
+whitespace can never be "in" one — `same_word_run`'s link check now falls
+back to `link_at(right)` whenever `link_at(left)` finds nothing, so a query
+starting from the space itself still lands on the right chain.
+
+### Tests
+
+`a_url_survives_a_real_space_inside_it` pins the base case: the real
+document's own DOI shape, ordinary spaces throughout, recognised as one
+link. `a_link_resolves_the_same_span_from_any_fragment_of_a_real_space_chain`
+pins the backward-walk fix specifically — entered from inside `.org`, not
+`https`. `a_real_space_does_not_merge_ordinary_prose_around_a_slash` is the
+false-positive backstop: `and / or`, spaced on both sides the way English
+prose writes it, must not weld `and` onto the bare `/` — `link_span("and/")`
+does not recognise a link, so the extension never gets past its first
+attempt. The existing `a_url_survives_a_synthetic_space_inside_it` and
+`a_synthetic_space_does_not_merge_two_unrelated_words` re-pass unchanged: the
+gap-admission rules no longer care whether a space was synthetic, but a
+synthetic one still passes exactly the same shape gate a real one does, and
+still fails it the same way when the neighbour isn't link-shaped.
+
+---
+
+## 2026-07-31 — The last list item's gap guard, calibrated
+
+On a real article, selecting a list of prerequisite software (`\u{2022} git`,
+`\u{2022} CMake 3.15 or higher`, …) ran one line past its own end: the last
+bullet's region absorbed the first line of the paragraph that followed the
+list. Twice on the same page, always the last item, always exactly one line.
+
+Every item but the last stops at a hard boundary — the next marker. The last
+has none, so it falls back to `list_items`'s two local geometric guards: a
+gap check against `LIST_GAP_FACTOR * height`, where `height` is the
+*immediately preceding line's own height*, and an indent check against the
+marker's own x-position. On a hanging-indent list — markers left of the body
+column, the shape "A list item always starts a sentence" already found
+fragile below — ordinary prose sits to the right of the marker exactly like
+a genuine wrapped continuation would, so the indent guard can never fire
+there at all. That leaves the gap guard alone, and it is calibrated against
+one line's height rather than against what a continuation gap in *this*
+list actually looks like — loose enough (12pt here) that a modest
+inter-paragraph gap (8pt) slips underneath it, while the item's own real
+continuations run closer to 4pt.
+
+The fix doesn't touch the guard for any item but the last, and doesn't touch
+it at all unless there's real evidence to calibrate against. Every non-last
+item that wraps is trustworthy evidence of what a genuine continuation gap
+looks like in this particular list — trustworthy specifically because a
+non-last item is always ultimately bounded by the next marker regardless of
+how loose its gap guard is, so an imprecise guard can only ever *under*-reach
+for one of those, never swallow a paragraph the way it can for the last
+item. `list_items` now collects the largest such gap actually observed
+elsewhere in the list and, only for the last item, adds it — scaled by
+`LIST_GAP_CALIBRATION_SLACK` (1.5×, the same margin `LIST_GAP_FACTOR`
+already uses, so the last item's own leading is not itself mistaken for a
+break) — as a second, tighter break threshold alongside the existing one. A
+list where nothing else wraps has no evidence to offer, so the last item is
+left exactly as before: no behaviour change without a reason for one.
+
+The per-item extent loop moved into its own `extend_item`, taking the new
+threshold as an optional parameter, so every item can still be computed the
+same way and only the last gets a second pass.
+
+### A signal considered and rejected
+
+The other candidate signal was geometric rather than statistical: if a
+paragraph's own first line carries a typographic indent beyond its wrapped
+lines' margin, the line right after a wrongly-absorbed opener should sit
+*righter* than what follows it (`lines[j].x0 > lines[j+1].x0`), the mirror
+image of a genuine continuation. Checked by hand against
+`the_last_item_stops_where_the_list_ends` before writing any code: that
+test's genuine continuation line already sits righter than the paragraph
+line correctly following it — the identical shape, but correct there. That
+signal cannot tell "a wrongly-absorbed opener, followed by a genuine second
+line" apart from "a genuine last continuation, followed by a correctly
+excluded new paragraph" without some other anchor than "whatever comes
+next," and no such anchor was evident from the guards already in place.
+Recorded here rather than shipped, so it isn't rediscovered the hard way.
+
+### Tests
+
+`the_last_item_stops_at_a_gap_the_height_guard_would_have_missed` pins the
+fix: a hanging-indent, two-item list, each wrapping with a ~4pt
+continuation gap, followed by prose at the continuations' own indent with an
+8pt gap — under the old, uncalibrated 12pt threshold, over the calibrated
+6pt one. `the_last_item_stops_where_the_list_ends` (single wrapping item, no
+calibration evidence) re-passes unchanged, which is what pins "nothing to
+calibrate against leaves the old behaviour alone." The rest of the existing
+`list_items` suite re-passes unchanged too — none of those fixtures have a
+second wrapping item, so none of them exercise the new code path at all.
+
+---
+
+## 2026-07-31 — A guessed space is not a word boundary
+
+A DOI in a real article's "Program summary" box extracted as
+`https://doi .org /10 .17632 /9p4kxc2cvd .1` — spaces before every path
+separator that do not exist in the document's own text. Same thing in the
+abstract's own GitHub link. `w` stepped through each fragment as its own
+word, and `link_at` never recognised the address as a link at all, breaking
+focus and selection across it.
+
+The spaces are not syodep's doing, and not really the PDF's either: MuPDF's
+structured-text extractor inserts a *guessed* space between two glyphs drawn
+by separate positioning operations when the gap between them, as a fraction
+of font size, looks space-shaped (`SPACE_DIST`/`SPACE_MAX_DIST` in its vendored
+C). A PDF producer routinely draws a URL's path segments as separate `Tj`
+runs, so this fires constantly on exactly the tokens that most need to stay
+one word. MuPDF already flags every character it emits with this
+information — `TextCharFlags::SYNTHETIC` — but `page_content` discarded it;
+`Cell` had nowhere to keep it.
+
+`Cell` now carries `synthetic: bool`, set from `ch.flags()` at extraction
+time. Getting the caret side right took two separate changes, not one,
+because the two things a synthetic space breaks are reached differently:
+
+**Links and abbreviations** are recognised holistically — `token_span` finds
+the whole whitespace-delimited run first, then `link_span`/`is_abbreviation`
+look at it as a string. So the fix is at the boundary itself: `token_span`
+no longer treats a synthetic-space cell as ending a token, and `link_at`/
+`abbreviation_at` drop synthetic characters when building the string handed
+to the recognisers (which correctly reject any whitespace) while still
+returning a cell range that spans the full gap — a highlighted or selected
+link has no hole in it, even though the recogniser itself never saw the gap
+character.
+
+**Numbers, dotted identifiers and hyphenated compounds** are recognised by
+looking at the single character beside a separator (`is_number_interior`,
+`is_hyphen_interior`) — no holistic span to lean on. `9p4kxc2cvd<synthetic
+space>.1` needs its adjacency check to see past the gap: new
+`prev_real_cell_on_line`/`next_real_cell_on_line` step past exactly one
+synthetic-space cell. But `same_word_run` itself breaks on the very *first*
+adjacent pair that fails — `('d', <space>)` — before ever reaching the real
+separator two cells away, so the real-cell lookups alone were not enough;
+`same_word_run` needed its own bridge across that first hop.
+
+That bridge is deliberately narrow. `SYNTHETIC` is a general per-character
+signal, not URL-specific — a document where MuPDF individually positions
+every glyph (common LaTeX/Word exports) could get *ordinary* inter-word
+gaps flagged synthetic too. A version of this fix that let `same_word_run`
+fall through to the generic word-class rule on any synthetic neighbour would
+silently weld unrelated words together on such a document. So the bridge
+checks only the specific constructs already in `same_word_run`
+(`is_number_interior`, `is_hyphen_interior`, `is_number_suffix_at`) on the
+cell beyond the gap — never the generic `continues_word_run` fallback.
+`a_synthetic_space_does_not_merge_two_unrelated_words` pins this: an
+ordinary gap MuPDF happens to flag synthetic must still end the word exactly
+as a real space would.
+
+### Tests
+
+`a_dotted_token_survives_a_synthetic_space_before_its_separator`,
+`a_synthetic_space_does_not_merge_two_unrelated_words` (the false-merge
+regression), `a_url_survives_a_synthetic_space_inside_it`,
+`a_synthetic_space_does_not_end_a_sentence_inside_a_link` — the last one
+essentially free once `link_at` was fixed, since sentence-boundary detection
+already asks `is_inside_link` at every stop. New `app_with_synthetic_line`
+fixture, alongside `text_line_with_synthetic`, mark specific whitespace
+cells synthetic without touching the ~150 existing call sites of the
+unmarked `text_line`/`text_line_at` helpers in both crates.
+
+---
+
+## 2026-07-31 — Footnotes, and keeping them out of the way
+
+Footnotes had no detection at all. Footnote text at the foot of a page was
+ordinary body content, spliced into MuPDF's own block-emission order — which
+this codebase already uses directly as navigation order, with no separate
+reading-order pass — so it could sit right in the middle of a two-column
+page's flow. On a real document, one interrupted two consecutive numbered
+code listings: the caret walked out of the first listing, through an
+unrelated footnote's text, and into the second.
+
+### Detection
+
+`footnote_ranges` mirrors `heading_ranges`, inverted: a line reads as a
+footnote when it sits in the page's bottom margin band *and* is set
+noticeably *smaller* than the page's body size, rather than larger. Both
+detectors now share `dominant_body_size` — the character-weighted-mode
+computation that used to live only inside `heading_ranges` — factored out so
+the two detectors' notion of "the body" cannot drift apart. Same escape
+hatch as every other typography-flagged detector here: if more than half a
+page's lines look like footnotes, none of them do.
+
+Footnotes are claimed in `content_objects` *before* list items are found —
+deliberately, and not merely for symmetry with the ordering of the other
+detectors. A footnote's own citation text is routinely enumerator-shaped
+(`12. Author, Title`), and left unclaimed it can align with, and get pulled
+into, an unrelated list elsewhere on the page. `a_footnote_line_is_never_read_as_a_list_marker`
+pins exactly this: a real two-item list plus a footnote whose own marker-shaped
+line sits at the same indent — without the ordering, `list_items` would read
+all three as one list.
+
+### What "one stop" means here, and what "skip" needs on top of it
+
+`ObjectKind::Footnote` takes the same four predicates as `Table` —
+`is_block()` but not `is_atomic()`, `is_one_sentence()`, or a paragraph of
+its own — not `Heading`'s shape, on purpose: a footnote is reachable only by
+*deliberately* walking into it with word or char scope, never by stepping
+through it line by line the way a heading's wrapped lines are real reading
+lines.
+
+That alone was not enough. "Must skip footnotes" turned out to mean
+something `is_block()` cannot express: reading through a page's ordinary
+body prose with `s`/`p` should cost a footnote *zero* stops, not the one
+stop a table gets (`sentence_span_does_not_run_into_a_table` already pins
+that a table costs `s` a stop of its own — the existing behavior a naive
+footnote implementation would have inherited for free, and which was
+exactly wrong here). None of the four `ObjectKind` predicates govern whether
+Sentence/Paragraph *auto-search* stops in a region at all — they only
+govern how a region behaves once a sentence run reaches it. So two new
+`App` predicates, `in_footnote`, are consulted only by the auto-search loops
+(`step_next_sentence_start`, `step_prev_sentence_start`,
+`first_sentence_start_on_page`, `paragraph_step_next`,
+`paragraph_step_prev`), never by `sentence_run_start`/`sentence_run_end`.
+That split is what keeps deliberate entry unaffected: a caret walked onto a
+footnote's own line with `cc`/`cw` still expands and steps through its
+sentences exactly as it would anywhere else — only the automatic
+forward/backward search treats the block as invisible, skipping every line
+of it and continuing until it finds real body text (or the next page, via
+the same cross-page fallback the unmodified search already had).
+
+Word, char and line motion needed no code at all: a footnote stays in
+`content.lines`, unlike furniture (which `skip_page_furniture` removes
+outright) — it is real reading matter a reader may want, just out of the way
+of ordinary reading.
+
+### New `[view]` option
+
+`detect_footnotes` (default `true`), following the same shape as
+`detect_tables`/`detect_headings`/`detect_equations`: free to extract, a
+heuristic, and independently switchable.
+
+### Tests
+
+`crates/syodep-pdf`: `footnote_ranges_flags_undersized_text_in_the_bottom_band`,
+`footnote_ranges_ignore_ordinary_body_text_near_the_foot`,
+`footnote_ranges_reject_a_page_that_is_mostly_small_type`,
+`content_objects_promote_a_footnote_range`,
+`a_footnote_line_is_never_read_as_a_list_marker`.
+`crates/syodep-core`: `sentence_next_skips_a_footnote_block_entirely`,
+`paragraph_next_skips_a_footnote_block_entirely` (both contrast directly with
+the table's single-stop behavior), `word_motion_can_still_step_into_a_footnote`,
+`a_sentence_started_inside_a_footnote_still_expands_normally` (pins that
+deliberate entry is unaffected by the auto-search skip).
+
+---
+
+## 2026-07-31 — A drifted running head is still the running head
+
+On a real ten-page article, the running head, folio and byline that were
+correctly stripped as furniture on every neighbouring page came through as
+ordinary body lines on one page in the middle — the caret walked straight
+through "Computer Physics Communications 303 (2024) 109245" at the top of the
+page before reaching any real content. Same text, same document, same
+profile; one page just didn't match.
+
+`furniture_mask` gates a candidate line through `band_of_with_folio` (is it
+even in the top/bottom margin band?) and then, only for lines that pass,
+compares its baseline offset against the profile's recorded offset within
+`BASELINE_TOLERANCE` — 2.5 points, no aggregation, a single recorded value
+from whichever sampled page first produced the entry. That page's own content
+had nudged the header's baseline a few points from its siblings — plausibly
+its own text pushing things down, or a MediaBox/rounding quirk — comfortably
+inside the margin band but just outside the tolerance. Binary failure: no
+partial credit, nothing surfaced, the header simply stopped being furniture.
+
+The fix is not a wider band. `mask_does_not_use_the_deeper_band_for_non_folio_text`
+already pins why: body text near the foot of a page that happens to share
+text and offset with a profile entry must *not* become furniture, and
+widening `BAND_SHARE` risks exactly that. What's actually safe to loosen is
+the offset check, and only once a line has already cleared the band gate:
+`furniture_mask` now tries the strict `BASELINE_TOLERANCE` first and, on
+failure, retries the very same in-band `(edge, offset)` against
+`RELAXED_BASELINE_TOLERANCE` (8.0pt) — never a different edge, never a
+line the band gate rejected outright. Exact normalised-text equality against
+an established profile entry is the corroboration that makes the wider
+window safe; position is never accepted on its own.
+
+An early version of this fix tried a band-free fallback keyed on text and an
+unbanded top/bottom split, on the theory that a page's height/baseline quirk
+might also push a line just *outside* the strict band, not merely off-offset
+within it. It reintroduced exactly the failure
+`mask_does_not_use_the_deeper_band_for_non_folio_text` guards against —
+matching text at an implausible offset, outside any margin, now had a path
+to being swept up as furniture. Rejected: the band gate stays exactly as
+strict as it was; only the offset tolerance loosens, and only after the band
+gate has already agreed.
+
+### Tests
+
+`mask_removes_a_running_head_whose_baseline_drifted_off_profile` pins the fix
+(5pt drift, past the strict tolerance, inside the relaxed one, unambiguously
+in-band). `mask_still_ignores_text_whose_offset_drifted_past_the_relaxed_tolerance`
+pins that the relaxed window is still bounded (20pt drift, still in-band, but
+past even the relaxed tolerance — must not match). The existing
+`mask_does_not_use_the_deeper_band_for_non_folio_text` and
+`mask_keeps_a_repeated_line_outside_the_bands` re-pass unchanged, which is
+what confirms the band gate itself was never touched.
+
+---
+
 ## 2026-07-31 — Scroll-off: the highlight stops short of the window edge
 
 Walking down a page in focus mode, the highlighted line ended up flush against

@@ -155,6 +155,14 @@ pub struct ViewConfig {
     /// Drop running headers, page numbers and text that does not run in the
     /// page's reading direction, so the caret never traverses them.
     pub skip_page_furniture: bool,
+    /// Detect footnotes so each is a single step for line scope up (the same
+    /// shape as a table), while staying walkable by word and character.
+    /// Sentence and paragraph motion additionally skip a footnote entirely
+    /// while auto-searching from ordinary body text, so it never interrupts
+    /// normal reading; a caret placed there deliberately still reads
+    /// normally once inside. Costs nothing extra to extract, but relies on
+    /// a heuristic.
+    pub detect_footnotes: bool,
 }
 
 impl Default for ViewConfig {
@@ -187,6 +195,7 @@ impl Default for ViewConfig {
             detect_headings: true,
             detect_equations: true,
             skip_page_furniture: true,
+            detect_footnotes: true,
         }
     }
 }
@@ -623,6 +632,14 @@ pub fn default_config_doc() -> String {
          # are recognised by repeating across pages, never by position alone.\n",
     );
     let _ = writeln!(out, "skip_page_furniture = {}", view.skip_page_furniture);
+    out.push_str(
+        "# Treat each footnote as one stop from line scope up, drawn as a single\n\
+         # box (word and char scope still step through it). Sentence and paragraph\n\
+         # motion additionally skip a footnote entirely while auto-searching from\n\
+         # ordinary body text, so reading a page's prose never lands on one; moving\n\
+         # into it deliberately still reads it normally.\n",
+    );
+    let _ = writeln!(out, "detect_footnotes = {}", view.detect_footnotes);
     out.push('\n');
 
     out.push_str(

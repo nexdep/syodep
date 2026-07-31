@@ -47,6 +47,7 @@ bookmarks, highlights, notes, history. That lives in the SQLite database
 | `detect_headings` | bool | `true` | treat each detected heading as one step at sentence and paragraph scope |
 | `detect_equations` | bool | `true` | treat each detected display equation as one stop from line scope up, drawn as one box |
 | `skip_page_furniture` | bool | `true` | keep running headers, page numbers and sideways text out of the caret's path |
+| `detect_footnotes` | bool | `true` | treat each detected footnote as one stop from line scope up, drawn as one box; `s`/`p` skip it entirely |
 
 Documents with a saved reading position restore their previous scroll and
 zoom instead of applying `default_zoom`/`fit_width_on_open`.
@@ -148,6 +149,24 @@ Three independent rules find them:
 Set it to `false` to walk every extracted line as before. Note that `Ln 1` in
 the status line then means the page's first *content* line rather than its first
 body line.
+
+**Footnote detection.** With `detect_footnotes = true` a footnote is one stop
+from line scope up, drawn as one box — the same shape as a table, not a
+heading: it is reachable only by deliberately walking into it with word or
+char scope (`cw`, `cc`), never by stepping through it line by line. `s` and
+`p`, reading through a page's ordinary body prose, additionally skip a
+footnote **entirely** rather than costing it a single stop the way a table
+does — the goal is that reading through a page never lands on one by
+accident. A caret placed inside a footnote deliberately still expands and
+steps through its own sentences normally once there; only the automatic
+forward/backward search treats it as invisible. Unlike page furniture, a
+footnote is never removed from the navigable content — it is real reading
+matter, just out of the way of ordinary reading.
+
+A line counts as a footnote when it sits in the page's bottom margin band and
+is set noticeably smaller than the page's body text — the mirror of heading
+detection's larger-than-body rule. Detection costs nothing extra to extract;
+set it to `false` if the heuristic misjudges a document.
 
 **Overlay colours.** The one focus mode's five scopes (char, line, word,
 sentence, paragraph) all share `focus_color`: the highlight tells you that

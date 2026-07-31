@@ -869,6 +869,7 @@ mod tests {
                 x1,
                 y1: 10.0,
             },
+            synthetic: false,
         }
     }
 
@@ -892,6 +893,7 @@ mod tests {
                 x1: 10.0,
                 y1: 10.0,
             },
+            synthetic: false,
         }
     }
 

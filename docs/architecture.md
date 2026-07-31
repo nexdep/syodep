@@ -231,10 +231,13 @@ mutability and merely reading a document never pays for it.
 `ContentObject` bounds a sentence, which is what being a region means; four
 predicates on `ObjectKind` say how much further each kind goes, from the finest
 scope up. An image `is_atomic()` — one stop from *word* scope up, because there
-are no words inside one to walk. An image, a table and an equation `is_block()`
-— one stop from *line* scope up, and drawn as a single box; the two categories
-nest, so atomic implies block. A heading, an equation and a table
-`splits_paragraphs()`, each being one step for `s` and `p`; a heading and an
+are no words inside one to walk. An image, a table, an equation and a
+footnote `is_block()` — one stop from *line* scope up, and drawn as a single
+box; the two categories nest, so atomic implies block. (A footnote's further
+invisibility to Sentence/Paragraph auto-search does not fit these four
+predicates at all — see the dedicated decision below.) A heading, an
+equation, a table and a footnote `splits_paragraphs()`, each being one step
+for `s` and `p`; a heading and an
 equation are also `is_one_sentence()`, so every terminator inside them is inert,
 which is what keeps `2.12.` and `f(x) = 0.` from splitting. A list item is none
 of them: one step for `s` only, because a list is a single paragraph made of
@@ -283,6 +286,42 @@ inline maths out, and inline maths must stay out: a region splits the sentence
 around it, so making a formula inside a sentence a unit would break the sentence
 carrying it. Cost is nothing extra — both signals come from the extraction pass,
 as headings' do.
+
+**Decision — a footnote is a fifth, new shape the four `ObjectKind`
+predicates cannot express on their own:** every other kind's four booleans
+answer "how far does this go from word scope up," a single axis. A footnote
+needs a second, independent axis — "is this reachable by automatic
+Sentence/Paragraph search at all" — because unlike every other kind, it
+should cost `s`/`p` *zero* stops while reading through ordinary body prose,
+not one. `is_block()` alone (which a footnote shares with a table: one stop
+from line scope up, still walkable by word and char) only governs line-scope-
+and-up single-box behaviour; it does not make Sentence or Paragraph
+auto-search skip a region entirely — a table, already `is_block()`, still
+costs `s` one stop of its own (`sentence_span_does_not_run_into_a_table`
+pins only that a sentence *outside* the table does not extend into it, not
+that the table is invisible to the search). So the actual "skip it" behaviour
+lives outside `ObjectKind` altogether, in two new `App` predicates
+(`in_footnote`, consulted only by `step_next_sentence_start` /
+`step_prev_sentence_start` / `first_sentence_start_on_page` /
+`paragraph_step_next` / `paragraph_step_prev`) — never by
+`sentence_run_start`/`sentence_run_end`, so a caret placed inside a footnote
+deliberately (word, char or line motion — a footnote stays in
+`content.lines`, unlike furniture, which is removed outright) still expands
+and steps through its own sentences normally once there. Decision-log entry
+19 below anticipates a kind someday needing a third boundary on the existing
+word/line axis, at which point the two booleans there should collapse into
+one; a footnote is not that case; it is a genuinely different axis
+(*reachability by auto-search*, not *how coarse a stop*), and folding it into
+`ObjectKind`'s four predicates would have required `syodep-pdf` to know about
+Sentence/Paragraph auto-search, which belongs to `syodep-core`.
+Detected the same way headings are, mirrored: a line reads as a footnote when
+it sits in the page's bottom margin band and is set noticeably *smaller* than
+the page's body size, the inverse of a heading's larger-than-body rule; both
+share a factored-out `dominant_body_size` helper so the two detectors' notion
+of "the body" cannot drift apart. Found and claimed before list items in
+`content_objects`, deliberately: a footnote's own citation text is often
+itself enumerator-shaped (`12. Author, Title`) and must not be misread as, or
+corrupt the extent of, an unrelated list elsewhere on the page.
 
 **Decision — highlight annotations are written through a second, short-lived
 document handle, and their geometry and opacity go in by hand:**

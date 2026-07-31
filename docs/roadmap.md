@@ -62,6 +62,11 @@ the same code. See the development log.
   and `p` and tints as one box, while `w` and `h`/`l` still walk through it
 - ✅ Page furniture kept out of the caret's path: running heads and folios by
   cross-page repetition, sideways stamps and watermarks by baseline direction
+- ✅ Footnotes detected from the bottom margin band and undersized type, one
+  stop from line scope up like a table (reachable only by deliberate word/char
+  motion, never walked line by line); `s`/`p` additionally skip a footnote
+  entirely while reading through a page's body, so it never interrupts
+  ordinary reading
 - ⬜ Text-object selection, highlighting, annotation (`viw`-style
   composability on top of the existing command/count system)
 - ⬜ Smart jump to references, figures, tables, equations (the table, image and

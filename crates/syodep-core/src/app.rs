@@ -41,6 +41,13 @@ use crate::render_cache::RenderCache;
 /// loop terminates no matter what the per-scope steppers do.
 const MAX_ATOMIC_STEPS: usize = 4096;
 
+/// Hard bound on how many real-space-separated fragments [`App::link_at`]
+/// may stitch into one address. The loop already terminates on its own —
+/// each iteration consumes at least one more token, and a line is finite —
+/// this exists only so a pathological line cannot make one caret query
+/// visibly slow.
+const MAX_LINK_FRAGMENTS: usize = 20;
+
 /// Side effects the UI shell must perform after an input event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Effects {
@@ -984,6 +991,7 @@ impl App {
             detect_headings: self.config.view.detect_headings,
             detect_equations: self.config.view.detect_equations,
             skip_page_furniture: self.config.view.skip_page_furniture,
+            detect_footnotes: self.config.view.detect_footnotes,
         };
         let content = session
             .doc
@@ -1261,7 +1269,15 @@ impl App {
         // span is a hard edge in both directions, so the bracket before it and
         // the stop after it keep their own stops.
         if same_line {
-            if let Some(span) = self.link_at(left) {
+            // `link_at(left)` alone is not enough once a link's own span
+            // stitches across a real space (see `link_at`'s doc comment):
+            // `word_run_end` steps onto that space cell as `left` on its way
+            // through, and `token_span` -- correctly -- refuses to resolve a
+            // whitespace cell to any token at all, so `link_at(left)` sees
+            // nothing there. Falling back to `link_at(right)` picks up the
+            // very same chain from the non-whitespace side instead.
+            let span = self.link_at(left).or_else(|| self.link_at(right));
+            if let Some(span) = span {
                 let within = |c: Caret| c.cell >= span.0 && c.cell <= span.1;
                 if within(left) || within(right) {
                     return within(left) && within(right);
@@ -1299,6 +1315,38 @@ impl App {
                 }
             }
         }
+        // A synthetic space MuPDF guessed mid-token must not itself break a
+        // number, dotted identifier or hyphenated compound: `9p4kxc2cvd.1`
+        // stays one word even when MuPDF drew it as two runs with a gap
+        // between them. Checked only against these specific constructs --
+        // never the generic word-class fallback below -- so an ordinary
+        // inter-word gap MuPDF happens to flag as synthetic still ends the
+        // word exactly as a real space would. Links and abbreviations need
+        // no equivalent bridge here: they compute a holistic span up front
+        // via `link_at`/`abbreviation_at`, which already see through a
+        // synthetic space (see `token_span`).
+        if same_line {
+            if self.is_synthetic_space_at(right) {
+                if let Some(beyond) = self.next_cell_on_line(right) {
+                    if self.is_number_interior(beyond)
+                        || self.is_hyphen_interior(beyond)
+                        || self.is_number_suffix_at(beyond)
+                    {
+                        return true;
+                    }
+                }
+            }
+            if self.is_synthetic_space_at(left) {
+                if let Some(before) = self.prev_cell_on_line(left) {
+                    if self.is_number_interior(before)
+                        || self.is_hyphen_interior(before)
+                        || self.is_number_suffix_at(before)
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
         let Some(left_class) = self.word_class_at(left) else {
             return false;
         };
@@ -1322,16 +1370,16 @@ impl App {
         if !(is_numeric_separator(here) || is_exponent_sign(here)) {
             return false;
         }
-        let prev = self.prev_cell_on_line(c);
+        let prev = self.prev_real_cell_on_line(c);
         let before = prev.and_then(|p| self.char_at(p));
-        let after = self.next_cell_on_line(c).and_then(|n| self.char_at(n));
+        let after = self.next_real_cell_on_line(c).and_then(|n| self.char_at(n));
         if is_inside_number(before, here, after) || is_inside_dotted_token(before, here, after) {
             return true;
         }
         // `2.3E+5`: the sign needs the exponent marker behind it and a digit
         // behind that, which is what tells a number from `cache+1`.
         let before2 = prev
-            .and_then(|p| self.prev_cell_on_line(p))
+            .and_then(|p| self.prev_real_cell_on_line(p))
             .and_then(|p| self.char_at(p));
         is_inside_scientific_exponent(before2, before, here, after)
     }
@@ -1345,7 +1393,7 @@ impl App {
         if !is_number_suffix(here) {
             return false;
         }
-        let before = self.prev_cell_on_line(c).and_then(|p| self.char_at(p));
+        let before = self.prev_real_cell_on_line(c).and_then(|p| self.char_at(p));
         is_attached_number_suffix(before, here)
     }
 
@@ -1361,8 +1409,8 @@ impl App {
         if !is_word_hyphen(here) {
             return false;
         }
-        let before = self.prev_cell_on_line(c).and_then(|p| self.char_at(p));
-        let after = self.next_cell_on_line(c).and_then(|n| self.char_at(n));
+        let before = self.prev_real_cell_on_line(c).and_then(|p| self.char_at(p));
+        let after = self.next_real_cell_on_line(c).and_then(|n| self.char_at(n));
         is_inside_hyphenated_word(before, here, after)
     }
 
@@ -1372,6 +1420,17 @@ impl App {
     /// The unit both token-level rules work from: an abbreviation and a link
     /// are each recognised by looking at a whole token rather than at the
     /// characters beside one cell.
+    ///
+    /// Every whitespace cell ends a token here, synthetic or not — a
+    /// synthetic space (MuPDF's own guess at a gap inside a URL/DOI drawn as
+    /// separate positioning runs) is not treated as invisible at this stage.
+    /// It was, once, and that was wrong: whichever ordinary word or
+    /// punctuation happened to sit *before* a synthetic gap got welded onto
+    /// the front of whatever came after it (`files:` glued straight onto
+    /// `https://doi`, corrupting the very scheme `link_span` needs to see).
+    /// [`Self::link_at`] is where a synthetic — or a real, authored — gap
+    /// gets bridged instead, one token at a time, each step re-validated by
+    /// an actual `link_span` match rather than assumed.
     fn token_span(&mut self, c: Caret) -> Option<(usize, usize)> {
         self.ensure_content(c.page);
         let cells = self.content(c.page).get(c.line)?.cells.as_slice();
@@ -1402,19 +1461,144 @@ impl App {
     /// part of it. [`link_span`] does the recognising; the mapping back to cells
     /// goes through the characters actually present, so an image inside a token
     /// cannot shift the result.
+    ///
+    /// A recognised link is also extended across a document's own literal
+    /// mid-address spacing: some PDFs draw a URL's path segments with a real,
+    /// PDF-authored space character between them (not MuPDF's synthetic
+    /// guess, which `token_span` already sees through) — a DOI rendered as
+    /// `https://doi .org /10 .17632 /9p4kxc2cvd .1`, say, every one of those
+    /// gaps a genuine space in the content stream, geometrically identical to
+    /// an ordinary word space beside it, so neither `synthetic` nor width can
+    /// tell them apart. [`Self::continuing_link_fragment`] is what keeps this
+    /// safe: a following token only ever gets pulled in when it starts with
+    /// `.` or `/` *and* the longer, concatenated string still recognises as
+    /// one link reaching the same far end — so ordinary prose separated by
+    /// real spaces is never at risk, only fragments shaped like a URL
+    /// continuation that `link_span` itself agrees with.
+    ///
+    /// `c` may land in *any* fragment of a stitched chain, not just its
+    /// first — `w` walking forward asks `same_word_run` about the boundary
+    /// between `.org` and the space before `/10`, for instance, which needs
+    /// the same answer as asking from `https://doi` itself. So the first
+    /// phase below walks backward with [`Self::preceding_link_fragment`] (the
+    /// mirror image of the forward one) to find the chain's true start before
+    /// the forward extension runs from there — resolving to the same span no
+    /// matter which fragment `c` was in.
     fn link_at(&mut self, c: Caret) -> Option<(usize, usize)> {
-        let (start, end) = self.token_span(c)?;
-        self.ensure_content(c.page);
-        let cells = self.content(c.page).get(c.line)?.cells.as_slice();
-        let indexed: Vec<(usize, char)> = (start..=end)
-            .filter_map(|i| match cells[i].kind {
-                CellKind::Char(ch) => Some((i, ch)),
-                CellKind::Image => None,
-            })
-            .collect();
-        let token: String = indexed.iter().map(|(_, ch)| ch).collect();
-        let (lo, hi) = link_span(&token)?;
-        Some((indexed[lo].0, indexed[hi].0))
+        let (mut start, mut end) = self.token_span(c)?;
+        for _ in 0..MAX_LINK_FRAGMENTS {
+            let Some((prev_start, prev_end)) = self.preceding_link_fragment(c.page, c.line, start)
+            else {
+                break;
+            };
+            start = prev_start;
+            end = prev_end;
+        }
+
+        let mut best: Option<(usize, usize)> = None;
+        for _ in 0..MAX_LINK_FRAGMENTS {
+            self.ensure_content(c.page);
+            let cells = self.content(c.page).get(c.line)?.cells.as_slice();
+            // A synthetic space is dropped from the string handed to
+            // `link_span` -- MuPDF's guessed gap, not an authored character,
+            // and `is_dotted_host`/`is_url_scheme` reject whitespace
+            // outright. So is a real space bridged in by the loop below: it
+            // already passed the shape gate in `continuing_link_fragment`,
+            // and dropping it here is what lets the concatenation still read
+            // as one continuous address. The cell range returned still spans
+            // every gap, so the recognised link's selection/highlight has no
+            // hole in it.
+            let indexed: Vec<(usize, char)> = (start..=end)
+                .filter_map(|i| match cells[i].kind {
+                    CellKind::Char(ch) if !ch.is_whitespace() => Some((i, ch)),
+                    _ => None,
+                })
+                .collect();
+            let token: String = indexed.iter().map(|(_, ch)| ch).collect();
+            let Some((lo, hi)) = link_span(&token) else {
+                break;
+            };
+            let span = (indexed[lo].0, indexed[hi].0);
+            best = Some(span);
+            // Only keep extending while the match reaches the very end of
+            // what has been gathered so far -- trailing punctuation already
+            // closed the link otherwise, and reaching past it would be wrong.
+            if span.1 != end {
+                break;
+            }
+            let Some((_, next_end)) = self.continuing_link_fragment(c.page, c.line, end) else {
+                break;
+            };
+            end = next_end;
+        }
+        best
+    }
+
+    /// If a space (synthetic or real — either can sit between a URL's own
+    /// segments, see [`Self::link_at`]) immediately follows the cell at
+    /// `end`, and the token beyond it opens with `.` or `/` — the shape of
+    /// every continuation seen in practice (`.com`, `/njoy`, `.17632`) and
+    /// not of an ordinary next word — the span of that following token.
+    /// Consulted only by [`Self::link_at`]'s extension loop, which is also
+    /// what keeps this safe despite not caring *why* there is a gap here:
+    /// the shape gate only ever admits a candidate, and `link_at` re-runs
+    /// `link_span` on the result before trusting it.
+    fn continuing_link_fragment(
+        &mut self,
+        page: usize,
+        line: usize,
+        end: usize,
+    ) -> Option<(usize, usize)> {
+        self.ensure_content(page);
+        let cells = self.content(page).get(line)?.cells.as_slice();
+        let is_space =
+            |cell: &syodep_pdf::Cell| matches!(cell.kind, CellKind::Char(ch) if ch.is_whitespace());
+        if !is_space(cells.get(end + 1)?) {
+            return None;
+        }
+        let next_start = end + 2;
+        let next = cells.get(next_start)?;
+        if !matches!(next.kind, CellKind::Char('.') | CellKind::Char('/')) {
+            return None;
+        }
+        let next_end = cells[next_start..]
+            .iter()
+            .position(is_space)
+            .map_or(cells.len() - 1, |n| next_start + n - 1);
+        Some((next_start, next_end))
+    }
+
+    /// Symmetric with [`Self::continuing_link_fragment`], searching
+    /// backward: if the token starting at `start` itself opens with `.` or
+    /// `/`, and a space immediately precedes it, the span of the token
+    /// before that space. Consulted only by [`Self::link_at`]'s backward
+    /// phase, which is what makes it resolve to the same span no matter
+    /// which fragment of a stitched chain `c` lands in.
+    fn preceding_link_fragment(
+        &mut self,
+        page: usize,
+        line: usize,
+        start: usize,
+    ) -> Option<(usize, usize)> {
+        self.ensure_content(page);
+        let cells = self.content(page).get(line)?.cells.as_slice();
+        if !matches!(
+            cells.get(start)?.kind,
+            CellKind::Char('.') | CellKind::Char('/')
+        ) {
+            return None;
+        }
+        let is_space =
+            |cell: &syodep_pdf::Cell| matches!(cell.kind, CellKind::Char(ch) if ch.is_whitespace());
+        let space_idx = start.checked_sub(1)?;
+        if !is_space(cells.get(space_idx)?) {
+            return None;
+        }
+        let prev_start = cells[..space_idx]
+            .iter()
+            .rposition(is_space)
+            .map_or(0, |i| i + 1);
+        Some((prev_start, space_idx - 1))
     }
 
     /// Whether `c` sits inside a link, where a stop is part of the address
@@ -1502,6 +1686,40 @@ impl App {
     fn prev_cell_on_line(&mut self, c: Caret) -> Option<Caret> {
         self.prev_cell(c)
             .filter(|p| p.page == c.page && p.line == c.line)
+    }
+
+    /// Whether the cell at `c` is a space MuPDF guessed rather than an
+    /// authored character — see [`syodep_pdf::Cell::synthetic`].
+    fn is_synthetic_space_at(&mut self, c: Caret) -> bool {
+        self.ensure_content(c.page);
+        self.content(c.page)
+            .get(c.line)
+            .and_then(|l| l.cells.get(c.cell))
+            .is_some_and(|cell| cell.synthetic)
+    }
+
+    /// Like [`Self::next_cell_on_line`], but a single synthetic-space cell is
+    /// stepped past so the true next character is visible. This is what lets
+    /// `9p4kxc2cvd` see the `.` two cells away in `9p4kxc2cvd<synthetic
+    /// space>.1` — a gap MuPDF guessed while assembling a URL/DOI drawn as
+    /// separate positioning runs, not a real word boundary.
+    fn next_real_cell_on_line(&mut self, c: Caret) -> Option<Caret> {
+        let n = self.next_cell_on_line(c)?;
+        if self.is_synthetic_space_at(n) {
+            self.next_cell_on_line(n)
+        } else {
+            Some(n)
+        }
+    }
+
+    /// Symmetric with [`Self::next_real_cell_on_line`].
+    fn prev_real_cell_on_line(&mut self, c: Caret) -> Option<Caret> {
+        let p = self.prev_cell_on_line(c)?;
+        if self.is_synthetic_space_at(p) {
+            self.prev_cell_on_line(p)
+        } else {
+            Some(p)
+        }
     }
 
     fn next_word_target_from(&mut self, mut caret: Caret) -> Option<Caret> {
@@ -1856,6 +2074,23 @@ impl App {
             .is_some_and(|o| o.kind.is_one_sentence())
     }
 
+    /// Whether `at` sits inside a footnote block.
+    ///
+    /// Consulted only by the Sentence/Paragraph *auto-search* loops below
+    /// (`step_next_sentence_start`, `step_prev_sentence_start`,
+    /// `first_sentence_start_on_page`, `paragraph_step_next`,
+    /// `paragraph_step_prev`), which treat a footnote as invisible — reading
+    /// through a page's body prose with `s`/`p` never lands on one, the same
+    /// as page furniture. It is never consulted by `sentence_run_start`/
+    /// `sentence_run_end`, so a caret placed inside a footnote deliberately
+    /// (word, char or line motion — a footnote stays in `content.lines`,
+    /// unlike furniture) still expands and steps through its sentences
+    /// normally once there.
+    fn in_footnote(&mut self, at: Caret) -> bool {
+        self.region_at(at.page, at.line)
+            .is_some_and(|o| o.kind == ObjectKind::Footnote)
+    }
+
     /// Whether `at` falls within the marker that opens a list item.
     ///
     /// The marker is exactly the line's first token: detection only accepts a
@@ -1923,6 +2158,10 @@ impl App {
             cell: 0,
         };
         loop {
+            if self.in_footnote(cur) {
+                cur = self.next_cell_same_page(cur)?;
+                continue;
+            }
             match self.word_class_at(cur) {
                 Some(WordClass::Whitespace) | None => {
                     cur = self.next_cell_same_page(cur)?;
@@ -1938,6 +2177,10 @@ impl App {
         let end = self.sentence_run_end(caret);
         let mut cur = self.next_cell_same_page(end)?;
         loop {
+            if self.in_footnote(cur) {
+                cur = self.next_cell_same_page(cur)?;
+                continue;
+            }
             match self.word_class_at(cur) {
                 Some(WordClass::Whitespace) | None => {
                     cur = self.next_cell_same_page(cur)?;
@@ -1953,7 +2196,11 @@ impl App {
         let start = self.sentence_run_start(caret);
         let mut cur = self.prev_cell_same_page(start)?;
         // Skip whitespace back into the previous sentence, then expand it.
-        while matches!(self.word_class_at(cur), Some(WordClass::Whitespace) | None) {
+        // A footnote is skipped the same way -- invisible to this search,
+        // even though it is real prose once a caret sits inside it.
+        while matches!(self.word_class_at(cur), Some(WordClass::Whitespace) | None)
+            || self.in_footnote(cur)
+        {
             cur = self.prev_cell_same_page(cur)?;
         }
         Some(self.sentence_run_start(cur))
@@ -2042,8 +2289,17 @@ impl App {
             .iter()
             .position(|&(s, e)| s <= mark.start_line && mark.start_line <= e)
         {
-            if i + 1 < segs.len() {
-                let (s, e) = segs[i + 1];
+            // A footnote's own segment is skipped entirely, never a stop of
+            // its own — invisible to this search the same way a footnote is
+            // invisible to sentence auto-search.
+            for &(s, e) in &segs[i + 1..] {
+                if self.in_footnote(Caret {
+                    page: mark.page,
+                    line: s,
+                    cell: 0,
+                }) {
+                    continue;
+                }
                 *mark = ParagraphMark {
                     page: mark.page,
                     start_line: s,
@@ -2052,16 +2308,26 @@ impl App {
                 return true;
             }
         }
-        if let Some(page) = self.next_content_page(mark.page) {
-            self.ensure_content(page);
-            if let Some(&(s, e)) = self.page_paragraphs(page).first() {
+        let mut page = mark.page;
+        while let Some(next_page) = self.next_content_page(page) {
+            self.ensure_content(next_page);
+            let segs = self.page_paragraphs(next_page);
+            for &(s, e) in &segs {
+                if self.in_footnote(Caret {
+                    page: next_page,
+                    line: s,
+                    cell: 0,
+                }) {
+                    continue;
+                }
                 *mark = ParagraphMark {
-                    page,
+                    page: next_page,
                     start_line: s,
                     end_line: e,
                 };
                 return true;
             }
+            page = next_page;
         }
         false
     }
@@ -2073,8 +2339,14 @@ impl App {
             .iter()
             .position(|&(s, e)| s <= mark.start_line && mark.start_line <= e)
         {
-            if i > 0 {
-                let (s, e) = segs[i - 1];
+            for &(s, e) in segs[..i].iter().rev() {
+                if self.in_footnote(Caret {
+                    page: mark.page,
+                    line: s,
+                    cell: 0,
+                }) {
+                    continue;
+                }
                 *mark = ParagraphMark {
                     page: mark.page,
                     start_line: s,
@@ -2083,16 +2355,26 @@ impl App {
                 return true;
             }
         }
-        if let Some(page) = self.prev_content_page(mark.page) {
-            self.ensure_content(page);
-            if let Some(&(s, e)) = self.page_paragraphs(page).last() {
+        let mut page = mark.page;
+        while let Some(prev_page) = self.prev_content_page(page) {
+            self.ensure_content(prev_page);
+            let segs = self.page_paragraphs(prev_page);
+            for &(s, e) in segs.iter().rev() {
+                if self.in_footnote(Caret {
+                    page: prev_page,
+                    line: s,
+                    cell: 0,
+                }) {
+                    continue;
+                }
                 *mark = ParagraphMark {
-                    page,
+                    page: prev_page,
                     start_line: s,
                     end_line: e,
                 };
                 return true;
             }
+            page = prev_page;
         }
         false
     }
@@ -4093,6 +4375,22 @@ mod tests {
         app
     }
 
+    /// Like [`app_with_line`], but the whitespace cells at the byte indices
+    /// in `synthetic_at` carry MuPDF's `SYNTHETIC` flag -- what a URL/DOI
+    /// drawn as separate positioning runs looks like once MuPDF has guessed
+    /// a space between two of its segments.
+    fn app_with_synthetic_line(dir: &Path, text: &str, synthetic_at: &[usize]) -> App {
+        let mut app = app_with_text_pages(dir, &["placeholder page"]);
+        app.set_page_content(
+            0,
+            PageContent {
+                lines: vec![text_line_with_synthetic(100.0, text, synthetic_at)],
+                ..Default::default()
+            },
+        );
+        app
+    }
+
     /// The text the focus span currently covers, across however many lines.
     ///
     /// Goes through the production `App::span_text`, so these tests also pin down
@@ -4304,6 +4602,43 @@ mod tests {
     }
 
     #[test]
+    fn a_dotted_token_survives_a_synthetic_space_before_its_separator() {
+        // MuPDF drew "9p4kxc2cvd" and ".1" as separate positioning runs (as
+        // it does for a DOI split across `Tj` operations) and guessed a
+        // space between them. It is not an authored word boundary, so the
+        // token still steps as one word for `w`.
+        let dir = tempfile::tempdir().unwrap();
+        let text = "id 9p4kxc2cvd .1 done";
+        let synthetic_space = text.find(" .1").unwrap();
+        let mut app = app_with_synthetic_line(dir.path(), text, &[synthetic_space]);
+        press(&mut app, "cw");
+        press(&mut app, "w"); // "id", then the dotted token
+        assert_eq!(span_text(&mut app), "9p4kxc2cvd .1");
+        press(&mut app, "w");
+        assert_eq!(span_text(&mut app), "done");
+    }
+
+    #[test]
+    fn a_synthetic_space_does_not_merge_two_unrelated_words() {
+        // The false-positive this fix must not introduce: MuPDF's SYNTHETIC
+        // flag is a general per-character signal, not URL-specific, so a
+        // document where MuPDF happens to flag an ordinary inter-word gap as
+        // synthetic must still see two separate words, not one welded
+        // together. Neither side of this gap is a number, hyphen or dotted
+        // token, so nothing should bridge it.
+        let dir = tempfile::tempdir().unwrap();
+        let text = "cache Foo next";
+        let synthetic_space = text.find(' ').unwrap();
+        let mut app = app_with_synthetic_line(dir.path(), text, &[synthetic_space]);
+        press(&mut app, "cw");
+        assert_eq!(span_text(&mut app), "cache");
+        press(&mut app, "w");
+        assert_eq!(span_text(&mut app), "Foo");
+        press(&mut app, "w");
+        assert_eq!(span_text(&mut app), "next");
+    }
+
+    #[test]
     fn a_chain_of_dotted_identifiers_is_one_word() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "see a.b.c next");
@@ -4478,6 +4813,105 @@ mod tests {
         press(&mut app, "cw");
         press(&mut app, "w");
         assert_eq!(span_text(&mut app), "https://x.org/wiki/Glob_(pattern)");
+    }
+
+    #[test]
+    fn a_url_survives_a_synthetic_space_inside_it() {
+        // The abstract-breaking case: a GitHub link drawn as separate
+        // positioning runs, with MuPDF guessing a space between "github"
+        // and ".com". `token_span` no longer splits on it, so `link_at`
+        // sees the whole address and `w` steps over it as one word -- the
+        // gap stays in the copied text (it is still real space on the
+        // page), but the recognizer itself never saw it.
+        let dir = tempfile::tempdir().unwrap();
+        let text = "see https://github .com/njoy/ENDFtk today";
+        let synthetic_space = text.find(" .com").unwrap();
+        let mut app = app_with_synthetic_line(dir.path(), text, &[synthetic_space]);
+        press(&mut app, "cw");
+        press(&mut app, "w");
+        assert_eq!(span_text(&mut app), "https://github .com/njoy/ENDFtk");
+        press(&mut app, "w");
+        assert_eq!(span_text(&mut app), "today");
+    }
+
+    #[test]
+    fn a_synthetic_space_does_not_end_a_sentence_inside_a_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let text = "See https://github .com/njoy/ENDFtk today. Then more.";
+        let synthetic_space = text.find(" .com").unwrap();
+        let mut app = app_with_synthetic_line(dir.path(), text, &[synthetic_space]);
+        press(&mut app, "cs");
+        assert_eq!(
+            span_text(&mut app),
+            "See https://github .com/njoy/ENDFtk today."
+        );
+    }
+
+    #[test]
+    fn a_url_survives_a_real_space_inside_it() {
+        // Some PDFs draw a URL's path segments with a genuine, authored
+        // space character between them -- not MuPDF's synthetic guess, and
+        // geometrically identical to an ordinary word space beside it, so
+        // neither `synthetic` nor width can tell them apart (a real DOI
+        // rendered exactly this way: `https://doi .org /10 .17632
+        // /9p4kxc2cvd .1`). `link_at` stitches across it anyway, gated on
+        // shape (the next fragment opens with `.` or `/`) and re-validated
+        // by `link_span` at each step, not on why there happens to be a gap.
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_line(
+            dir.path(),
+            "see https://doi .org /10 .17632 /9p4kxc2cvd .1 today",
+        );
+        press(&mut app, "cw");
+        press(&mut app, "w");
+        assert_eq!(
+            span_text(&mut app),
+            "https://doi .org /10 .17632 /9p4kxc2cvd .1"
+        );
+        press(&mut app, "w");
+        assert_eq!(span_text(&mut app), "today");
+    }
+
+    #[test]
+    fn a_link_resolves_the_same_span_from_any_fragment_of_a_real_space_chain() {
+        // The word-run walk asks about the boundary between `.org` and the
+        // space before `/10` just as often as it asks about the boundary
+        // right after `https://doi` -- `link_at` must resolve to the same
+        // full span from a caret landed on *any* fragment, not just the
+        // first, or the chain only stitches together when queried from one
+        // specific spot.
+        let dir = tempfile::tempdir().unwrap();
+        let text = "see https://doi .org /10 .17632 /9p4kxc2cvd .1 today";
+        let mut app = app_with_line(dir.path(), text);
+        let org_cell = text.find(".org").unwrap() + 1; // inside "org", not the dot
+        app.focus = Some(Caret {
+            page: 0,
+            line: 0,
+            cell: org_cell,
+        });
+        app.focus_scope = Scope::Word;
+        app.refresh_focus_span();
+        let (start, end) = app.focus_span().unwrap();
+        assert_eq!(start.cell, text.find("https").unwrap());
+        assert_eq!(end.cell, text.find(" today").unwrap() - 1);
+    }
+
+    #[test]
+    fn a_real_space_does_not_merge_ordinary_prose_around_a_slash() {
+        // The false-positive this mechanism must not introduce: a `/`
+        // sitting alone between two ordinary words, spaced on both sides as
+        // English prose does ("one and / or two"), must not weld "and" onto
+        // it. `link_span("and/")` does not recognise a link, so the
+        // extension never gets past its first attempt.
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_line(dir.path(), "one and / or two");
+        press(&mut app, "cw");
+        press(&mut app, "w");
+        assert_eq!(span_text(&mut app), "and");
+        press(&mut app, "w");
+        assert_eq!(span_text(&mut app), "/");
+        press(&mut app, "w");
+        assert_eq!(span_text(&mut app), "or");
     }
 
     #[test]
@@ -4738,6 +5172,7 @@ mod tests {
                         x1: x + 6.0,
                         y1: y + 10.0,
                     },
+                    synthetic: false,
                 }
             })
             .collect();
@@ -4750,6 +5185,19 @@ mod tests {
             },
             cells,
         }
+    }
+
+    /// Like [`text_line`], but the cells at the byte indices in
+    /// `synthetic_at` (which must be whitespace in `text`) carry MuPDF's
+    /// `SYNTHETIC` flag — a guessed inter-glyph gap, not an authored space.
+    /// This is what a URL/DOI drawn as several positioning runs looks like
+    /// once MuPDF has guessed a space between two of its segments.
+    fn text_line_with_synthetic(y: f32, text: &str, synthetic_at: &[usize]) -> ContentLine {
+        let mut line = text_line(y, text);
+        for &i in synthetic_at {
+            line.cells[i].synthetic = true;
+        }
+        line
     }
 
     /// A page of prose, then a four-line table, then more prose. Lines 2..=5
@@ -5950,6 +6398,100 @@ mod tests {
         assert!(app.focus_screen_rect().is_none());
         press(&mut app, "l");
         assert!(app.word_mark().is_none());
+    }
+
+    // ---- Footnotes ----------------------------------------------------
+
+    /// A page of prose, a one-line footnote, then more prose. `s`/`p`
+    /// reading through the body must skip the footnote entirely; word and
+    /// char scope can still step into it deliberately.
+    fn footnote_page_content() -> PageContent {
+        let lines = vec![
+            text_line(100.0, "Alpha beta gamma."),
+            text_line(112.0, "Delta epsilon zeta."),
+            text_line(900.0, "1 A footnote sentence here."),
+            text_line(940.0, "Eta theta iota."),
+        ];
+        let objects = vec![ContentObject {
+            kind: syodep_pdf::ObjectKind::Footnote,
+            bbox: Rect {
+                x0: 96.0,
+                y0: 892.0,
+                x1: 260.0,
+                y1: 950.0,
+            },
+            start_line: 2,
+            end_line: 2,
+        }];
+        PageContent {
+            lines,
+            objects,
+            ..Default::default()
+        }
+    }
+
+    fn app_with_footnote_page(dir: &Path) -> App {
+        let mut app = app_with_text_pages(dir, &["placeholder page"]);
+        app.set_page_content(0, footnote_page_content());
+        app
+    }
+
+    #[test]
+    fn sentence_next_skips_a_footnote_block_entirely() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_footnote_page(dir.path());
+        press(&mut app, "cs");
+        press(&mut app, "s"); // "Delta epsilon zeta."
+        assert_caret(&app, 0, 1, 0);
+        // Unlike a table, which costs `s` one stop of its own (see
+        // `sentence_span_does_not_run_into_a_table`), the footnote must never
+        // be landed on at all: this press lands straight past it.
+        press(&mut app, "s");
+        assert_caret(&app, 0, 3, 0);
+    }
+
+    #[test]
+    fn paragraph_next_skips_a_footnote_block_entirely() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_footnote_page(dir.path());
+        press(&mut app, "cp");
+        let (start, end) = app.focus_span().unwrap();
+        assert_eq!((start.line, end.line), (0, 1));
+        // The footnote is its own paragraph (it splits paragraphs like every
+        // other kind), but `p` must skip straight past that paragraph too.
+        press(&mut app, "p");
+        let (start, end) = app.focus_span().unwrap();
+        assert_eq!((start.line, end.line), (3, 3));
+    }
+
+    #[test]
+    fn word_motion_can_still_step_into_a_footnote() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_footnote_page(dir.path());
+        press(&mut app, "cw");
+        for _ in 0..20 {
+            if app.caret().unwrap().line == 2 {
+                return;
+            }
+            press(&mut app, "w");
+        }
+        panic!("word motion never reached the footnote (line 2)");
+    }
+
+    #[test]
+    fn a_sentence_started_inside_a_footnote_still_expands_normally() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_footnote_page(dir.path());
+        press(&mut app, "ce");
+        press(&mut app, "jj");
+        assert_caret(&app, 0, 2, 0);
+        // Switching to sentence scope, still on the footnote's own line, must
+        // expand it as an ordinary sentence: deliberate entry is unaffected
+        // by the auto-search skip that keeps `s`/`p` from landing here.
+        press(&mut app, "cs");
+        let (start, end) = app.focus_span().unwrap();
+        assert_eq!((start.line, end.line), (2, 2));
+        assert_eq!(start.cell, 0);
     }
 
     // ---- Sentence focus ------------------------------------------------
