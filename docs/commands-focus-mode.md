@@ -2,9 +2,10 @@
 
 **Focus mode** highlights one position in the document's content — text
 characters, images and tables — and moves it with `hjkl`, independently of
-scrolling. Each image and each detected table is a single stop: one motion
-lands on it, the next lands past it, however many lines it covers. Char scope
-is the exception and the escape hatch — see "Tables and images" below.
+scrolling. From line scope up, each image, detected table and display equation
+is a single stop: one motion lands on it, the next lands past it, however many
+lines it covers. Word and char scope reach inside — see "Tables and images"
+below.
 
 What "one position" covers is the **scope**: a character, a word, a line, a
 sentence or a paragraph. The scope is a *setting of the mode*, not a mode of its
@@ -99,7 +100,8 @@ at a time.
 
 Word motions use Vim-like lowercase boundaries: letters/digits/underscore form
 word runs, punctuation/symbols form separate runs, whitespace is skipped, and
-each image or table is a single stop.
+each image is a single stop. Word motions run *through* a table or an equation,
+stopping on the words inside them.
 
 **Lists.** Each list item is one sentence, so `s` steps through a list item by
 item even though items rarely end in a full stop. The line introducing a list
@@ -185,15 +187,20 @@ The view auto-scrolls to keep the highlight on screen as it moves.
 
 ## Tables and images
 
-A table or an image is **one unit** at every scope except char. `w`, `b`, `e`,
-`s`, `p` and `hjkl` all step onto it once and then step past it, no matter how
-many lines it spans, and the highlight covers the whole thing as a single
-rectangle. A paragraph or sentence next to a table never reaches into it
-either, so `p` on the prose above a figure highlights just that prose.
+A table or an image is **one unit** from line scope up. `e`, `s`, `p` and
+`hjkl` all step onto it once and then step past it, no matter how many lines it
+spans, and the highlight covers the whole thing as a single rectangle. A
+paragraph or sentence next to a table never reaches into it either, so `p` on
+the prose above a figure highlights just that prose.
 
-Char scope is the escape hatch. Press `cc` while on a table and `h`/`l` step
-through its individual characters as usual, so a single number in a cell stays
-selectable. Switching back to any coarser scope snaps to the whole table again.
+Word and char scope reach **inside** a table, because its cells are text you may
+well want a part of. `cw` then `w` walks the words in its cells, and `cc` then
+`h`/`l` walks its characters, so a single number in a cell stays selectable.
+Their highlights shrink to the word or character rather than covering the whole
+table. Switching back to line scope or coarser snaps to the whole table again.
+
+An **image** is the exception: it is one unit at word scope too, since there are
+no words inside one to walk through.
 
 A caption or a paragraph set close under a table stays outside it: its own
 sentence, its own stop, and no tint over it. Detection reports the table's
@@ -213,25 +220,31 @@ numbered heading like `2.12. Recommended checking order` is still one sentence,
 not three — including when it is set at body size, where typography alone would
 miss it — and a heading that wraps onto two lines is one step across both.
 
-A heading is **not** atomic the way a table is: `w` still walks its individual
-words and `j` at line scope still moves through it line by line. It is ordinary
-prose you may want to select a phrase of — only the two scopes that group text
-into runs treat it as a unit.
+A heading goes further than a table does: `w` walks its individual words *and*
+`j` at line scope still moves through it line by line. Its wrapped lines are
+real reading lines, unlike a table's rows or an equation's, so only the two
+scopes that group text into runs treat it as a unit.
 
 Turn detection off with `view.detect_headings` — see `docs/config.md`.
 
 ## Equations
 
-A display equation behaves exactly as a heading does: **one step at sentence and
-paragraph scope**, and walkable by word and character inside. `s` lands on the
-whole formula and the next `s` lands on the prose after it, however many lines
-the equation runs to — an aligned system is one unit, and an equation number set
-on a line of its own (`(3.4)`) comes with it. A stop inside a formula — `f(x) =
-0.` — does not split it, the same way `2.12.` does not split a heading.
+A display equation is **one unit from line scope up**, exactly as a table is.
+`e`, `s` and `p` land on the whole formula and the next press lands on the prose
+after it, however many rows the equation runs to — an aligned system is one
+unit, and an equation number set on a line of its own (`(3.4)`) comes with it. A
+stop inside a formula — `f(x) = 0.` — does not split it, the same way `2.12.`
+does not split a heading. The highlight is the formula's whole box, so an
+aligned system tints as one rectangle rather than one ragged strip per row.
 
-Not atomic, on purpose: `w` steps through its terms and `cc` then `h`/`l` walks
-its characters, so a single variable or coefficient stays selectable. Only the
-scopes that group text into runs treat the equation as one thing.
+Its rows are not reading lines, which is why `j` at line scope steps over the
+whole thing: stopping on row two of a system is never what you meant. That is
+the one way it differs from a heading, whose wrapped lines *are* reading lines
+and keep a stop each.
+
+Word and char scope still reach inside: `w` steps through its terms and `cc`
+then `h`/`l` walks its characters, so a single variable or coefficient stays
+selectable, with the highlight shrinking to match.
 
 A line reads as a display equation when it is set apart from the prose (it does
 not fill the column), reads as mathematics by its fonts or by rich math

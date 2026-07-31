@@ -67,23 +67,25 @@ The ends may cross freely: the selection always runs from the earlier end to
 the later one, so passing the anchor and coming back leaves the selection
 exactly as it was.
 
-### Tables and images
+### Tables, images and equations
 
-A table or an image is one unit here too: at any scope above char, a single
-motion extends the selection across the whole of it, and a selection that
-covers it entirely is drawn as one rectangle over the table rather than a
-ragged stack of row boxes.
+A table, an image or a display equation is one unit here too: from line scope
+up, a single motion extends the selection across the whole of it. A selection
+that covers one entirely is drawn as **one rectangle** over the whole object
+rather than a ragged stack of row boxes — however the selection came to cover
+it, so dragging an end across a whole formula squares it off too.
 
-Because scope is per end, this is decided independently at each edge. An end at
-char scope sitting inside a table is *not* expanded — that is how you select a
-single figure from a table while the other end selects whole paragraphs.
+Word and char scope reach inside a table or an equation, and their ends are not
+expanded. Because scope is per end, this is decided independently at each edge:
+that is how you select a single figure from a table while the other end selects
+whole paragraphs. An image stays one unit at word scope, having no words inside.
 
 ### Headings
 
 A heading is one step for `s` and `p` here too, so `vs` then `s` selects a whole
-section heading and the next `s` takes the paragraph under it. At word or char
-scope the ends move through a heading normally, since a heading is not atomic —
-see `docs/commands-focus-mode.md`.
+section heading and the next `s` takes the paragraph under it. At line, word or
+char scope the ends move through a heading normally, since its wrapped lines are
+real reading lines — see `docs/commands-focus-mode.md`.
 
 ## Choosing the end and its scope
 

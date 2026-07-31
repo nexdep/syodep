@@ -30,9 +30,12 @@ real files. The strategy, in descending order of coverage:
    `pdf_with_table_gap` (a table with its caption held back by a configurable
    gap, for the edge-trimming rule), `pdf_with_equation` (a display formula
    set apart from body prose, for equation detection), `pdf_with_line_numbers`
-   (body lines each preceded by a left-margin number that restarts every page)
-   and `pdf_with_alternating_margin_fields` (a running head and a folio
-   sharing one footer baseline, swapping sides every page).
+   (body lines each preceded by a left-margin number that restarts every page),
+   `pdf_with_alternating_margin_fields` (a running head and a folio
+   sharing one footer baseline, swapping sides every page) and
+   `pdf_with_multiline_equation` (an aligned system of three ragged rows, the
+   only fixture that can show a formula being one stop at line scope and
+   drawing as one box).
 
    Navigation over tables is tested two ways on purpose. The mapping from
    detected boxes to line ranges (`content_objects`) is a pure function tested
@@ -93,5 +96,5 @@ Release pipeline: see `docs/packaging.md`.
 
 ## Current coverage snapshot
 
-469 Rust tests: 30 config, 281 core, 129 pdf, 15 storage, 14 ffi — plus the CI
+495 Rust tests: 30 config, 294 core, 142 pdf, 15 storage, 14 ffi — plus the CI
 smoke test and docs checks.

@@ -125,14 +125,28 @@ pub enum ObjectKind {
 }
 
 impl ObjectKind {
-    /// Whether this is a single stop at *every* scope above char.
+    /// Whether this is a single stop from *word* scope up.
     ///
-    /// Tables and images are: there is nothing useful inside them to move
-    /// through word by word. A heading, a list item or an equation is not —
-    /// each is text you may well want to select a part of, so they are units
-    /// only for the scopes that group text into runs.
+    /// Only an image is: it has no words to walk through, so `w` inside one
+    /// could only ever mean "leave it". Everything else is made of text a
+    /// reader may want a part of — a table's cells included, which is why a
+    /// table is a [block](Self::is_block) rather than this.
     pub fn is_atomic(self) -> bool {
-        !matches!(self, Self::Heading | Self::ListItem | Self::Equation)
+        matches!(self, Self::Image)
+    }
+
+    /// Whether this is a single stop from *line* scope up, and draws as one
+    /// box when covered end to end.
+    ///
+    /// A table's rows and a display equation's rows are not reading lines:
+    /// stopping on row two of an aligned system, or tinting only the text
+    /// cells of a table and leaving its rules unpainted, is never what the
+    /// reader meant. Word and char scope still walk inside both, so a single
+    /// coefficient or table cell stays reachable.
+    ///
+    /// Every atomic kind is also a block — the two nest, coarsest last.
+    pub fn is_block(self) -> bool {
+        matches!(self, Self::Image | Self::Table | Self::Equation)
     }
 
     /// Whether every sentence terminator inside this is inert, making the whole
@@ -193,25 +207,33 @@ impl PageContent {
             .find(|o| line >= o.start_line && line <= o.end_line)
     }
 
-    /// The *atomic* object containing `line`, if any — headings and list items
-    /// excluded. This is what motion treats as one stop.
+    /// The *atomic* object containing `line`, if any. This is what motion
+    /// treats as one stop from word scope up.
     pub fn atomic_object_at(&self, line: usize) -> Option<&ContentObject> {
         self.object_at(line).filter(|o| o.kind.is_atomic())
+    }
+
+    /// The *block* containing `line`, if any. This is what motion treats as
+    /// one stop from line scope up, and what draws as a single box.
+    pub fn block_object_at(&self, line: usize) -> Option<&ContentObject> {
+        self.object_at(line).filter(|o| o.kind.is_block())
     }
 }
 
 /// Knobs for [`Document::page_content`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ContentOptions {
-    /// Run MuPDF's table detection so tables become single navigable units.
-    /// Costs a second structured-text pass per page.
+    /// Run MuPDF's table detection so a table becomes one navigable unit from
+    /// line scope up, drawn as one box, while word and char scope still walk
+    /// its cells. Costs a second structured-text pass per page.
     pub detect_tables: bool,
     /// Detect headings so each is one sentence and one paragraph. Free: the
     /// type sizes it keys on come from the pass that extracts the text.
     pub detect_headings: bool,
-    /// Detect display equations so each is one sentence and one paragraph, while
-    /// staying walkable by word and character. Free, like headings: the fonts
-    /// and characters it keys on come from the extraction pass.
+    /// Detect display equations so each is one unit from line scope up — one
+    /// sentence, one paragraph, one stop for `e`, and one box — while staying
+    /// walkable by word and character. Free, like headings: the fonts and
+    /// characters it keys on come from the extraction pass.
     pub detect_equations: bool,
     /// Drop running heads, folios and text that does not run in the page's
     /// reading direction, so the caret never traverses them.
@@ -3198,9 +3220,12 @@ mod tests {
     }
 
     #[test]
-    fn a_heading_is_not_an_atomic_object() {
+    fn a_heading_is_neither_atomic_nor_a_block() {
         assert!(!ObjectKind::Heading.is_atomic());
-        assert!(ObjectKind::Table.is_atomic());
+        assert!(!ObjectKind::Heading.is_block());
+        // A table is walkable at word scope but one unit from line scope up.
+        assert!(!ObjectKind::Table.is_atomic());
+        assert!(ObjectKind::Table.is_block());
         assert!(ObjectKind::Image.is_atomic());
     }
 
@@ -3319,6 +3344,37 @@ mod tests {
                 "line {i} reads {other:?}"
             );
         }
+    }
+
+    #[test]
+    fn an_aligned_system_is_one_equation_spanning_its_rows() {
+        let doc =
+            Document::from_bytes(&crate::test_support::pdf_with_multiline_equation()).unwrap();
+        let content = doc
+            .page_content(0, ContentOptions::default(), None)
+            .unwrap();
+        let equations: Vec<_> = content
+            .objects
+            .iter()
+            .filter(|o| o.kind == ObjectKind::Equation)
+            .collect();
+        assert_eq!(equations.len(), 1, "objects: {:?}", content.objects);
+        let equation = equations[0];
+        assert_eq!(
+            equation.end_line - equation.start_line + 1,
+            3,
+            "the three rows are not one object: {equation:?}"
+        );
+        // The box spans every row, so it is wider than the widest single row —
+        // which is exactly what makes it worth drawing instead of per-row
+        // strips.
+        let widest = (equation.start_line..=equation.end_line)
+            .map(|i| content.lines[i].bbox.x1 - content.lines[i].bbox.x0)
+            .fold(0.0f32, f32::max);
+        assert!(
+            equation.bbox.x1 - equation.bbox.x0 >= widest,
+            "box narrower than its widest row"
+        );
     }
 
     #[test]
@@ -3609,15 +3665,36 @@ mod tests {
 
     #[test]
     fn the_object_kind_matrix_is_what_it_claims() {
-        for kind in [ObjectKind::Image, ObjectKind::Table] {
-            assert!(kind.is_atomic() && kind.splits_paragraphs(), "{kind:?}");
+        // (kind, atomic, block, one sentence, splits paragraphs)
+        let matrix = [
+            (ObjectKind::Image, true, true, false, true),
+            (ObjectKind::Table, false, true, false, true),
+            (ObjectKind::Equation, false, true, true, true),
+            (ObjectKind::Heading, false, false, true, true),
+            (ObjectKind::ListItem, false, false, false, false),
+        ];
+        for (kind, atomic, block, one_sentence, splits) in matrix {
+            assert_eq!(kind.is_atomic(), atomic, "{kind:?}: is_atomic");
+            assert_eq!(kind.is_block(), block, "{kind:?}: is_block");
+            assert_eq!(
+                kind.is_one_sentence(),
+                one_sentence,
+                "{kind:?}: is_one_sentence"
+            );
+            assert_eq!(
+                kind.splits_paragraphs(),
+                splits,
+                "{kind:?}: splits_paragraphs"
+            );
         }
-        assert!(!ObjectKind::Heading.is_atomic());
-        assert!(ObjectKind::Heading.splits_paragraphs());
-        // A list item is the only kind that is neither: prose you can walk
-        // word by word, and part of the one paragraph its list makes.
-        assert!(!ObjectKind::ListItem.is_atomic());
-        assert!(!ObjectKind::ListItem.splits_paragraphs());
+        // The categories nest, coarsest last: anything that is one unit from
+        // word scope up is necessarily one from line scope up too.
+        for (kind, ..) in matrix {
+            assert!(
+                !kind.is_atomic() || kind.is_block(),
+                "{kind:?} breaks nesting"
+            );
+        }
     }
 
     #[test]

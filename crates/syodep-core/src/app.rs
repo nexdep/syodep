@@ -1036,14 +1036,26 @@ impl App {
             .copied()
     }
 
-    /// The region containing `line`, but only if motion should treat it as a
-    /// single stop — a table or an image, never a heading.
+    /// The region containing `line`, but only if it is one stop at `scope`.
     ///
-    /// The distinction is the whole reason headings behave differently from
-    /// tables: everything that moves or highlights by a *unit* goes through
-    /// here, so a heading keeps its words individually reachable.
-    fn atomic_object_at(&mut self, page: usize, line: usize) -> Option<ContentObject> {
-        self.region_at(page, line).filter(|o| o.kind.is_atomic())
+    /// The two categories differ at exactly one scope, which is the whole
+    /// reason there are two. At word scope only an *atomic* kind counts, so
+    /// `w` walks into a table's cells and a formula's terms while stepping
+    /// over an image in one press. From line scope up a *block* counts too,
+    /// so a table and an equation each become a single stop however many rows
+    /// they run to. Char scope has no units at all — it is the escape hatch
+    /// that reaches inside everything.
+    ///
+    /// Everything that moves or highlights by a unit goes through here, so
+    /// this one function is where that distinction is made.
+    fn unit_object_at(&mut self, page: usize, line: usize, scope: Scope) -> Option<ContentObject> {
+        let object = self.region_at(page, line)?;
+        let counts = match scope {
+            Scope::Char => false,
+            Scope::Word => object.kind.is_atomic(),
+            Scope::Line | Scope::Sentence | Scope::Paragraph => object.kind.is_block(),
+        };
+        counts.then_some(object)
     }
 
     /// Identity of the region a caret sits in, for "are these two positions in
@@ -1055,13 +1067,14 @@ impl App {
         })
     }
 
-    /// Identity of the atomic object a caret sits in, for "did we leave it
+    /// Identity of the unit a caret sits in at `scope`, for "did we leave it
     /// yet" while stepping.
-    fn atomic_id_at(&mut self, at: Caret) -> Option<ObjectId> {
-        self.atomic_object_at(at.page, at.line).map(|o| ObjectId {
-            page: at.page,
-            start_line: o.start_line,
-        })
+    fn unit_id_at(&mut self, at: Caret, scope: Scope) -> Option<ObjectId> {
+        self.unit_object_at(at.page, at.line, scope)
+            .map(|o| ObjectId {
+                page: at.page,
+                start_line: o.start_line,
+            })
     }
 
     /// The canonical caret for an object: its first cell, or its last.
@@ -2122,15 +2135,13 @@ impl App {
     /// is the degenerate case of a selection — both ends at `at` — which is why
     /// one function serves both modes.
     fn scope_span(&mut self, at: Caret, scope: Scope) -> (Caret, Caret) {
-        // A table or an image is one unit at every scope above char, so the
-        // highlight covers all of it however coarse the scope is.
-        if scope != Scope::Char {
-            if let Some(object) = self.atomic_object_at(at.page, at.line) {
-                return (
-                    self.object_landing(at.page, object, Landing::Start),
-                    self.object_landing(at.page, object, Landing::End),
-                );
-            }
+        // A unit is covered whole, which is also what makes its highlight
+        // collapse to one box rather than a strip per row.
+        if let Some(object) = self.unit_object_at(at.page, at.line, scope) {
+            return (
+                self.object_landing(at.page, object, Landing::Start),
+                self.object_landing(at.page, object, Landing::End),
+            );
         }
         match scope {
             Scope::Char => (at, at),
@@ -2171,10 +2182,8 @@ impl App {
     fn snap_to_scope(&mut self, at: Caret, scope: Scope) -> Caret {
         // Guard first: the word arm below skips whitespace forward and would
         // otherwise walk straight out of the object.
-        if scope != Scope::Char {
-            if let Some(object) = self.atomic_object_at(at.page, at.line) {
-                return self.object_landing(at.page, object, Landing::Start);
-            }
+        if let Some(object) = self.unit_object_at(at.page, at.line, scope) {
+            return self.object_landing(at.page, object, Landing::Start);
         }
         match scope {
             Scope::Char => at,
@@ -2195,14 +2204,15 @@ impl App {
         }
     }
 
-    /// Move `caret` one unit of `scope` in `dir`, counting a whole table or
-    /// image as a single unit.
+    /// Move `caret` one unit of `scope` in `dir`, counting whatever is a single
+    /// unit at that scope — see [`Self::unit_object_at`] — as one step.
     ///
     /// This wraps [`Self::step_scope`] rather than changing it: the per-scope
     /// table stays the pure description of what a word, line, sentence or
-    /// paragraph is, and atomicity is one rule applied on top of all of them.
+    /// paragraph is, and unit-hood is one rule applied on top of all of them.
     /// Because it has the same signature, counts (`5w`) and every caller keep
-    /// working unchanged, and a table costs exactly one repetition.
+    /// working unchanged, and a table costs exactly one repetition at the
+    /// scopes where it is one unit.
     ///
     /// Char scope passes straight through — that is the escape hatch that
     /// keeps a single number inside a table selectable.
@@ -2217,34 +2227,34 @@ impl App {
         if scope == Scope::Char {
             return self.step_scope(caret, scope, dir, goal_x, goal_y);
         }
-        let from = self.atomic_id_at(*caret);
+        let from = self.unit_id_at(*caret, scope);
         if !self.step_scope(caret, scope, dir, goal_x, goal_y) {
-            self.land_on_object(caret, Landing::Start);
+            self.land_on_object(caret, scope, Landing::Start);
             return false;
         }
         // Still inside the object we started in: keep going until we leave it,
         // so the whole object costs one step rather than one step per line.
         if from.is_some() {
             let mut guard = 0;
-            while self.atomic_id_at(*caret) == from {
+            while self.unit_id_at(*caret, scope) == from {
                 guard += 1;
                 // `step_scope` returning true does not guarantee document-order
                 // progress (line scope's column jumps move sideways), so the
                 // loop needs a hard bound to be provably terminating.
                 if guard > MAX_ATOMIC_STEPS || !self.step_scope(caret, scope, dir, goal_x, goal_y) {
-                    self.land_on_object(caret, Landing::Start);
+                    self.land_on_object(caret, scope, Landing::Start);
                     return false;
                 }
             }
         }
-        self.land_on_object(caret, Landing::Start);
+        self.land_on_object(caret, scope, Landing::Start);
         true
     }
 
-    /// If `caret` sits inside an object, move it to that object's canonical
-    /// position, so a caret never rests part-way through one.
-    fn land_on_object(&mut self, caret: &mut Caret, land: Landing) {
-        if let Some(object) = self.atomic_object_at(caret.page, caret.line) {
+    /// If `caret` sits inside a unit of `scope`, move it to that unit's
+    /// canonical position, so a caret never rests part-way through one.
+    fn land_on_object(&mut self, caret: &mut Caret, scope: Scope, land: Landing) {
+        if let Some(object) = self.unit_object_at(caret.page, caret.line, scope) {
             *caret = self.object_landing(caret.page, object, land);
         }
     }
@@ -2342,10 +2352,15 @@ impl App {
     /// `scroll_doc_rect_into_view` wants: it scrolls the minimum amount, so a
     /// span taller than the viewport simply pins its top edge.
     fn span_bbox(&mut self, start: Caret, end: Caret) -> Option<Rect> {
-        // A whole table scrolls into view by its own bounds, so its ruling
-        // lines and empty cells come along with the text.
+        // A whole block scrolls into view by its own bounds, so a table's
+        // ruling lines and a formula's inter-row gaps come along with the
+        // text. Keyed on the span covering the block rather than on the
+        // scope, so it agrees with what `page_span_rects` decided to draw.
         if start.page == end.page {
-            if let Some(object) = self.atomic_object_at(start.page, start.line) {
+            if let Some(object) = self
+                .region_at(start.page, start.line)
+                .filter(|o| o.kind.is_block())
+            {
                 if start.line == object.start_line && end.line == object.end_line {
                     return Some(object.bbox);
                 }
@@ -5066,6 +5081,57 @@ mod tests {
     }
 
     #[test]
+    fn line_motion_steps_over_a_whole_equation_with_one_press() {
+        // The rows of an aligned system are not reading lines, so line scope
+        // treats the formula as one stop the way it does a table.
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_equation_page(dir.path());
+        press(&mut app, "ce");
+        press(&mut app, "jj");
+        assert_caret(&app, 0, 2, 0); // the equation (lines 2..=3), as one stop
+        press(&mut app, "j");
+        assert_caret(&app, 0, 4, 0); // straight out the far side
+        press(&mut app, "k");
+        assert_caret(&app, 0, 2, 0);
+    }
+
+    #[test]
+    fn line_scope_spans_the_whole_equation() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_equation_page(dir.path());
+        press(&mut app, "ce");
+        press(&mut app, "jj");
+        let (start, end) = app.focus_span().unwrap();
+        assert_eq!((start.line, start.cell), (2, 0));
+        assert_eq!(end.line, 3, "span stopped short of the last row");
+    }
+
+    #[test]
+    fn a_whole_equation_draws_as_one_rectangle() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_equation_page(dir.path());
+        press(&mut app, "ce");
+        press(&mut app, "jj");
+        let rects = app.focus_screen_rects().unwrap();
+        assert_eq!(
+            rects.len(),
+            1,
+            "expected one rect for the equation: {rects:?}"
+        );
+
+        // Word scope reaches inside, and its highlight shrinks to the word
+        // rather than staying the whole box.
+        let whole = rects[0];
+        press(&mut app, "cw");
+        let rects = app.focus_screen_rects().unwrap();
+        assert_eq!(rects.len(), 1);
+        assert!(
+            rects[0].width < whole.width,
+            "word highlight should be smaller than the equation box, got {rects:?}"
+        );
+    }
+
+    #[test]
     fn char_motion_still_walks_through_an_equation() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_equation_page(dir.path());
@@ -5082,26 +5148,48 @@ mod tests {
     }
 
     #[test]
-    fn word_motion_treats_a_table_as_one_stop() {
+    fn word_motion_walks_into_a_table() {
+        // A table is a block, not atomic: word scope reaches the words in its
+        // cells rather than stepping over the whole thing in one press.
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_table_page(dir.path());
         press(&mut app, "cw");
         press_into_table(&mut app, "w");
-        assert_caret(&app, 0, 2, 0); // the table, as one stop
-        press(&mut app, "w");
-        assert_caret(&app, 0, 6, 0); // straight out the far side
+        let first = app.caret().unwrap();
+        let mut stops = vec![(first.line, first.cell)];
+        for _ in 0..4 {
+            press(&mut app, "w");
+            let caret = app.caret().unwrap();
+            if !in_table(caret) {
+                break;
+            }
+            stops.push((caret.line, caret.cell));
+        }
+        assert!(
+            stops.len() > 1,
+            "the table was one stop, not several words: {stops:?}"
+        );
     }
 
     #[test]
-    fn word_motion_backwards_lands_on_the_table_start() {
+    fn word_motion_backwards_walks_back_through_a_table() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_table_page(dir.path());
         press(&mut app, "cw");
         press_into_table(&mut app, "w");
+        let first = app.caret().unwrap();
         press(&mut app, "w");
-        assert_caret(&app, 0, 6, 0);
+        let second = app.caret().unwrap();
+        assert!(
+            in_table(second) && second > first,
+            "expected a second word stop inside the table, got {second:?}"
+        );
         press(&mut app, "b");
-        assert_caret(&app, 0, 2, 0); // its start, never a row in the middle
+        assert_eq!(
+            app.caret().unwrap(),
+            first,
+            "`b` should step back one word, not out to the table start"
+        );
     }
 
     #[test]
@@ -5152,9 +5240,12 @@ mod tests {
     }
 
     #[test]
-    fn every_coarse_scope_spans_the_whole_table() {
+    fn every_block_scope_spans_the_whole_table() {
+        // Line scope and coarser: the table is one unit, so the span — and
+        // therefore the highlight — covers all of it. Word scope is excluded
+        // on purpose; it walks inside instead.
         let dir = tempfile::tempdir().unwrap();
-        for scope in ["cw", "ce", "cs", "cp"] {
+        for scope in ["ce", "cs", "cp"] {
             let mut app = app_with_table_page(dir.path());
             press(&mut app, scope);
             press_into_table(&mut app, "j");
@@ -5165,6 +5256,20 @@ mod tests {
                 "{scope}: span does not cover the whole table"
             );
         }
+    }
+
+    #[test]
+    fn word_scope_spans_only_a_word_inside_a_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_table_page(dir.path());
+        press(&mut app, "cw");
+        press_into_table(&mut app, "w");
+        let (start, end) = app.focus_span().unwrap();
+        assert_eq!(start.line, end.line, "a word span crossed table rows");
+        assert!(
+            end.line < 5 || end.cell + 1 < app.line_cell_count(0, 5),
+            "word scope covered the whole table"
+        );
     }
 
     #[test]
@@ -5184,14 +5289,13 @@ mod tests {
     }
 
     #[test]
-    fn a_count_treats_a_table_as_a_single_unit() {
+    fn a_count_treats_a_table_as_a_single_unit_at_line_scope() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_table_page(dir.path());
-        press(&mut app, "cw");
-        // Five word stops follow the starting one ("beta", ".", "Gamma",
-        // "delta", "."), the sixth step lands on the table, and the seventh
-        // is the prose past it — the table costs exactly one repetition.
-        press(&mut app, "7w");
+        press(&mut app, "ce");
+        // Two line stops of prose, the third lands on the table, and the
+        // fourth is the prose past it — the table costs one repetition.
+        press(&mut app, "3j");
         assert_caret(&app, 0, 6, 0);
     }
 

@@ -7,6 +7,93 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-07-31 — Unit-hood became per scope: `is_atomic` from word up, `is_block` from line up
+
+Two complaints, one root. At line scope a multi-row display equation made you
+stop on every row, as if the rows of an aligned system were lines of prose. And
+a highlight over an equation or a table followed the individual text lines
+inside it, so a formula tinted as a ragged staircase of strips — inter-row gaps
+blank, short rows ending early — instead of one rectangle.
+
+The root was that `ObjectKind::is_atomic()` was a *single* category (tables and
+images) doing two jobs at once: deciding what motion treats as one stop, and
+deciding whether a highlight collapses to the object's box. One category can
+only give one answer per kind, so a table was stuck indivisible at word scope
+while an equation was stuck divisible at line scope, and neither could be fixed
+without breaking the other.
+
+### Two nested categories
+
+`is_atomic()` narrowed to images alone — one stop from *word* scope up, since an
+image has no words to walk. A new `is_block()` covers images, tables and
+equations — one stop from *line* scope up, and drawn as one box. They nest
+(atomic implies block), which the kind-matrix test now asserts outright.
+
+Tables moved from atomic to block, which is a deliberate behaviour change: `w`
+now walks the words in a table's cells instead of stepping over the whole thing.
+That was the user's call, and it is the better default — a table's cells are
+text you may well want a part of, whereas its *rows* are not reading lines. The
+old rationale ("there is nothing useful inside them to move through word by
+word") was true of images and overreaching for tables.
+
+Which category a scope consults lives in exactly one new function,
+`App::unit_object_at(page, line, scope)`: char has no units, word asks for
+atomic kinds, line and coarser ask for blocks. The three call sites that
+previously asked `atomic_object_at` — `scope_span`, `snap_to_scope` and the
+`step_scope_atomic` skip loop — now all route through it, and the first two got
+*shorter*, because the helper returning `None` for char scope subsumes the
+`if scope != Scope::Char` guard both of them were carrying. `step_scope` itself,
+the pure per-scope motion table, was not touched; this stays a layer over it,
+per decision 14 — whose "revisit when" column predicted this exact change.
+
+### The drawing code needs no scope, and that is not a coincidence
+
+`page_span_rects` changed by one word: `atomic_object_at` → `block_object_at`.
+It still takes no scope, and deliberately so. It already chose between one box
+and per-line strips by testing whether the span covers the object from its first
+character to its last — and that test is true at precisely the scopes where the
+object is one unit, because at those scopes `scope_span` *returns* the object's
+full extent. So the geometry question and the motion question answer each other
+without either having to know about the other. Word- and char-sized spans inside
+a block fail the test and still draw strips, which is what keeps a single
+variable's highlight small.
+
+Because every highlight is built from that one function, the box propagates for
+free to the focus outline, the visual selection, the stored SQLite rects and the
+annotation embedded into the saved PDF.
+
+### The overhang worry, checked and dismissed
+
+Painting a whole box risks tinting prose above or below it. Tables have a guard
+for that (`table_bbox`), and it was tempting to extend it. Reading it showed why
+it exists and why equations don't need it: a table's rectangle comes from
+MuPDF's table detector, making it "the one object geometry not derived from the
+page's own lines". An equation's box is the union of the very lines it contains,
+so it reaches no further vertically than the strips already drawn today. The
+change is purely horizontal — squaring off ragged rows — plus filling gaps that
+are interior to the formula.
+
+### Tests
+
+Four existing table tests failed by design and were rewritten to the new
+behaviour: word motion now walks *into* a table and `b` steps back one word
+rather than out to its start; `every_coarse_scope_spans_the_whole_table` became
+`every_block_scope_spans_the_whole_table` (word scope dropped, and a new test
+asserts word scope spans only a word); the count test moved to line scope. The
+kind matrix became a full five-kind × four-predicate table plus a nesting
+assertion.
+
+New: `pdf_with_multiline_equation` (an aligned system of three ragged rows —
+the single-row `pdf_with_equation` cannot show either half of this change, since
+with one row the box and the strip are the same rectangle) and a detection test
+that the three rows are one object whose box is wider than its widest row. On
+the core side, injecting hand-built content as the convention requires:
+line motion steps over a whole equation in one press, line scope spans it end to
+end, and it draws as exactly one rectangle that shrinks when you switch to word
+scope. 495 tests, up from 469 — 294 core (from 281) and 142 pdf (from 129).
+
+---
+
 ## 2026-07-30 — Dotted tokens, numbered headings, tighter equations, deeper folios
 
 Prompted by walking the ENDFtk CPC paper (OSTI accepted manuscript) in focus

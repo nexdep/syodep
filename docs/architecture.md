@@ -157,7 +157,7 @@ It is also the only crate that *writes* a PDF: `write_highlights` (plus
 `HighlightAnnotation` and the read-back helper `page_highlights`, which lets tests
 assert against the file rather than the code that produced it).
 
-**Decision — tables and images are atomic units, found by a second text
+**Decision — tables are navigable units, found by a second text
 pass:** `page_content` extracts text once with `PRESERVE_IMAGES`, then runs a
 second pass with `TABLE_HUNT | COLLECT_VECTORS` from which it takes *only* the
 bounding boxes of the detected tables. Two passes are needed because the
@@ -171,7 +171,7 @@ table. Trade-off: detection is a heuristic and costs a second pass (~2ms per
 page, cached), so `view.detect_tables` can switch it off. Boxes that claim
 every line on a page, or that map to a non-contiguous set of lines, are
 discarded rather than guessed at — degrading to line-by-line navigation is
-always safe, whereas a wrong atomic unit is a very visible navigation bug. A
+always safe, whereas a wrong unit is a very visible navigation bug. A
 box's *edges* are trimmed rather than trusted, because MuPDF reports the ruled
 region and it reaches past the last row: an edge line the box only clips, or one
 set apart from the table's own row rhythm, is the prose beside the table and not
@@ -224,23 +224,31 @@ session, built lazily on first content need, so `Document` keeps no interior
 mutability and merely reading a document never pays for it.
 
 **Decision — regions form a chain of decreasing coarseness:** every
-`ContentObject` bounds a sentence, which is what being a region means; three
-predicates on `ObjectKind` say how much further each kind goes. A table or an
-image `is_atomic()` — one stop at every scope above char. A heading and an
-equation are not atomic but `splits_paragraphs()`, so each is one step for `s`
-and `p` while `w` walks inside it, and both `is_one_sentence()` — every
-terminator inside them is inert, which is what keeps `2.12.` and `f(x) = 0.`
-from splitting. A list item is none of the three: one step for `s` only, because
-a list is a single paragraph made of many items, and its sentences are worth
-walking. Adding a kind means answering those three questions rather than
-threading a new mechanism through the motion code — which is exactly what list
-items did before they became regions, and what removing that mechanism bought
-back. `Equation` is the proof: a whole feature that added a detector and
-answered the three questions, with no motion code touched.
+`ContentObject` bounds a sentence, which is what being a region means; four
+predicates on `ObjectKind` say how much further each kind goes, from the finest
+scope up. An image `is_atomic()` — one stop from *word* scope up, because there
+are no words inside one to walk. An image, a table and an equation `is_block()`
+— one stop from *line* scope up, and drawn as a single box; the two categories
+nest, so atomic implies block. A heading, an equation and a table
+`splits_paragraphs()`, each being one step for `s` and `p`; a heading and an
+equation are also `is_one_sentence()`, so every terminator inside them is inert,
+which is what keeps `2.12.` and `f(x) = 0.` from splitting. A list item is none
+of them: one step for `s` only, because a list is a single paragraph made of
+many items, and its sentences are worth walking. Adding a kind means answering
+those four questions rather than threading a new mechanism through the motion
+code — which is exactly what list items did before they became regions, and what
+removing that mechanism bought back.
 
-**Decision — a heading is a *region*, not an atomic object:** `ObjectKind`
-carries `is_atomic()`, false for the prose kinds. Motion and highlighting go
-through the atomic accessors, so a heading keeps its words individually
+Which category a scope consults is the whole of the per-scope difference, and it
+lives in one function (`App::unit_object_at`): char has no units at all, word
+asks for atomic kinds, line and coarser ask for blocks. `page_span_rects` asks
+for blocks unconditionally and needs no scope, because it already keys the
+collapse on whether the span covers the object end to end — which is true at
+exactly the scopes where the object is one unit.
+
+**Decision — a heading is a *region*, and neither atomic nor a block:** motion
+and highlighting go through the unit accessors, which exclude headings at every
+scope, so a heading keeps both its words and its wrapped lines individually
 reachable; sentence runs and paragraph splitting go through the region
 accessors, which include headings, and that alone makes a heading one step at
 sentence and paragraph scope. Headings are found from typography rather than
@@ -415,8 +423,9 @@ Five small components; intentionally boring:
 | 9 | Config errors degrade to defaults + warning | app must always start | — |
 | 10 | cbindgen-generated header, checked into neither repo nor docs | single source of truth in Rust | ABI freeze for plugins (not planned) |
 | 11 | Modal caret over content geometry (mode-selected keymap) | Vim-like `hjkl` caret without losing `hjkl` scrolling; one stop per image; goal-column vertical motion | always-on caret, or richer text objects (phase 3) |
-| 14 | Atomicity is a property of the content, layered over the motion table rather than built into it | `step_scope` stays the pure per-scope description of a word/line/sentence/paragraph; one wrapper makes every scope treat a table or image as one unit, so counts and all six call sites keep working unchanged | a unit needs per-scope behaviour (then the wrapper becomes a scope arm) |
+| 14 | Atomicity is a property of the content, layered over the motion table rather than built into it | `step_scope` stays the pure per-scope description of a word/line/sentence/paragraph; one wrapper makes every scope treat a table or image as one unit, so counts and all six call sites keep working unchanged | ✅ done: unit-hood became per-scope in decision 19, and the wrapper now asks `unit_object_at(.., scope)` rather than a single category |
 | 18 | Quitting with unsaved highlights asks (Save & Quit / Discard & Quit / Cancel) instead of quitting silently or refusing outright | highlights already outlive the session in the database, so "unsaved" only means "not yet embedded in the PDF bytes"; losing that silently on one careless keystroke (or window-manager Alt+F4) was the bug being fixed, and the existing `save_document`/`quit_discarding_highlights` split made the confirm-then-branch trivial to add without a new `Command` | a command palette or scripting API needs to trigger Save & Quit / Discard & Quit outside of the dialog flow (then promote them to `Command` variants) |
+| 19 | Unit-hood is per scope: `is_atomic()` from word scope up, `is_block()` from line scope up | a table's rows and an equation's rows are not reading lines, so both should be one stop for `e`/`s`/`p` and paint as one box — but their contents *are* worth a word at a time, which a single category could not express without losing one or the other. Two nested categories say it in two `matches!` lines, and `page_span_rects` needs no scope at all because covering an object end to end already happens exactly at the scopes where it is one unit | a kind needs a third boundary (say, one unit from sentence scope up but not line), at which point the two booleans should become one "smallest scope at which this is a unit" — which requires moving the mapping into `syodep-core`, since `syodep-pdf` cannot name `Scope` |
 
 ## Sioyek: conceptual inspirations (clean-room)
 

@@ -398,6 +398,38 @@ pub fn pdf_with_equation() -> Vec<u8> {
     two_font_page_pdf(&content, b"/Symbol")
 }
 
+/// Build a single A4 page with body prose, a display equation of several rows —
+/// an aligned system — set apart from it, and more prose.
+///
+/// The multi-row shape is the point: with one row a formula's box and its
+/// single line rectangle are the same, so only this fixture can show either
+/// that the rows are one stop at line scope or that they draw as one box.
+/// Rows are deliberately of different widths, so a box over all of them is
+/// visibly wider than any one row.
+pub fn pdf_with_multiline_equation() -> Vec<u8> {
+    let mut content = String::new();
+    let body = [
+        "The database is a set of directories that each contain a copy of the",
+        "same layout, so that applications may add to it without touching any",
+        "of the files that another application installed there previously.",
+    ];
+    for (i, text) in body.iter().enumerate() {
+        let y = 740.0 - i as f32 * 14.0;
+        content.push_str(&format!("BT /F1 10 Tf 100 {y} Td ({text}) Tj ET\n"));
+    }
+    // The rows of the system: indented, short, in a maths font, and ragged so
+    // their union is wider than any single one.
+    for (i, row) in ["a + b = g", "b + g = d + e", "g = a"].iter().enumerate() {
+        let y = 680.0 - i as f32 * 16.0;
+        content.push_str(&format!("BT /F2 11 Tf 250 {y} Td ({row}) Tj ET\n"));
+    }
+    for (i, text) in body.iter().enumerate() {
+        let y = 600.0 - i as f32 * 14.0;
+        content.push_str(&format!("BT /F1 10 Tf 100 {y} Td ({text}) Tj ET\n"));
+    }
+    two_font_page_pdf(&content, b"/Symbol")
+}
+
 /// Build a single A4 page with a large bold heading, several lines of body
 /// prose, a short bold subheading at body size, and more prose. Used to
 /// exercise heading detection.

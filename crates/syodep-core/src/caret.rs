@@ -758,9 +758,15 @@ pub fn column_index_of(cols: &[(f32, f32)], x0: f32, x1: f32) -> Option<usize> {
 /// The part of an inclusive `start..=end` cell span that falls on `page`, as one
 /// page-space rectangle per covered line.
 ///
-/// A fully covered table or image becomes a single rectangle over its own
-/// bounds: per-line boxes would leave its rules and empty cells unpainted, which
-/// reads as a broken highlight.
+/// A fully covered block — a table, an image or a display equation — becomes a
+/// single rectangle over its own bounds: per-line boxes would leave a table's
+/// rules and empty cells unpainted, and a formula's rows ragged, which reads as
+/// a broken highlight.
+///
+/// Deliberately keyed on how far the span reaches rather than on the scope it
+/// came from, so the two agree without this having to know about scopes: from
+/// line scope up a span covers a block end to end and collapses, while a word-
+/// or char-sized span inside one covers only part of it and does not.
 ///
 /// Pure and page-local so it can serve both consumers of a span — the overlay,
 /// which asks only about visible pages, and storing a highlight, which asks
@@ -785,7 +791,7 @@ pub fn page_span_rects(
     };
     let mut line_idx = first_line;
     while line_idx <= last_line {
-        if let Some(object) = content.atomic_object_at(line_idx) {
+        if let Some(object) = content.block_object_at(line_idx) {
             let whole = object.start_line == line_idx
                 && object.end_line <= last_line
                 && !(page == start.page && start.line == line_idx && start.cell > 0)

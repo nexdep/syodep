@@ -581,8 +581,8 @@ pub fn default_config_doc() -> String {
     );
     let _ = writeln!(out, "highlight_opacity = {}", float(view.highlight_opacity));
     out.push_str(
-        "# Treat each detected table as one stop for focus and selection\n\
-         # motions (char scope still steps through a table's characters).\n\
+        "# Treat each detected table as one stop from line scope up, drawn as\n\
+         # a single box (word and char scope still step through its cells).\n\
          # Images are always single stops; this only controls table detection,\n\
          # which costs a second text pass per page.\n",
     );
@@ -594,10 +594,11 @@ pub fn default_config_doc() -> String {
     );
     let _ = writeln!(out, "detect_headings = {}", view.detect_headings);
     out.push_str(
-        "# Treat each display equation as one step at sentence and paragraph\n\
-         # scope, so a formula is not glued to the sentence before it and a stop\n\
-         # inside it does not split it. Word and char scope still walk through\n\
-         # one. Maths written inline in a sentence is left alone.\n",
+        "# Treat each display equation as one stop from line scope up, drawn as\n\
+         # a single box, so a formula is not glued to the sentence before it, a\n\
+         # stop inside it does not split it, and an aligned system is one step\n\
+         # rather than one per row. Word and char scope still walk through one.\n\
+         # Maths written inline in a sentence is left alone.\n",
     );
     let _ = writeln!(out, "detect_equations = {}", view.detect_equations);
     out.push_str(

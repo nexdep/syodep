@@ -42,29 +42,31 @@ bookmarks, highlights, notes, history. That lives in the SQLite database
 | `visual_opacity` | float | `0.55` | opacity of the selection highlight, `0.0`-`1.0` |
 | `highlight_color` | string | `"#ffe066"` | colour of a highlight, `#rrggbb` — also what is written into the PDF on save |
 | `highlight_opacity` | float | `0.55` | opacity of the highlight overlay, `0.0`-`1.0` |
-| `detect_tables` | bool | `true` | treat each detected table as one stop for focus and selection motions |
+| `detect_tables` | bool | `true` | treat each detected table as one stop from line scope up, drawn as one box |
 | `detect_headings` | bool | `true` | treat each detected heading as one step at sentence and paragraph scope |
-| `detect_equations` | bool | `true` | treat each detected display equation as one step at sentence and paragraph scope |
+| `detect_equations` | bool | `true` | treat each detected display equation as one stop from line scope up, drawn as one box |
 | `skip_page_furniture` | bool | `true` | keep running headers, page numbers and sideways text out of the caret's path |
 
 Documents with a saved reading position restore their previous scroll and
 zoom instead of applying `default_zoom`/`fit_width_on_open`.
 
-**Table detection.** With `detect_tables = true` a table is a single unit for
-every motion above char scope, the way an image already is: one `w` steps onto
-it, the next steps past it, and selecting it in visual mode takes the whole
-table. Char scope (`cc`) still walks through the characters inside, so a single
-figure in a table stays selectable. Detection is a heuristic and costs a second
-text-extraction pass per page; set it to `false` to navigate tables line by line
-as before. Images are unaffected — they are always single stops.
+**Table detection.** With `detect_tables = true` a table is a single unit from
+line scope up: one `e` steps onto it, the next steps past it, selecting it in
+visual mode takes the whole table, and its highlight is one rectangle over the
+whole thing rather than a strip per row. Word and char scope (`cw`, `cc`) still
+walk through the words and characters inside, so a single figure in a table
+stays selectable. Detection is a heuristic and costs a second text-extraction
+pass per page; set it to `false` to navigate tables line by line as before.
+Images go further — they are single stops at word scope too, having no words
+inside.
 
 **Heading detection.** With `detect_headings = true` a heading is one step at
 sentence and paragraph scope: `s` lands on it and the next `s` lands on the body
 beneath, and it is never glued to the following text for want of a full stop.
 Numbered headings such as `2.12. Recommended checking order` count as a single
-sentence despite their periods. Unlike a table a heading is *not* atomic — `w`
-still walks its individual words and `j` at line scope still moves line by line
-— because a heading is ordinary prose you may want to select part of. A line
+sentence despite their periods. A heading goes further than a table — `w` walks
+its individual words *and* `j` at line scope still moves line by line — because
+its wrapped lines are real reading lines, ordinary prose you may want part of. A line
 counts as a heading when it is set noticeably larger than the page's body text,
 or when it is entirely bold at body size and does not fill the column width, or
 when it opens with a multi-level section number and title (`1.1. Methods`,
@@ -73,11 +75,13 @@ headings set at body size. Detection costs nothing extra to extract; set it to
 `false` if the heuristic misjudges a document.
 
 **Equation detection.** With `detect_equations = true` a display equation is one
-step at sentence and paragraph scope, like a heading and for the same reason: a
-formula rarely ends in a full stop, so it would otherwise be glued to the
-sentence before it — and a stop *inside* one (`f(x) = 0.`) would split it. It is
-not atomic, so `w` and `h`/`l` still walk through it, which is what keeps a
-single variable selectable.
+stop from line scope up, exactly like a table. A formula rarely ends in a full
+stop, so it would otherwise be glued to the sentence before it — and a stop
+*inside* one (`f(x) = 0.`) would split it. Its rows are not reading lines
+either, so `j` steps over the whole system rather than row by row, and the
+highlight is the formula's whole box rather than a ragged strip per row. `w` and
+`h`/`l` still walk through it, which is what keeps a single variable
+selectable.
 
 A line counts as a display equation when it is set apart from the prose (it does
 not fill the column width), reads as mathematics either by its fonts or by rich

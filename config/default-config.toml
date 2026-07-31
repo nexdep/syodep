@@ -42,8 +42,8 @@ highlight_color = "#ffe066"
 # overlay only: a highlight saved into the PDF is painted by the reader
 # with Multiply blending, which has no opacity of its own.
 highlight_opacity = 0.55
-# Treat each detected table as one stop for focus and selection
-# motions (char scope still steps through a table's characters).
+# Treat each detected table as one stop from line scope up, drawn as
+# a single box (word and char scope still step through its cells).
 # Images are always single stops; this only controls table detection,
 # which costs a second text pass per page.
 detect_tables = true
@@ -51,10 +51,11 @@ detect_tables = true
 # so it is not glued to the text below it for want of a full stop.
 # Word and line scope still move through a heading normally.
 detect_headings = true
-# Treat each display equation as one step at sentence and paragraph
-# scope, so a formula is not glued to the sentence before it and a stop
-# inside it does not split it. Word and char scope still walk through
-# one. Maths written inline in a sentence is left alone.
+# Treat each display equation as one stop from line scope up, drawn as
+# a single box, so a formula is not glued to the sentence before it, a
+# stop inside it does not split it, and an aligned system is one step
+# rather than one per row. Word and char scope still walk through one.
+# Maths written inline in a sentence is left alone.
 detect_equations = true
 # Skip page furniture when moving: running headers, page numbers, and
 # text that does not run in the page's reading direction, such as a

@@ -15,7 +15,7 @@ Status legend: ✅ done · 🚧 in progress · ⬜ planned
 - ✅ SQLite database with versioned migrations
 - ✅ Save/restore last reading position (fingerprint-keyed)
 - ✅ Render cache (byte-bounded LRU)
-- ✅ Tests (462), CI (lint, Linux+Windows tests, Qt build, smoke test,
+- ✅ Tests (495), CI (lint, Linux+Windows tests, Qt build, smoke test,
   docs checks), documentation set
 
 ## Phase 2 — selection, annotation, search ⬜
@@ -52,13 +52,14 @@ the same code. See the development log.
 
 - ✅ Text objects: word / sentence / paragraph over the text layer
   (focus modes, and as visual-mode selection scopes)
-- ✅ Tables and images as atomic units: detected in the content layer and
-  treated as one stop by every scope above char, in focus and visual mode
+- ✅ Tables, images and equations as navigable units: detected in the content
+  layer and treated as one stop from line scope up — and drawn as a single box
+  — in focus, visual and highlight mode; an image is one stop at word scope too
 - ✅ Headings as sentence/paragraph units: detected from type size and weight,
   so a heading is one step for `s` and `p` while `w` still walks its words
-- ✅ Display equations as sentence/paragraph units: detected from math fonts and
-  math characters on a line set apart from the prose, so a formula is one step
-  for `s` and `p` while `w` and `h`/`l` still walk through it
+- ✅ Display equations as units: detected from math fonts and math characters on
+  a line set apart from the prose, so an aligned system is one step for `e`, `s`
+  and `p` and tints as one box, while `w` and `h`/`l` still walk through it
 - ✅ Page furniture kept out of the caret's path: running heads and folios by
   cross-page repetition, sideways stamps and watermarks by baseline direction
 - ⬜ Text-object selection, highlighting, annotation (`viw`-style
