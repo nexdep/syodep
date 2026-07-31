@@ -2105,11 +2105,10 @@ impl App {
     // one thing in one mode and something else in the other.
 
     /// The caret a highlight should start from when there is no remembered
-    /// position: the top-most content line in the viewport, falling back to the
-    /// first content line of the document.
+    /// position: the top-most content line in the viewport below the scroll-off
+    /// buffer, falling back to the first content line of the document.
     fn entry_caret(&mut self) -> Option<Caret> {
-        let from_visible = if let Some(view_top) = self.session.as_ref().map(|s| s.view.scroll().1)
-        {
+        let from_visible = if let Some(view_top) = self.viewport_content_top() {
             self.topmost_visible_line(view_top)
                 .map(|(page, line)| Caret {
                     page,
@@ -2379,8 +2378,10 @@ impl App {
     }
 
     /// Scroll the minimum amount needed to bring a page-space rectangle on
-    /// `page` into view.
+    /// `page` into view, keeping `view.scroll_off` pixels of context above and
+    /// below it.
     fn scroll_page_rect_into_view(&mut self, page: usize, rect: Rect) {
+        let scroll_off = self.config.view.scroll_off;
         let Some(session) = &mut self.session else {
             return;
         };
@@ -2393,7 +2394,23 @@ impl App {
             py + rect.y0,
             px + rect.x1,
             py + rect.y1,
+            scroll_off,
         );
+    }
+
+    /// Top of the band the highlight is allowed to sit in, in document space:
+    /// the viewport top pushed down by the scroll-off buffer.
+    ///
+    /// The buffer is capped by how far the view *could* still scroll up, so at
+    /// the start of the document — where no amount of scrolling would create
+    /// clearance — the first lines stay reachable. Landing the highlight here
+    /// rather than at the raw viewport top is what stops it from being placed
+    /// inside the buffer and immediately scrolling the view back.
+    fn viewport_content_top(&self) -> Option<f32> {
+        let session = self.session.as_ref()?;
+        let scroll_y = session.view.scroll().1;
+        let scroll_off = self.config.view.scroll_off.max(0.0) / session.view.zoom();
+        Some(scroll_y + scroll_off.min(scroll_y.max(0.0)))
     }
 
     /// An inclusive cell range as one screen rectangle per spanned line,
@@ -2641,14 +2658,13 @@ impl App {
     }
 
     /// After a scroll or page jump in focus mode, move the highlight to the
-    /// top-most content line now visible, keeping its goal column. Unlike focus
-    /// motion this does *not* scroll the view back, so the highlight follows the
-    /// scroll rather than fighting it.
+    /// top-most content line now visible below the scroll-off buffer, keeping
+    /// its goal column. Unlike focus motion this does *not* scroll the view
+    /// back, so the highlight follows the scroll rather than fighting it.
     fn reposition_focus_to_viewport(&mut self) {
-        let Some(session) = self.session.as_ref() else {
+        let Some(view_top) = self.viewport_content_top() else {
             return;
         };
-        let view_top = session.view.scroll().1;
         let goal_x = self.focus_goal_x;
         let scope = self.focus_scope;
         let Some((page, line)) = self.topmost_visible_line(view_top) else {
@@ -3230,7 +3246,7 @@ mod tests {
     use super::*;
     use syodep_config::keys::parse_sequence;
     use syodep_pdf::{
-        test_support::{pdf_with_image, pdf_with_pages},
+        test_support::{pdf_with_image, pdf_with_line_numbers, pdf_with_pages},
         CellKind,
     };
 
@@ -3734,6 +3750,102 @@ mod tests {
         assert_eq!(app.caret().unwrap(), before);
         press(&mut app, "zw"); // fit_width does not move the caret
         assert_eq!(app.caret().unwrap(), before);
+    }
+
+    /// A single page of 48 stacked lines, tall enough that the highlight can
+    /// walk off both edges of the 600px viewport. One page on purpose: the
+    /// fixture repeats its text, and furniture detection would read identical
+    /// lines on a second page as running headers.
+    fn app_with_stacked_lines(dir: &Path, scroll_off: f32) -> App {
+        let mut config = Config::default();
+        config.view.scroll_off = scroll_off;
+        let mut app = App::new(config, Some(Storage::in_memory().unwrap()));
+        app.set_viewport_size(595.0, 600.0);
+        let path = write_pdf_bytes(dir, "lines.pdf", pdf_with_line_numbers(1, 48));
+        app.open_document(&path).unwrap();
+        app
+    }
+
+    #[test]
+    fn scroll_off_keeps_the_focus_clear_of_the_bottom_edge() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_stacked_lines(dir.path(), 80.0);
+        press(&mut app, "ce");
+        press(&mut app, "40j");
+        let (_, rect) = app.focus_screen_rect().unwrap();
+        assert!(
+            (rect.y + rect.height - (600.0 - 80.0)).abs() < 1.0,
+            "the view should stop scrolling 80px short of the edge, got {rect:?}"
+        );
+    }
+
+    #[test]
+    fn scroll_off_zero_lets_the_focus_reach_the_edge() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_stacked_lines(dir.path(), 0.0);
+        press(&mut app, "ce");
+        press(&mut app, "40j");
+        let (_, rect) = app.focus_screen_rect().unwrap();
+        assert!(
+            (rect.y + rect.height - 600.0).abs() < 1.0,
+            "opting out should put the highlight flush with the edge, got {rect:?}"
+        );
+    }
+
+    #[test]
+    fn scroll_off_keeps_the_visual_head_clear_of_the_bottom_edge() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_stacked_lines(dir.path(), 80.0);
+        press(&mut app, "ve");
+        press(&mut app, "40j");
+        let rects = app.visual_screen_rects().unwrap();
+        let head = rects.last().expect("the selection covers visible lines");
+        assert!(
+            head.y + head.height <= 600.0 - 80.0 + 1.0,
+            "the moving end should stay clear of the edge, got {head:?}"
+        );
+    }
+
+    #[test]
+    fn scroll_off_is_conceded_at_the_document_ends() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_stacked_lines(dir.path(), 80.0);
+        // The first line has nothing above it to scroll to, so it must still be
+        // reachable flush against the top.
+        press(&mut app, "ce");
+        assert_caret(&app, 0, 0, 0);
+        assert_eq!(app.session.as_ref().unwrap().view.scroll().1, 0.0);
+        // Likewise the last line against the end of the document.
+        press(&mut app, "47j");
+        let view = &app.session.as_ref().unwrap().view;
+        let max_y = view.layout().total_height() - 600.0 / view.zoom();
+        assert!((view.scroll().1 - max_y).abs() < 0.01);
+    }
+
+    #[test]
+    fn scroll_off_moves_the_landing_line_after_a_page_scroll() {
+        let dir = tempfile::tempdir().unwrap();
+        // <C-d> carries the highlight to the newly visible content. With a
+        // buffer it must land past it, not flush against the top edge, or the
+        // next `k` would immediately scroll the view back.
+        let mut buffered = app_with_stacked_lines(dir.path(), 80.0);
+        press(&mut buffered, "ce");
+        press(&mut buffered, "<C-d>");
+        let (_, rect) = buffered.focus_screen_rect().unwrap();
+        assert!(
+            rect.y + rect.height >= 80.0,
+            "the highlight should clear the top buffer, got {rect:?}"
+        );
+
+        let mut flush = app_with_stacked_lines(dir.path(), 0.0);
+        press(&mut flush, "ce");
+        press(&mut flush, "<C-d>");
+        let (_, flush_rect) = flush.focus_screen_rect().unwrap();
+        assert!(flush_rect.y + flush_rect.height < 80.0);
+        assert!(
+            buffered.caret().unwrap().line > flush.caret().unwrap().line,
+            "the buffer should push the landing line further down the page"
+        );
     }
 
     #[test]

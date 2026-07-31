@@ -14,6 +14,11 @@
 scroll_step = 60.0
 # Pixels moved per horizontal scroll step (h / l).
 horizontal_scroll_step = 60.0
+# Pixels kept between the focused text and the top or bottom edge while
+# the view follows it, so there is always context past the highlight.
+# Not applied at the very start and end of the document, where there is
+# nothing to scroll to. 0.0 lets the highlight sit flush with the edge.
+scroll_off = 80.0
 # Gap between pages, in PDF points (1/72 inch at 100% zoom).
 page_gap = 12.0
 # Zoom factor used when opening a document without a saved position...

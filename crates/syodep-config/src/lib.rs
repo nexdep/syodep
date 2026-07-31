@@ -107,6 +107,10 @@ pub struct ViewConfig {
     pub scroll_step: f32,
     /// Horizontal pixels moved by one scroll step (`scroll_left` / `scroll_right`).
     pub horizontal_scroll_step: f32,
+    /// Pixels of canvas kept between the focused text and the top or bottom
+    /// edge while the view follows it (Vim's `scrolloff`). Conceded at the
+    /// start and end of the document, where there is nothing to scroll to.
+    pub scroll_off: f32,
     /// Gap between pages in document points (1/72 inch at zoom 1.0).
     pub page_gap: f32,
     /// Initial zoom factor for documents without a saved position.
@@ -158,6 +162,10 @@ impl Default for ViewConfig {
         Self {
             scroll_step: 60.0,
             horizontal_scroll_step: 60.0,
+            // About three body lines at the zoom `fit_width_on_open` picks:
+            // enough to see where the sentence you are on is going, small
+            // enough that it never feels like the page moved on its own.
+            scroll_off: 80.0,
             page_gap: 12.0,
             default_zoom: 1.0,
             fit_width_on_open: true,
@@ -544,6 +552,13 @@ pub fn default_config_doc() -> String {
         "horizontal_scroll_step = {}",
         float(view.horizontal_scroll_step)
     );
+    out.push_str(
+        "# Pixels kept between the focused text and the top or bottom edge while\n\
+         # the view follows it, so there is always context past the highlight.\n\
+         # Not applied at the very start and end of the document, where there is\n\
+         # nothing to scroll to. 0.0 lets the highlight sit flush with the edge.\n",
+    );
+    let _ = writeln!(out, "scroll_off = {}", float(view.scroll_off));
     out.push_str("# Gap between pages, in PDF points (1/72 inch at 100% zoom).\n");
     let _ = writeln!(out, "page_gap = {}", float(view.page_gap));
     out.push_str("# Zoom factor used when opening a document without a saved position...\n");
@@ -754,6 +769,8 @@ mod tests {
         assert!(config.view.scroll_step > 0.0);
         assert!(config.view.zoom_step > 1.0);
         assert!(config.view.fit_width_on_open);
+        // A buffer bigger than half a window would fight itself.
+        assert!(config.view.scroll_off > 0.0 && config.view.scroll_off < 200.0);
     }
 
     #[test]
@@ -770,12 +787,14 @@ mod tests {
             r#"
             [view]
             scroll_step = 120.0
+            scroll_off = 0.0
             default_zoom = 1.5
             fit_width_on_open = false
             "#,
         )
         .unwrap();
         assert_eq!(config.view.scroll_step, 120.0);
+        assert_eq!(config.view.scroll_off, 0.0);
         assert_eq!(config.view.default_zoom, 1.5);
         assert!(!config.view.fit_width_on_open);
         // Unspecified fields keep defaults.

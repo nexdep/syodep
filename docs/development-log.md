@@ -7,6 +7,64 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-07-31 — Scroll-off: the highlight stops short of the window edge
+
+Walking down a page in focus mode, the highlighted line ended up flush against
+the bottom border and stayed there, one line of scroll per press, with nothing
+visible below it. You could never see where the sentence you were on was going.
+The same at the top when moving back up. This is Vim's `scrolloff = 0`, and it
+was not a decision — it was the default that fell out of "scroll the minimum
+amount to make the rectangle visible".
+
+`view.scroll_off` (default `80.0`, about three body lines at fit-width zoom) is
+now the clearance the view keeps between the highlight and the top or bottom
+edge. Measured in **screen pixels**, matching `scroll_step`, not in lines the
+way Vim measures it: a PDF has no fixed line height, so a line-valued buffer
+would change size as you read across figures, headings and body text. Pixels
+also mean the strip of context is the same physical size at any zoom.
+
+### One choke point, and a second one going the other way
+
+Every follow-the-highlight scroll in the app — focus, visual and highlight mode
+— already funnelled through `View::scroll_doc_rect_into_view`, so the margin is
+one parameter threaded from `App::scroll_page_rect_into_view`. `layout.rs` stays
+config-free, per its own "all math here is pure" promise: it receives pixels and
+divides by zoom itself.
+
+Two things fell out for free rather than needing code. At the document's first
+and last page the buffer would push the view past the end, and `clamp_scroll`
+already refuses — which is exactly the concession Vim makes at buffer ends, so
+the first and last lines stay reachable flush against the edge. And a span
+taller than the window minus both buffers would leave the two constraints
+fighting, so the margin shrinks to `(view_h - rect_h) / 2`; past the window
+height it reaches zero and a full-page figure still just pins its top edge, as
+before.
+
+The interesting half was the *inverse* direction. `reposition_focus_to_viewport`
+carries the highlight along after `<C-d>`/`<C-f>`/`J`/`K`/`gg`/`G` by landing it
+on the top-most visible line — which, with a buffer, is a line inside the buffer,
+so the very next motion would scroll the view back and undo the jump. Both that
+function and `entry_caret` (the same question when `c` enters focus mode from a
+scrolled position) now ask a new `App::viewport_content_top`, which insets the
+viewport top by the buffer — capped by how far the view could still scroll up,
+which is what keeps the document's opening lines selectable. The two call sites
+feed `topmost_visible_line`, which already meant "first line whose bottom is at
+or below this y", so the inset top was the whole change.
+
+### Tests
+
+Five in `layout.rs` on the pure math: clearance at both edges, pixels not points
+(100px at zoom 2 is 50 points), conceded at both document ends, shrinking for
+tall rects, and the existing minimum-scroll test re-passed with `0.0` to pin
+that opting out reproduces the old behaviour exactly. Four in `app.rs` over a
+new one-page 48-line fixture — one page on purpose, since `pdf_with_line_numbers`
+repeats its text and furniture detection would read identical lines on a second
+page as running headers: focus and visual head both stop 80px short, `0.0` puts
+the highlight flush, and `<C-d>` lands past the buffer where the unbuffered app
+lands inside it. 504 tests, up from 495 (core 303 from 294).
+
+---
+
 ## 2026-07-31 — Unit-hood became per scope: `is_atomic` from word up, `is_block` from line up
 
 Two complaints, one root. At line scope a multi-row display equation made you

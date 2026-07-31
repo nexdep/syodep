@@ -183,7 +183,13 @@ and swallowing that would glue two words together and lose a sentence boundary.
 `and/or`, `km/h` and `src/lib.rs` are unaffected for the same reason — nothing
 before the slash is a host.
 
-The view auto-scrolls to keep the highlight on screen as it moves.
+The view auto-scrolls to keep the highlight on screen as it moves, stopping
+`view.scroll_off` pixels short of the top and bottom edges so there is always
+context past the highlight rather than the highlighted line sitting flush
+against the border. The buffer is given up at the very start and end of the
+document, where there is nothing left to scroll to, so the first and last
+lines stay reachable. Set `view.scroll_off = 0.0` to let the highlight reach
+the edge.
 
 ## Tables and images
 
@@ -278,8 +284,9 @@ instead.)
 
 **Scroll and page jumps reposition the highlight.** After any of these
 commands, the highlight jumps to the top-most content now visible in the
-window, keeping its goal column — so it follows the scroll instead of being
-left behind off-screen.
+window below the `view.scroll_off` buffer, keeping its goal column — so it
+follows the scroll instead of being left behind off-screen, and lands where it
+would have come to rest had you walked there, rather than pinned to the edge.
 
 | Command | Effect | Count |
 |---|---|---|

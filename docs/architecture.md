@@ -64,7 +64,11 @@ input take plain data). Key pieces:
   (PDF points), centered on the widest page. Scroll offsets are stored in
   document space so they survive zoom changes. `View` provides clamped
   scrolling, page navigation, anchor-preserving zoom, fit-width and the
-  visible-page computation.
+  visible-page computation. `scroll_doc_rect_into_view` is the single place
+  the view follows the highlight: it scrolls the minimum amount that leaves
+  `view.scroll_off` screen pixels of clearance above and below the rectangle,
+  and the existing scroll clamp gives that clearance up at the document's
+  first and last page.
 - **Render cache** (`render_cache.rs`): LRU keyed by (page, quantized
   scale), bounded by bytes. Rendering itself is synchronous on the UI
   thread in milestone 1; asynchronous tile rendering is a later milestone

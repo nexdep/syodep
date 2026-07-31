@@ -247,15 +247,33 @@ impl View {
     }
 
     /// Scroll the minimum amount so that a document-space rectangle is fully
-    /// within the viewport. A rectangle larger than the viewport aligns to its
+    /// within the viewport, plus `margin_px` screen pixels of clearance above
+    /// and below it. A rectangle larger than the viewport aligns to its
     /// top-left corner. Used to keep the caret on screen as it moves.
-    pub fn scroll_doc_rect_into_view(&mut self, x0: f32, y0: f32, x1: f32, y1: f32) {
+    ///
+    /// The margin is in screen pixels, not document points, so the strip of
+    /// context it buys stays the same size whatever the zoom. It is only ever
+    /// a lower bound on the scroll: [`Self::clamp_scroll`] still refuses to
+    /// scroll past the document, so at the first and last page the margin is
+    /// silently given up rather than pushing the view off the end.
+    pub fn scroll_doc_rect_into_view(
+        &mut self,
+        x0: f32,
+        y0: f32,
+        x1: f32,
+        y1: f32,
+        margin_px: f32,
+    ) {
         let view_w = self.viewport_width / self.zoom;
         let view_h = self.viewport_height / self.zoom;
-        if y0 < self.scroll_y {
-            self.scroll_y = y0;
-        } else if y1 > self.scroll_y + view_h {
-            self.scroll_y = y1 - view_h;
+        // Both margins plus the rectangle have to fit, or the two constraints
+        // fight and a tall span oscillates. Shrinking the margin instead means
+        // a span taller than the viewport still just pins its top edge.
+        let margin = (margin_px.max(0.0) / self.zoom).min(((view_h - (y1 - y0)) / 2.0).max(0.0));
+        if y0 - margin < self.scroll_y {
+            self.scroll_y = y0 - margin;
+        } else if y1 + margin > self.scroll_y + view_h {
+            self.scroll_y = y1 + margin - view_h;
         }
         if x0 < self.scroll_x {
             self.scroll_x = x0;
@@ -477,15 +495,70 @@ mod tests {
     fn scroll_doc_rect_into_view_scrolls_only_when_needed() {
         let mut view = View::new(three_pages(), 595.0, 600.0);
         // Already visible near the top: no scroll.
-        view.scroll_doc_rect_into_view(10.0, 10.0, 20.0, 30.0);
+        view.scroll_doc_rect_into_view(10.0, 10.0, 20.0, 30.0, 0.0);
         assert_eq!(view.scroll().1, 0.0);
         // A rect below the viewport pulls the view down to reveal its bottom.
-        view.scroll_doc_rect_into_view(10.0, 1000.0, 20.0, 1020.0);
+        view.scroll_doc_rect_into_view(10.0, 1000.0, 20.0, 1020.0, 0.0);
         let view_h = 600.0 / view.zoom();
         assert!((view.scroll().1 - (1020.0 - view_h)).abs() < 0.01);
         // A rect above the current scroll (now ~420) pulls back up to its top.
-        view.scroll_doc_rect_into_view(10.0, 100.0, 20.0, 120.0);
+        view.scroll_doc_rect_into_view(10.0, 100.0, 20.0, 120.0, 0.0);
         assert!((view.scroll().1 - 100.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn scroll_off_keeps_clearance_at_both_edges() {
+        let mut view = View::new(three_pages(), 595.0, 600.0);
+        let view_h = 600.0 / view.zoom();
+        // Below the fold: the rect's bottom stops 80 short of the lower edge.
+        view.scroll_doc_rect_into_view(10.0, 1000.0, 20.0, 1020.0, 80.0);
+        assert!((view.scroll().1 - (1020.0 + 80.0 - view_h)).abs() < 0.01);
+        // Above the viewport (now scrolled to ~500): 80 of clearance is left
+        // above the rect's top.
+        view.scroll_doc_rect_into_view(10.0, 400.0, 20.0, 420.0, 80.0);
+        assert!((view.scroll().1 - (400.0 - 80.0)).abs() < 0.01);
+        // A rect already clear of both margins does not move the view.
+        let before = view.scroll().1;
+        view.scroll_doc_rect_into_view(10.0, before + 200.0, 20.0, before + 220.0, 80.0);
+        assert_eq!(view.scroll().1, before);
+    }
+
+    #[test]
+    fn scroll_off_is_measured_in_pixels_not_points() {
+        let mut view = View::new(three_pages(), 595.0, 600.0);
+        view.set_zoom(2.0);
+        let view_h = 600.0 / 2.0;
+        // 100 px at zoom 2 is 50 document points of clearance.
+        view.scroll_doc_rect_into_view(10.0, 1000.0, 20.0, 1020.0, 100.0);
+        assert!((view.scroll().1 - (1020.0 + 50.0 - view_h)).abs() < 0.01);
+    }
+
+    #[test]
+    fn scroll_off_is_given_up_at_the_document_ends() {
+        let mut view = View::new(three_pages(), 595.0, 600.0);
+        // The very first line cannot have clearance above it: there is nothing
+        // to scroll to, and it must stay reachable.
+        view.scroll_by_px(0.0, 300.0);
+        view.scroll_doc_rect_into_view(10.0, 0.0, 20.0, 20.0, 80.0);
+        assert_eq!(view.scroll().1, 0.0);
+        // Likewise the last line against the document's end.
+        let total = view.layout().total_height();
+        view.scroll_doc_rect_into_view(10.0, total - 20.0, 20.0, total, 80.0);
+        let max_y = total - 600.0 / view.zoom();
+        assert!((view.scroll().1 - max_y).abs() < 0.01);
+    }
+
+    #[test]
+    fn scroll_off_shrinks_for_tall_rects() {
+        let mut view = View::new(three_pages(), 595.0, 600.0);
+        let view_h = 600.0 / view.zoom();
+        // A rect leaving less than two margins' room splits what is left, so
+        // moving onto it cannot bounce between the two constraints.
+        view.scroll_doc_rect_into_view(10.0, 1000.0, 20.0, 1000.0 + view_h - 100.0, 80.0);
+        assert!((view.scroll().1 - (1000.0 - 50.0)).abs() < 0.01);
+        // Taller than the viewport: no margin at all, top edge pinned.
+        view.scroll_doc_rect_into_view(10.0, 700.0, 20.0, 700.0 + view_h + 200.0, 80.0);
+        assert!((view.scroll().1 - 700.0).abs() < 0.01);
     }
 
     #[test]

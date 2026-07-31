@@ -96,5 +96,5 @@ Release pipeline: see `docs/packaging.md`.
 
 ## Current coverage snapshot
 
-495 Rust tests: 30 config, 294 core, 142 pdf, 15 storage, 14 ffi — plus the CI
+504 Rust tests: 30 config, 303 core, 142 pdf, 15 storage, 14 ffi — plus the CI
 smoke test and docs checks.
