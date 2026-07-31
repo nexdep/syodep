@@ -10,7 +10,7 @@
 //! (redraw, quit, show a file dialog). The shell never interprets keys or
 //! touches document state itself.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use syodep_config::keys::Chord;
@@ -164,6 +164,10 @@ struct Session {
     /// Lazily-extracted navigable content, per page. Text is cheap to keep, so
     /// every visited page stays cached for the life of the session.
     content: HashMap<usize, PageContent>,
+    /// Pages whose extraction returned an error. Still cached as empty content
+    /// so motion skips them, but distinct from a genuinely blank page for
+    /// diagnostics (see [`App::ensure_content`]).
+    content_extraction_failed: HashSet<usize>,
     /// What this document repeats in its margins. Learned once, before the
     /// first page is extracted, so every cached page above was filtered
     /// against the same evidence — otherwise navigation would differ depending
@@ -375,6 +379,7 @@ impl App {
             view,
             cache: RenderCache::default(),
             content: HashMap::new(),
+            content_extraction_failed: HashSet::new(),
             furniture: None,
         });
         // Caret positions are document-specific; reset to normal mode.
@@ -732,7 +737,7 @@ impl App {
 
         match command {
             Command::Quit => {
-                // Quitting keeps a highlight in progress, same as save/`a`/`c`,
+                // Quitting keeps a highlight in progress, same as save/`a`/`f`,
                 // and lands in focus so the confirm prompt is never stranded in
                 // highlight mode.
                 if self.mode == Mode::Highlight {
@@ -973,8 +978,11 @@ impl App {
     }
 
     /// Ensure page `page`'s navigable content is extracted and cached.
-    /// Extraction failures are treated as "no content" so caret motion simply
-    /// skips the page rather than erroring.
+    ///
+    /// Extraction failures still cache empty content so caret motion skips the
+    /// page rather than aborting, but the failure is recorded on the session and
+    /// surfaced via [`Self::last_error`] so a damaged extract is not silently
+    /// indistinguishable from a blank page.
     fn ensure_content(&mut self, page: usize) {
         let Some(session) = self.session.as_mut() else {
             return;
@@ -996,14 +1004,26 @@ impl App {
             skip_page_furniture: self.config.view.skip_page_furniture,
             detect_footnotes: self.config.view.detect_footnotes,
         };
-        let content = session
+        let extracted = session
             .doc
-            .page_content(page, opts, session.furniture.as_ref())
-            .unwrap_or_default();
+            .page_content(page, opts, session.furniture.as_ref());
         let Some(session) = self.session.as_mut() else {
             return;
         };
-        session.content.insert(page, content);
+        match extracted {
+            Ok(content) => {
+                session.content.insert(page, content);
+            }
+            Err(e) => {
+                session.content_extraction_failed.insert(page);
+                session.content.insert(page, PageContent::default());
+                // 1-based page number matches what the status line shows.
+                self.last_error = Some(format!(
+                    "could not extract content on page {}: {e}",
+                    page + 1
+                ));
+            }
+        }
     }
 
     /// Replace a page's extracted content, so navigation can be tested against
@@ -1088,27 +1108,44 @@ impl App {
             })
     }
 
-    /// The canonical caret for an object: its first cell, or its last.
+    /// The canonical caret for an object: its first content cell, or its last.
+    /// Empty lines inside the object are skipped so the landing is always a
+    /// real cell when the object invariants hold.
     fn object_landing(&mut self, page: usize, object: ContentObject, land: Landing) -> Caret {
         match land {
-            Landing::Start => Caret {
-                page,
-                line: object.start_line,
-                cell: 0,
-            },
-            Landing::End => Caret {
-                page,
-                line: object.end_line,
-                cell: self
-                    .line_cell_count(page, object.end_line)
-                    .saturating_sub(1),
-            },
+            Landing::Start => {
+                let line = (object.start_line..=object.end_line)
+                    .find(|&l| self.line_cell_count(page, l) > 0)
+                    .unwrap_or(object.start_line);
+                Caret {
+                    page,
+                    line,
+                    cell: 0,
+                }
+            }
+            Landing::End => {
+                let line = (object.start_line..=object.end_line)
+                    .rev()
+                    .find(|&l| self.line_cell_count(page, l) > 0)
+                    .unwrap_or(object.end_line);
+                Caret {
+                    page,
+                    line,
+                    cell: self.line_cell_count(page, line).saturating_sub(1),
+                }
+            }
         }
     }
 
     fn page_line_count(&mut self, page: usize) -> usize {
         self.ensure_content(page);
         self.content(page).len()
+    }
+
+    /// Whether `page` has at least one non-empty navigable line.
+    fn page_has_navigable_content(&mut self, page: usize) -> bool {
+        self.ensure_content(page);
+        self.content(page).iter().any(|l| !l.cells.is_empty())
     }
 
     fn line_cell_count(&mut self, page: usize, line: usize) -> usize {
@@ -1131,21 +1168,23 @@ impl App {
             .map_or(0, |l| nearest_cell_in_line(&l.cells, goal_x))
     }
 
-    /// First page at or after `start` that has navigable content.
+    /// First page at or after `start` that has navigable (non-empty) content.
     fn content_page_from(&mut self, start: usize) -> Option<usize> {
         let count = self.session.as_ref()?.view.layout().page_count();
-        (start..count).find(|&p| self.page_line_count(p) > 0)
+        (start..count).find(|&p| self.page_has_navigable_content(p))
     }
 
     /// First page strictly after `after` with content.
     fn next_content_page(&mut self, after: usize) -> Option<usize> {
         let count = self.session.as_ref()?.view.layout().page_count();
-        ((after + 1)..count).find(|&p| self.page_line_count(p) > 0)
+        ((after + 1)..count).find(|&p| self.page_has_navigable_content(p))
     }
 
     /// Last page strictly before `before` with content.
     fn prev_content_page(&mut self, before: usize) -> Option<usize> {
-        (0..before).rev().find(|&p| self.page_line_count(p) > 0)
+        (0..before)
+            .rev()
+            .find(|&p| self.page_has_navigable_content(p))
     }
 
     /// The first content line whose bottom edge is at or below `view_top`
@@ -1178,15 +1217,21 @@ impl App {
             caret.cell += 1;
             return true;
         }
-        if caret.line + 1 < self.page_line_count(caret.page) {
-            caret.line += 1;
-            caret.cell = 0;
-            return true;
+        let line_count = self.page_line_count(caret.page);
+        for line in (caret.line + 1)..line_count {
+            if self.line_cell_count(caret.page, line) > 0 {
+                caret.line = line;
+                caret.cell = 0;
+                return true;
+            }
         }
         if let Some(next) = self.next_content_page(caret.page) {
+            let line = (0..self.page_line_count(next))
+                .find(|&l| self.line_cell_count(next, l) > 0)
+                .unwrap_or(0);
             *caret = Caret {
                 page: next,
-                line: 0,
+                line,
                 cell: 0,
             };
             return true;
@@ -1199,15 +1244,19 @@ impl App {
             caret.cell -= 1;
             return true;
         }
-        if caret.line > 0 {
-            caret.line -= 1;
-            caret.cell = self
-                .line_cell_count(caret.page, caret.line)
-                .saturating_sub(1);
-            return true;
+        for line in (0..caret.line).rev() {
+            let cells = self.line_cell_count(caret.page, line);
+            if cells > 0 {
+                caret.line = line;
+                caret.cell = cells - 1;
+                return true;
+            }
         }
         if let Some(prev) = self.prev_content_page(caret.page) {
-            let line = self.page_line_count(prev).saturating_sub(1);
+            let line = (0..self.page_line_count(prev))
+                .rev()
+                .find(|&l| self.line_cell_count(prev, l) > 0)
+                .unwrap_or(0);
             caret.page = prev;
             caret.line = line;
             caret.cell = self.line_cell_count(prev, line).saturating_sub(1);
@@ -1217,28 +1266,39 @@ impl App {
     }
 
     fn step_down(&mut self, caret: &mut Caret, goal_x: f32) -> bool {
-        if caret.line + 1 < self.page_line_count(caret.page) {
-            caret.line += 1;
-            caret.cell = self.nearest_cell(caret.page, caret.line, goal_x);
-            return true;
+        let line_count = self.page_line_count(caret.page);
+        for line in (caret.line + 1)..line_count {
+            if self.line_cell_count(caret.page, line) > 0 {
+                caret.line = line;
+                caret.cell = self.nearest_cell(caret.page, line, goal_x);
+                return true;
+            }
         }
         if let Some(next) = self.next_content_page(caret.page) {
+            let line = (0..self.page_line_count(next))
+                .find(|&l| self.line_cell_count(next, l) > 0)
+                .unwrap_or(0);
             caret.page = next;
-            caret.line = 0;
-            caret.cell = self.nearest_cell(next, 0, goal_x);
+            caret.line = line;
+            caret.cell = self.nearest_cell(next, line, goal_x);
             return true;
         }
         false
     }
 
     fn step_up(&mut self, caret: &mut Caret, goal_x: f32) -> bool {
-        if caret.line > 0 {
-            caret.line -= 1;
-            caret.cell = self.nearest_cell(caret.page, caret.line, goal_x);
-            return true;
+        for line in (0..caret.line).rev() {
+            if self.line_cell_count(caret.page, line) > 0 {
+                caret.line = line;
+                caret.cell = self.nearest_cell(caret.page, line, goal_x);
+                return true;
+            }
         }
         if let Some(prev) = self.prev_content_page(caret.page) {
-            let line = self.page_line_count(prev).saturating_sub(1);
+            let line = (0..self.page_line_count(prev))
+                .rev()
+                .find(|&l| self.line_cell_count(prev, l) > 0)
+                .unwrap_or(0);
             caret.page = prev;
             caret.line = line;
             caret.cell = self.nearest_cell(prev, line, goal_x);
@@ -1862,26 +1922,38 @@ impl App {
     }
 
     fn line_step_down(&mut self, mark: &mut LineMark) -> bool {
-        if mark.line + 1 < self.page_line_count(mark.page) {
-            mark.line += 1;
-            return true;
+        let line_count = self.page_line_count(mark.page);
+        for line in (mark.line + 1)..line_count {
+            if self.line_cell_count(mark.page, line) > 0 {
+                mark.line = line;
+                return true;
+            }
         }
         if let Some(next) = self.next_content_page(mark.page) {
+            let line = (0..self.page_line_count(next))
+                .find(|&l| self.line_cell_count(next, l) > 0)
+                .unwrap_or(0);
             mark.page = next;
-            mark.line = 0;
+            mark.line = line;
             return true;
         }
         false
     }
 
     fn line_step_up(&mut self, mark: &mut LineMark) -> bool {
-        if mark.line > 0 {
-            mark.line -= 1;
-            return true;
+        for line in (0..mark.line).rev() {
+            if self.line_cell_count(mark.page, line) > 0 {
+                mark.line = line;
+                return true;
+            }
         }
         if let Some(prev) = self.prev_content_page(mark.page) {
+            let line = (0..self.page_line_count(prev))
+                .rev()
+                .find(|&l| self.line_cell_count(prev, l) > 0)
+                .unwrap_or(0);
             mark.page = prev;
-            mark.line = self.page_line_count(prev).saturating_sub(1);
+            mark.line = line;
             return true;
         }
         false
@@ -2945,8 +3017,8 @@ impl App {
     /// Enter focus mode at `scope`, or — when already focused — reinterpret the
     /// current position at the new scope without moving it.
     ///
-    /// That second case is the point of holding the scope in a field: `cw` then
-    /// `ce` keeps you exactly where you are, where five separate modes each
+    /// That second case is the point of holding the scope in a field: `fw` then
+    /// `fe` keeps you exactly where you are, where five separate modes each
     /// carried their own stale mark.
     fn enter_focus(&mut self, scope: Scope) -> Effects {
         if self.session.is_none() {
@@ -3686,6 +3758,25 @@ mod tests {
             self.focus
         }
 
+        /// Whether `focus` points at an existing non-empty cell.
+        fn caret_is_valid(&self) -> bool {
+            let Some(c) = self.focus else {
+                return true;
+            };
+            self.session
+                .as_ref()
+                .and_then(|s| s.content.get(&c.page))
+                .and_then(|page| page.lines.get(c.line))
+                .and_then(|line| line.cells.get(c.cell))
+                .is_some()
+        }
+
+        fn content_extraction_failed(&self, page: usize) -> bool {
+            self.session
+                .as_ref()
+                .is_some_and(|s| s.content_extraction_failed.contains(&page))
+        }
+
         fn line_mark(&self) -> Option<LineMark> {
             let (start, _) = self.focus_span?;
             Some(LineMark {
@@ -4037,11 +4128,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_doc(dir.path(), 3);
         assert_eq!(app.mode(), Mode::Normal);
-        // A single `c` is only the first half of the `cc` sequence: still
+        // A single `f` is only the first half of the `fc` sequence: still
         // pending, so the mode does not change yet.
-        press(&mut app, "c");
+        press(&mut app, "f");
         assert_eq!(app.mode(), Mode::Normal);
-        // The second `c` completes `cc` and enters caret focus mode.
+        // The second key `c` completes `fc` and enters caret focus mode.
         press(&mut app, "c");
         assert_eq!((app.mode(), app.focus_scope()), (Mode::Focus, Scope::Char));
         let caret = app.caret().expect("caret placed");
@@ -4055,7 +4146,7 @@ mod tests {
     fn caret_right_advances_chars_then_wraps_to_next_page() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_doc(dir.path(), 3);
-        press(&mut app, "cc");
+        press(&mut app, "fc");
         // A few steps stay on the first line (the page's only line of text).
         press(&mut app, "3l");
         let caret = app.caret().unwrap();
@@ -4075,17 +4166,108 @@ mod tests {
     fn caret_left_at_document_start_is_clamped() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_doc(dir.path(), 2);
-        press(&mut app, "cc");
+        press(&mut app, "fc");
         press(&mut app, "h");
         let caret = app.caret().unwrap();
         assert_eq!((caret.page, caret.line, caret.cell), (0, 0, 0));
     }
 
     #[test]
+    fn char_motion_skips_empty_lines_between_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_doc(dir.path(), 1);
+        let empty = ContentLine {
+            bbox: Rect {
+                x0: 100.0,
+                y0: 120.0,
+                x1: 200.0,
+                y1: 130.0,
+            },
+            cells: Vec::new(),
+        };
+        app.set_page_content(
+            0,
+            PageContent {
+                lines: vec![text_line(100.0, "ab"), empty, text_line(140.0, "cd")],
+                ..Default::default()
+            },
+        );
+        press(&mut app, "fc");
+        assert_caret(&app, 0, 0, 0);
+        press(&mut app, "l"); // 'b'
+        press(&mut app, "l"); // skip empty → 'c'
+        assert_caret(&app, 0, 2, 0);
+        assert!(app.caret_is_valid());
+        press(&mut app, "h"); // back across the empty line → 'b'
+        assert_caret(&app, 0, 0, 1);
+        assert!(app.caret_is_valid());
+        press(&mut app, "j"); // vertical also skips the empty line
+        assert_caret(&app, 0, 2, 1);
+        assert!(app.caret_is_valid());
+        assert!(
+            !app.content_extraction_failed(0),
+            "hand-built content is not an extraction failure"
+        );
+    }
+
+    #[test]
+    fn word_count_matches_repeated_single_steps() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut counted = app_with_text_pages(dir.path(), &["one two three four"]);
+        press(&mut counted, "fw");
+        press(&mut counted, "3w");
+        let after_count = counted.caret().unwrap();
+
+        let mut stepped = app_with_text_pages(dir.path(), &["one two three four"]);
+        press(&mut stepped, "fw");
+        press(&mut stepped, "w");
+        press(&mut stepped, "w");
+        press(&mut stepped, "w");
+        assert_eq!(stepped.caret().unwrap(), after_count);
+    }
+
+    #[test]
+    fn focus_and_visual_word_motion_land_together() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut focus = app_with_text_pages(dir.path(), &["alpha beta gamma"]);
+        press(&mut focus, "fw");
+        press(&mut focus, "w");
+        let focus_at = focus.caret().unwrap();
+
+        let mut visual = app_with_text_pages(dir.path(), &["alpha beta gamma"]);
+        press(&mut visual, "vw");
+        press(&mut visual, "w");
+        assert_eq!(visual.caret().unwrap(), focus_at);
+    }
+
+    #[test]
+    fn swapping_visual_ends_twice_is_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma"]);
+        press(&mut app, "vw");
+        press(&mut app, "w");
+        let before = app.visual_span().unwrap();
+        let before_sel = app.visual_selection().unwrap();
+        // `o` is a prefix of `ow`/`oe`/…, so each swap needs a timeout (or an
+        // unbound follow-up) to fire — a bare `oo` is only one swap via the
+        // longest-prefix fallback.
+        press(&mut app, "o");
+        assert!(app.handle_timeout().redraw);
+        press(&mut app, "o");
+        assert!(app.handle_timeout().redraw);
+        assert_eq!(app.visual_span().unwrap(), before);
+        let after_sel = app.visual_selection().unwrap();
+        assert_eq!(after_sel.anchor, before_sel.anchor);
+        assert_eq!(after_sel.head, before_sel.head);
+        assert_eq!(after_sel.anchor_scope, before_sel.anchor_scope);
+        assert_eq!(after_sel.head_scope, before_sel.head_scope);
+    }
+
+    #[test]
     fn caret_vertical_crosses_pages_keeping_column() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_doc(dir.path(), 3);
-        press(&mut app, "cc");
+        press(&mut app, "fc");
         press(&mut app, "3l"); // column 4 (cell index 3)
                                // Each page has a single line, so `j` crosses to the next page.
         press(&mut app, "j");
@@ -4106,7 +4288,7 @@ mod tests {
     fn caret_exit_restores_scrolling() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_doc(dir.path(), 3);
-        press(&mut app, "cc");
+        press(&mut app, "fc");
         assert_eq!((app.mode(), app.focus_scope()), (Mode::Focus, Scope::Char));
         press(&mut app, "<Esc>");
         assert_eq!(app.mode(), Mode::Normal);
@@ -4122,7 +4304,7 @@ mod tests {
     fn caret_focus_keeps_non_hjkl_bindings() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_doc(dir.path(), 5);
-        press(&mut app, "cc");
+        press(&mut app, "fc");
         // `G` still navigates pages while in caret focus mode, and the caret
         // follows to the newly visible page.
         press(&mut app, "G");
@@ -4134,7 +4316,7 @@ mod tests {
     fn caret_focus_page_jumps_carry_the_caret() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_doc(dir.path(), 5);
-        press(&mut app, "cc");
+        press(&mut app, "fc");
         assert_eq!(app.caret().unwrap().page, 0);
         // Next/prev page move the caret onto the destination page.
         press(&mut app, "J");
@@ -4152,7 +4334,7 @@ mod tests {
     fn caret_focus_page_scroll_advances_the_caret() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_doc(dir.path(), 5);
-        press(&mut app, "cc");
+        press(&mut app, "fc");
         let start = app.caret().unwrap().page;
         // A full page-down scroll (<C-f>) carries the caret to later content.
         press(&mut app, "<C-f>");
@@ -4166,7 +4348,7 @@ mod tests {
     fn caret_focus_zoom_leaves_the_caret_in_place() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_doc(dir.path(), 3);
-        press(&mut app, "cc");
+        press(&mut app, "fc");
         press(&mut app, "3l"); // move within the line
         let before = app.caret().unwrap();
         press(&mut app, "z+"); // zoom_in does not move the caret
@@ -4179,7 +4361,7 @@ mod tests {
     fn center_view_centers_the_focus_span() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_stacked_lines(dir.path(), 80.0);
-        press(&mut app, "ce");
+        press(&mut app, "fe");
         press(&mut app, "20j");
         // Scroll away without a focus-repositioning command so the highlight
         // is left off-center (and possibly off-screen).
@@ -4234,7 +4416,7 @@ mod tests {
     fn scroll_off_keeps_the_focus_clear_of_the_bottom_edge() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_stacked_lines(dir.path(), 80.0);
-        press(&mut app, "ce");
+        press(&mut app, "fe");
         press(&mut app, "40j");
         let (_, rect) = app.focus_screen_rect().unwrap();
         assert!(
@@ -4247,7 +4429,7 @@ mod tests {
     fn scroll_off_zero_lets_the_focus_reach_the_edge() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_stacked_lines(dir.path(), 0.0);
-        press(&mut app, "ce");
+        press(&mut app, "fe");
         press(&mut app, "40j");
         let (_, rect) = app.focus_screen_rect().unwrap();
         assert!(
@@ -4276,7 +4458,7 @@ mod tests {
         let mut app = app_with_stacked_lines(dir.path(), 80.0);
         // The first line has nothing above it to scroll to, so it must still be
         // reachable flush against the top.
-        press(&mut app, "ce");
+        press(&mut app, "fe");
         assert_caret(&app, 0, 0, 0);
         assert_eq!(app.session.as_ref().unwrap().view.scroll().1, 0.0);
         // Likewise the last line against the end of the document.
@@ -4293,7 +4475,7 @@ mod tests {
         // buffer it must land past it, not flush against the top edge, or the
         // next `k` would immediately scroll the view back.
         let mut buffered = app_with_stacked_lines(dir.path(), 80.0);
-        press(&mut buffered, "ce");
+        press(&mut buffered, "fe");
         press(&mut buffered, "<C-d>");
         let (_, rect) = buffered.focus_screen_rect().unwrap();
         assert!(
@@ -4302,7 +4484,7 @@ mod tests {
         );
 
         let mut flush = app_with_stacked_lines(dir.path(), 0.0);
-        press(&mut flush, "ce");
+        press(&mut flush, "fe");
         press(&mut flush, "<C-d>");
         let (_, flush_rect) = flush.focus_screen_rect().unwrap();
         assert!(flush_rect.y + flush_rect.height < 80.0);
@@ -4316,7 +4498,7 @@ mod tests {
     fn caret_next_word_skips_current_run_and_whitespace() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_text_pages(dir.path(), &["alpha beta-gamma"]);
-        press(&mut app, "cc");
+        press(&mut app, "fc");
         press(&mut app, "w");
         assert_caret(&app, 0, 0, 6);
     }
@@ -4325,7 +4507,7 @@ mod tests {
     fn caret_next_line_moves_to_the_start_of_the_next_line() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_two_line_pdf(dir.path(), "alpha beta", "gamma delta");
-        press(&mut app, "cc");
+        press(&mut app, "fc");
         press(&mut app, "3l"); // partway into the first line
         press(&mut app, "e");
         // `e` always lands at column 0 of the next line, whatever the active
@@ -4342,7 +4524,7 @@ mod tests {
     fn caret_next_line_clamps_at_the_last_line() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_text_pages(dir.path(), &["only line"]);
-        press(&mut app, "cc");
+        press(&mut app, "fc");
         press(&mut app, "e");
         assert_caret(&app, 0, 0, 0);
     }
@@ -4351,7 +4533,7 @@ mod tests {
     fn caret_prev_word_uses_current_then_previous_run() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_text_pages(dir.path(), &["alpha beta"]);
-        press(&mut app, "cc");
+        press(&mut app, "fc");
         press(&mut app, "8l");
         assert_caret(&app, 0, 0, 8);
         press(&mut app, "b");
@@ -4364,13 +4546,13 @@ mod tests {
     fn caret_word_counts_cross_lines_and_pages() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_two_line_pdf(dir.path(), "one two", "three four");
-        press(&mut app, "cc");
+        press(&mut app, "fc");
         press(&mut app, "2w");
         assert_caret(&app, 0, 1, 0);
 
         let page_dir = tempfile::tempdir().unwrap();
         let mut app = app_with_text_pages(page_dir.path(), &["one two", "three four"]);
-        press(&mut app, "cc");
+        press(&mut app, "fc");
         press(&mut app, "2w");
         assert_caret(&app, 1, 0, 0);
     }
@@ -4379,7 +4561,7 @@ mod tests {
     fn caret_word_motions_clamp_at_document_edges() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_text_pages(dir.path(), &["one"]);
-        press(&mut app, "cc");
+        press(&mut app, "fc");
         press(&mut app, "b");
         assert_caret(&app, 0, 0, 0);
         // A single word has no next run either, so `w` clamps at the same
@@ -4430,7 +4612,7 @@ mod tests {
     fn the_lead_in_prose_does_not_run_into_the_list() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_list_page(dir.path());
-        press(&mut app, "cs");
+        press(&mut app, "fs");
         let (start, end) = app.focus_span().unwrap();
         assert_eq!(
             (start.line, end.line),
@@ -4443,7 +4625,7 @@ mod tests {
     fn each_list_item_is_its_own_sentence() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_list_page(dir.path());
-        press(&mut app, "cs");
+        press(&mut app, "fs");
         press(&mut app, "s");
         assert_eq!(span_text(&mut app), "\u{2022} the globs file");
         press(&mut app, "s");
@@ -4464,7 +4646,7 @@ mod tests {
         // it even though the item carries no full stop.
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_list_page(dir.path());
-        press(&mut app, "cs");
+        press(&mut app, "fs");
         press(&mut app, "sss"); // onto the third item
         let (start, end) = app.focus_span().unwrap();
         assert_eq!((start.line, end.line), (4, 4));
@@ -4479,7 +4661,7 @@ mod tests {
         // list plus the closing prose in one step.
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_list_page(dir.path());
-        press(&mut app, "cp");
+        press(&mut app, "fp");
         let (start, end) = app.focus_span().unwrap();
         assert_eq!(
             (start.line, end.line),
@@ -4518,7 +4700,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        press(&mut app, "cs");
+        press(&mut app, "fs");
         assert_eq!(span_text(&mut app), "1. First point of the list");
         press(&mut app, "s");
         assert_eq!(span_text(&mut app), "2. Second point of the list");
@@ -4529,10 +4711,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_list_page(dir.path());
         // Land inside the second item's wrapped line, then take its sentence.
-        press(&mut app, "cc");
+        press(&mut app, "fc");
         press(&mut app, "jjj");
         assert_eq!(app.caret().unwrap().line, 3);
-        press(&mut app, "cs");
+        press(&mut app, "fs");
         let (start, _) = app.focus_span().unwrap();
         assert_eq!(start.line, 2, "the sentence reached back past the marker");
     }
@@ -4542,7 +4724,7 @@ mod tests {
         // Lists bound sentences only; `w` still walks the marker and words.
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_list_page(dir.path());
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         for _ in 0..12 {
             if app.caret().unwrap().line == 1 {
                 break;
@@ -4614,7 +4796,7 @@ mod tests {
     fn dotted_initials_do_not_break_a_sentence() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "Use a glob, e.g. the star form. Then stop.");
-        press(&mut app, "cs");
+        press(&mut app, "fs");
         assert_eq!(span_text(&mut app), "Use a glob, e.g. the star form.");
     }
 
@@ -4622,7 +4804,7 @@ mod tests {
     fn dotted_initials_are_one_word() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "Use a glob, e.g. the star form.");
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press(&mut app, "www"); // Use, a, glob, then the comma
         press(&mut app, "w");
         assert_eq!(span_text(&mut app), "e.g.");
@@ -4634,7 +4816,7 @@ mod tests {
     fn a_known_abbreviation_does_not_break_a_sentence() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "As shown in Fig. 3 the glob wins. Then stop.");
-        press(&mut app, "cs");
+        press(&mut app, "fs");
         assert_eq!(span_text(&mut app), "As shown in Fig. 3 the glob wins.");
     }
 
@@ -4643,7 +4825,7 @@ mod tests {
         // `etc.` genuinely closes this one, and the capital says so.
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "Globs, magic, etc. The next sentence here.");
-        press(&mut app, "cs");
+        press(&mut app, "fs");
         assert_eq!(span_text(&mut app), "Globs, magic, etc.");
         press(&mut app, "s");
         assert_eq!(span_text(&mut app), "The next sentence here.");
@@ -4653,7 +4835,7 @@ mod tests {
     fn an_abbreviation_before_a_lower_case_word_keeps_the_sentence() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "Globs, magic, etc. and then more. Next.");
-        press(&mut app, "cs");
+        press(&mut app, "fs");
         assert_eq!(span_text(&mut app), "Globs, magic, etc. and then more.");
     }
 
@@ -4664,7 +4846,7 @@ mod tests {
         // construct does not dissolve into it either.
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "Many globs (e.g., the star form) work.");
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press(&mut app, "w");
         assert_eq!(span_text(&mut app), "globs");
         press(&mut app, "w");
@@ -4681,7 +4863,7 @@ mod tests {
     fn a_bracketed_abbreviation_does_not_break_a_sentence() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "Many globs (e.g., the star) work. Then stop.");
-        press(&mut app, "cs");
+        press(&mut app, "fs");
         assert_eq!(span_text(&mut app), "Many globs (e.g., the star) work.");
     }
 
@@ -4691,7 +4873,7 @@ mod tests {
         // sentence, so the capitalised author name is not a new one.
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "Recent work (e.g., Smith 2020) shows it. Next.");
-        press(&mut app, "cs");
+        press(&mut app, "fs");
         assert_eq!(
             span_text(&mut app),
             "Recent work (e.g., Smith 2020) shows it."
@@ -4704,7 +4886,7 @@ mod tests {
         // would anywhere else: a closing bracket after a stop ends the group.
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "Globs and magic (etc.) Then more.");
-        press(&mut app, "cs");
+        press(&mut app, "fs");
         assert_eq!(span_text(&mut app), "Globs and magic (etc.)");
         press(&mut app, "s");
         assert_eq!(span_text(&mut app), "Then more.");
@@ -4714,7 +4896,7 @@ mod tests {
     fn a_quoted_abbreviation_is_still_one_word() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "Globs, magic, [etc.] and more.");
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press(&mut app, "wwww"); // comma, magic, comma, then the bracket
         assert_eq!(span_text(&mut app), "[");
         press(&mut app, "w");
@@ -4730,7 +4912,7 @@ mod tests {
         // is exactly what a technical document does constantly.
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "It scans all the data. glob rules follow.");
-        press(&mut app, "cs");
+        press(&mut app, "fs");
         assert_eq!(span_text(&mut app), "It scans all the data.");
     }
 
@@ -4738,7 +4920,7 @@ mod tests {
     fn a_decimal_number_is_one_word() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "pi is 3.14 exactly");
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press(&mut app, "ww"); // "pi", "is", then the number
         assert_eq!(span_text(&mut app), "3.14");
         press(&mut app, "w");
@@ -4749,7 +4931,7 @@ mod tests {
     fn a_grouped_number_is_one_word() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "about 1,234.56 units");
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press(&mut app, "w");
         assert_eq!(span_text(&mut app), "1,234.56");
     }
@@ -4758,7 +4940,7 @@ mod tests {
     fn a_full_stop_after_a_number_is_still_its_own_word() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "it costs 3. Next");
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press(&mut app, "ww");
         assert_eq!(span_text(&mut app), "3");
         press(&mut app, "w");
@@ -4769,7 +4951,7 @@ mod tests {
     fn a_decimal_point_does_not_end_a_sentence() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "pi is 3.14 exactly. Then more.");
-        press(&mut app, "cs");
+        press(&mut app, "fs");
         assert_eq!(span_text(&mut app), "pi is 3.14 exactly.");
     }
 
@@ -4777,7 +4959,7 @@ mod tests {
     fn a_dotted_version_token_is_one_word() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "see B-VII.0 next");
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press(&mut app, "w"); // "see", then the version token
         assert_eq!(span_text(&mut app), "B-VII.0");
         press(&mut app, "w");
@@ -4791,7 +4973,7 @@ mod tests {
             dir.path(),
             "released in 2006 (ENDF/B-VII.0), 2011 (ENDF/B-VII.1) and 2018.",
         );
-        press(&mut app, "cs");
+        press(&mut app, "fs");
         assert_eq!(
             span_text(&mut app),
             "released in 2006 (ENDF/B-VII.0), 2011 (ENDF/B-VII.1) and 2018."
@@ -4802,7 +4984,7 @@ mod tests {
     fn a_dotted_filename_is_one_word() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "open file.txt now");
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press(&mut app, "w");
         assert_eq!(span_text(&mut app), "file.txt");
         press(&mut app, "w");
@@ -4819,7 +5001,7 @@ mod tests {
         let text = "id 9p4kxc2cvd .1 done";
         let synthetic_space = text.find(" .1").unwrap();
         let mut app = app_with_synthetic_line(dir.path(), text, &[synthetic_space]);
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press(&mut app, "w"); // "id", then the dotted token
         assert_eq!(span_text(&mut app), "9p4kxc2cvd .1");
         press(&mut app, "w");
@@ -4838,7 +5020,7 @@ mod tests {
         let text = "cache Foo next";
         let synthetic_space = text.find(' ').unwrap();
         let mut app = app_with_synthetic_line(dir.path(), text, &[synthetic_space]);
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         assert_eq!(span_text(&mut app), "cache");
         press(&mut app, "w");
         assert_eq!(span_text(&mut app), "Foo");
@@ -4850,7 +5032,7 @@ mod tests {
     fn a_chain_of_dotted_identifiers_is_one_word() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "see a.b.c next");
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press(&mut app, "w");
         assert_eq!(span_text(&mut app), "a.b.c");
         press(&mut app, "w");
@@ -4862,7 +5044,7 @@ mod tests {
         // "word. Next" — the stop ends the sentence; the capital opens another.
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "word. Next");
-        press(&mut app, "cs");
+        press(&mut app, "fs");
         assert_eq!(span_text(&mut app), "word.");
         press(&mut app, "s");
         assert_eq!(span_text(&mut app), "Next");
@@ -4878,7 +5060,7 @@ mod tests {
         let text = "reactor. Efficacy next.";
         let synthetic_space = text.find(". ").unwrap() + 1;
         let mut app = app_with_synthetic_line(dir.path(), text, &[synthetic_space]);
-        press(&mut app, "cs");
+        press(&mut app, "fs");
         assert_eq!(span_text(&mut app), "reactor.");
         press(&mut app, "s");
         assert_eq!(span_text(&mut app), "Efficacy next.");
@@ -4888,7 +5070,7 @@ mod tests {
     fn a_grouped_number_does_not_end_a_sentence() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "we saw 1,234.56 of them. Then more.");
-        press(&mut app, "cs");
+        press(&mut app, "fs");
         assert_eq!(span_text(&mut app), "we saw 1,234.56 of them.");
     }
 
@@ -4896,7 +5078,7 @@ mod tests {
     fn a_full_stop_after_a_number_still_ends_a_sentence() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "it costs 3. Then more.");
-        press(&mut app, "cs");
+        press(&mut app, "fs");
         assert_eq!(span_text(&mut app), "it costs 3.");
     }
 
@@ -4904,7 +5086,7 @@ mod tests {
     fn a_sentence_motion_steps_over_a_number_rather_than_into_it() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "pi is 3.14 exactly. Then more.");
-        press(&mut app, "cs");
+        press(&mut app, "fs");
         press(&mut app, "s");
         assert_eq!(span_text(&mut app), "Then more.");
     }
@@ -4913,7 +5095,7 @@ mod tests {
     fn a_percentage_is_one_word() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "about 45.5% of them");
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press(&mut app, "w");
         assert_eq!(span_text(&mut app), "45.5%");
         press(&mut app, "w");
@@ -4924,7 +5106,7 @@ mod tests {
     fn a_percent_sign_without_a_figure_is_still_its_own_word() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "the % sign here");
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press(&mut app, "w");
         assert_eq!(span_text(&mut app), "%");
     }
@@ -4933,7 +5115,7 @@ mod tests {
     fn a_full_stop_after_a_percentage_still_ends_a_sentence() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "It grew 45.5%. Then more.");
-        press(&mut app, "cs");
+        press(&mut app, "fs");
         assert_eq!(span_text(&mut app), "It grew 45.5%.");
     }
 
@@ -4941,7 +5123,7 @@ mod tests {
     fn scientific_notation_is_one_word() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "about 1.5e-10 metres");
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press(&mut app, "w");
         assert_eq!(span_text(&mut app), "1.5e-10");
         press(&mut app, "w");
@@ -4952,7 +5134,7 @@ mod tests {
     fn scientific_notation_with_a_signed_exponent_is_one_word() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "about 2.3E+5 units");
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press(&mut app, "w");
         assert_eq!(span_text(&mut app), "2.3E+5");
     }
@@ -4961,7 +5143,7 @@ mod tests {
     fn scientific_notation_does_not_end_a_sentence() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "It is 1.5e-10 exactly. Then more.");
-        press(&mut app, "cs");
+        press(&mut app, "fs");
         assert_eq!(span_text(&mut app), "It is 1.5e-10 exactly.");
     }
 
@@ -4971,7 +5153,7 @@ mod tests {
         // merely ends in one does not absorb the sign after it.
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "the cache+1 case");
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press(&mut app, "w");
         assert_eq!(span_text(&mut app), "cache");
         press(&mut app, "w");
@@ -4986,7 +5168,7 @@ mod tests {
     fn a_url_is_one_word() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "See https://example.com/a?x=1 for more");
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press(&mut app, "w");
         assert_eq!(span_text(&mut app), "https://example.com/a?x=1");
         press(&mut app, "w");
@@ -4997,7 +5179,7 @@ mod tests {
     fn a_url_does_not_break_a_sentence() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "See https://example.com/a.html for it. Then.");
-        press(&mut app, "cs");
+        press(&mut app, "fs");
         assert_eq!(
             span_text(&mut app),
             "See https://example.com/a.html for it."
@@ -5008,9 +5190,9 @@ mod tests {
     fn a_stop_after_a_url_is_its_own_word_and_ends_the_sentence() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "See https://example.com. Then more.");
-        press(&mut app, "cs");
+        press(&mut app, "fs");
         assert_eq!(span_text(&mut app), "See https://example.com.");
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press(&mut app, "w");
         assert_eq!(span_text(&mut app), "https://example.com");
         press(&mut app, "w");
@@ -5021,7 +5203,7 @@ mod tests {
     fn a_bracketed_url_is_one_word_between_its_brackets() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "see (https://doi.org/10.1000/182) there");
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press(&mut app, "w");
         assert_eq!(span_text(&mut app), "(");
         press(&mut app, "w");
@@ -5034,7 +5216,7 @@ mod tests {
     fn a_url_keeps_a_bracket_that_is_part_of_it() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "at https://x.org/wiki/Glob_(pattern) today");
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press(&mut app, "w");
         assert_eq!(span_text(&mut app), "https://x.org/wiki/Glob_(pattern)");
     }
@@ -5051,7 +5233,7 @@ mod tests {
         let text = "see https://github .com/njoy/ENDFtk today";
         let synthetic_space = text.find(" .com").unwrap();
         let mut app = app_with_synthetic_line(dir.path(), text, &[synthetic_space]);
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press(&mut app, "w");
         assert_eq!(span_text(&mut app), "https://github .com/njoy/ENDFtk");
         press(&mut app, "w");
@@ -5064,7 +5246,7 @@ mod tests {
         let text = "See https://github .com/njoy/ENDFtk today. Then more.";
         let synthetic_space = text.find(" .com").unwrap();
         let mut app = app_with_synthetic_line(dir.path(), text, &[synthetic_space]);
-        press(&mut app, "cs");
+        press(&mut app, "fs");
         assert_eq!(
             span_text(&mut app),
             "See https://github .com/njoy/ENDFtk today."
@@ -5086,7 +5268,7 @@ mod tests {
             dir.path(),
             "see https://doi .org /10 .17632 /9p4kxc2cvd .1 today",
         );
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press(&mut app, "w");
         assert_eq!(
             span_text(&mut app),
@@ -5129,7 +5311,7 @@ mod tests {
         // extension never gets past its first attempt.
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "one and / or two");
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press(&mut app, "w");
         assert_eq!(span_text(&mut app), "and");
         press(&mut app, "w");
@@ -5142,7 +5324,7 @@ mod tests {
     fn a_bare_host_with_a_path_is_one_word() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "see doi.org/10.1000/182 and www.example.com/x");
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press(&mut app, "w");
         assert_eq!(span_text(&mut app), "doi.org/10.1000/182");
         press(&mut app, "w");
@@ -5155,7 +5337,7 @@ mod tests {
     fn an_email_address_is_one_word() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "write to jane.doe@example.com today");
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press(&mut app, "ww");
         assert_eq!(span_text(&mut app), "jane.doe@example.com");
         press(&mut app, "w");
@@ -5168,7 +5350,7 @@ mod tests {
         // stops it has always had.
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "one and/or two");
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press(&mut app, "w");
         assert_eq!(span_text(&mut app), "and");
         press(&mut app, "w");
@@ -5181,7 +5363,7 @@ mod tests {
     fn a_hyphenated_compound_is_one_word() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "a well-known result");
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press(&mut app, "w");
         assert_eq!(span_text(&mut app), "well-known");
         press(&mut app, "w");
@@ -5194,7 +5376,7 @@ mod tests {
         // joins, so the whole chain is a single stop.
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "the state-of-the-art method");
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press(&mut app, "w");
         assert_eq!(span_text(&mut app), "state-of-the-art");
     }
@@ -5203,7 +5385,7 @@ mod tests {
     fn a_hyphen_joins_letters_to_digits() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "the COVID-19 data");
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press(&mut app, "w");
         assert_eq!(span_text(&mut app), "COVID-19");
     }
@@ -5212,7 +5394,7 @@ mod tests {
     fn a_hyphenated_compound_walks_backwards_as_one_word() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "a well-known result");
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press(&mut app, "www"); // a, well-known, result
         press(&mut app, "b");
         assert_eq!(span_text(&mut app), "well-known");
@@ -5223,7 +5405,7 @@ mod tests {
         // Nothing to join: a dash used as punctuation keeps its own stop.
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "one - two");
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press(&mut app, "w");
         assert_eq!(span_text(&mut app), "-");
         press(&mut app, "w");
@@ -5234,7 +5416,7 @@ mod tests {
     fn a_trailing_hyphen_is_still_its_own_word() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "the well- known result");
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press(&mut app, "w");
         assert_eq!(span_text(&mut app), "well");
         press(&mut app, "w");
@@ -5247,7 +5429,7 @@ mod tests {
         // its own however tightly it is set.
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "one—two three");
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         assert_eq!(span_text(&mut app), "one");
         press(&mut app, "w");
         assert_eq!(span_text(&mut app), "—");
@@ -5261,7 +5443,7 @@ mod tests {
         // character on both sides, so the pair is punctuation as before.
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "one--two three");
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press(&mut app, "w");
         assert_eq!(span_text(&mut app), "--");
         press(&mut app, "w");
@@ -5272,7 +5454,7 @@ mod tests {
     fn a_hyphenated_compound_does_not_disturb_sentences() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "It is a well-known result. Then more.");
-        press(&mut app, "cs");
+        press(&mut app, "fs");
         assert_eq!(span_text(&mut app), "It is a well-known result.");
     }
 
@@ -5302,7 +5484,7 @@ mod tests {
     fn the_caret_never_reaches_a_running_header() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_running_header(dir.path(), 6);
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         // Walk a whole page; the header and folio must never come up.
         for _ in 0..80 {
             press(&mut app, "w");
@@ -5327,7 +5509,7 @@ mod tests {
     fn focus_enters_on_the_first_body_line_not_the_header() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_running_header(dir.path(), 6);
-        press(&mut app, "ce");
+        press(&mut app, "fe");
         let (start, _) = app.focus_span().unwrap();
         let line: String = app.content(start.page)[start.line]
             .cells
@@ -5533,7 +5715,7 @@ mod tests {
     fn sentence_motion_treats_a_heading_as_one_step() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_heading_page(dir.path());
-        press(&mut app, "cs");
+        press(&mut app, "fs");
         press(&mut app, "ss"); // past both prose sentences
         assert_caret(&app, 0, 2, 0);
         let (start, end) = app.focus_span().unwrap();
@@ -5554,7 +5736,7 @@ mod tests {
     fn a_numbered_heading_is_still_one_sentence() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_heading_page(dir.path());
-        press(&mut app, "cs");
+        press(&mut app, "fs");
         press(&mut app, "ss");
         // "2.10. Storing the type" would otherwise be three sentences.
         let (start, end) = app.focus_span().unwrap();
@@ -5602,7 +5784,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_subsection_heading_page(dir.path());
 
-        press(&mut app, "cs");
+        press(&mut app, "fs");
         assert_eq!(span_text(&mut app), "Opening prose sentence.");
         press(&mut app, "s");
         assert_eq!(
@@ -5623,7 +5805,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_subsection_heading_page(dir.path());
 
-        press(&mut app, "cp");
+        press(&mut app, "fp");
         assert_eq!(span_text(&mut app), "Opening prose sentence.");
         press(&mut app, "p");
         assert_eq!(
@@ -5641,7 +5823,7 @@ mod tests {
     fn a_sentence_above_a_heading_does_not_run_into_it() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_heading_page(dir.path());
-        press(&mut app, "cs");
+        press(&mut app, "fs");
         press(&mut app, "s");
         let (_, end) = app.focus_span().unwrap();
         assert_eq!(end.line, 1, "sentence leaked into the heading");
@@ -5651,7 +5833,7 @@ mod tests {
     fn a_wrapped_heading_is_one_sentence_across_both_lines() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_heading_page(dir.path());
-        press(&mut app, "cs");
+        press(&mut app, "fs");
         press_until_line(&mut app, "s", 5);
         let (start, end) = app.focus_span().unwrap();
         assert_eq!((start.line, end.line), (5, 6));
@@ -5661,7 +5843,7 @@ mod tests {
     fn paragraph_motion_treats_a_heading_as_one_paragraph() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_heading_page(dir.path());
-        press(&mut app, "cp");
+        press(&mut app, "fp");
         // The lines are evenly spaced, so the gap heuristic alone would make
         // the whole page one paragraph: the heading edges are doing the work.
         let (start, end) = app.focus_span().unwrap();
@@ -5683,7 +5865,7 @@ mod tests {
     fn the_paragraph_below_a_heading_excludes_it() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_heading_page(dir.path());
-        press(&mut app, "cp");
+        press(&mut app, "fp");
         press(&mut app, "pp"); // heading, then the prose under it
         let (start, end) = app.focus_span().unwrap();
         assert_eq!((start.line, end.line), (3, 4));
@@ -5695,7 +5877,7 @@ mod tests {
         // words stay individually reachable.
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_heading_page(dir.path());
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press_until_line(&mut app, "w", 2);
         let mut stops = vec![app.caret().unwrap().cell];
         for _ in 0..3 {
@@ -5722,7 +5904,7 @@ mod tests {
     fn line_motion_still_steps_through_a_wrapped_heading_line_by_line() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_heading_page(dir.path());
-        press(&mut app, "ce");
+        press(&mut app, "fe");
         press_until_line(&mut app, "j", 4);
         press(&mut app, "j");
         assert_caret(&app, 0, 5, 0);
@@ -5734,7 +5916,7 @@ mod tests {
     fn a_wrapped_heading_draws_one_rectangle_per_line() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_heading_page(dir.path());
-        press(&mut app, "cs");
+        press(&mut app, "fs");
         press_until_line(&mut app, "s", 5);
         let rects = app.focus_screen_rects().unwrap();
         assert_eq!(
@@ -5788,7 +5970,7 @@ mod tests {
     fn sentence_motion_treats_an_equation_as_one_step() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_equation_page(dir.path());
-        press(&mut app, "cs");
+        press(&mut app, "fs");
         press(&mut app, "ss"); // past both prose sentences
         let (start, end) = app.focus_span().unwrap();
         assert_eq!(
@@ -5810,7 +5992,7 @@ mod tests {
         // leaving the second line of the same equation as another.
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_equation_page(dir.path());
-        press(&mut app, "cs");
+        press(&mut app, "fs");
         press(&mut app, "ss");
         let (start, end) = app.focus_span().unwrap();
         let last = equation_page_content().lines[3].cells.len() - 1;
@@ -5823,7 +6005,7 @@ mod tests {
         // The prose line has no full stop, so only the region edge stops it.
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_equation_page(dir.path());
-        press(&mut app, "cs");
+        press(&mut app, "fs");
         press(&mut app, "s");
         let (_, end) = app.focus_span().unwrap();
         assert_eq!(end.line, 1, "sentence leaked into the equation");
@@ -5833,7 +6015,7 @@ mod tests {
     fn paragraph_motion_treats_an_equation_as_one_paragraph() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_equation_page(dir.path());
-        press(&mut app, "cp");
+        press(&mut app, "fp");
         press(&mut app, "p");
         let (start, end) = app.focus_span().unwrap();
         assert_eq!((start.line, end.line), (2, 3));
@@ -5847,7 +6029,7 @@ mod tests {
         // parts stay reachable one word at a time.
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_equation_page(dir.path());
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press_until_line(&mut app, "w", 2);
         let mut stops = vec![app.caret().unwrap().cell];
         for _ in 0..4 {
@@ -5870,7 +6052,7 @@ mod tests {
         // treats the formula as one stop the way it does a table.
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_equation_page(dir.path());
-        press(&mut app, "ce");
+        press(&mut app, "fe");
         press(&mut app, "jj");
         assert_caret(&app, 0, 2, 0); // the equation (lines 2..=3), as one stop
         press(&mut app, "j");
@@ -5883,7 +6065,7 @@ mod tests {
     fn line_scope_spans_the_whole_equation() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_equation_page(dir.path());
-        press(&mut app, "ce");
+        press(&mut app, "fe");
         press(&mut app, "jj");
         let (start, end) = app.focus_span().unwrap();
         assert_eq!((start.line, start.cell), (2, 0));
@@ -5894,7 +6076,7 @@ mod tests {
     fn a_whole_equation_draws_as_one_rectangle() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_equation_page(dir.path());
-        press(&mut app, "ce");
+        press(&mut app, "fe");
         press(&mut app, "jj");
         let rects = app.focus_screen_rects().unwrap();
         assert_eq!(
@@ -5906,7 +6088,7 @@ mod tests {
         // Word scope reaches inside, and its highlight shrinks to the word
         // rather than staying the whole box.
         let whole = rects[0];
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         let rects = app.focus_screen_rects().unwrap();
         assert_eq!(rects.len(), 1);
         assert!(
@@ -5919,7 +6101,7 @@ mod tests {
     fn char_motion_still_walks_through_an_equation() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_equation_page(dir.path());
-        press(&mut app, "cc");
+        press(&mut app, "fc");
         press_until_line(&mut app, "j", 2);
         press(&mut app, "l");
         assert_caret(&app, 0, 2, 1);
@@ -5937,7 +6119,7 @@ mod tests {
         // cells rather than stepping over the whole thing in one press.
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_table_page(dir.path());
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press_into_table(&mut app, "w");
         let first = app.caret().unwrap();
         let mut stops = vec![(first.line, first.cell)];
@@ -5959,7 +6141,7 @@ mod tests {
     fn word_motion_backwards_walks_back_through_a_table() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_table_page(dir.path());
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press_into_table(&mut app, "w");
         let first = app.caret().unwrap();
         press(&mut app, "w");
@@ -5980,7 +6162,7 @@ mod tests {
     fn line_motion_steps_over_a_whole_table_with_one_press() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_table_page(dir.path());
-        press(&mut app, "ce");
+        press(&mut app, "fe");
         press(&mut app, "jj");
         assert_caret(&app, 0, 2, 0);
         press(&mut app, "j");
@@ -5993,7 +6175,7 @@ mod tests {
     fn paragraph_motion_treats_a_table_as_one_paragraph() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_table_page(dir.path());
-        press(&mut app, "cp");
+        press(&mut app, "fp");
         assert_caret(&app, 0, 0, 0);
         press(&mut app, "p");
         assert_caret(&app, 0, 2, 0);
@@ -6005,7 +6187,7 @@ mod tests {
     fn paragraph_span_stops_at_the_table_edge() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_table_page(dir.path());
-        press(&mut app, "cp");
+        press(&mut app, "fp");
         // The prose paragraph above must not reach into the table.
         let (start, end) = app.focus_span().unwrap();
         assert_eq!((start.line, end.line), (0, 1));
@@ -6015,7 +6197,7 @@ mod tests {
     fn sentence_span_does_not_run_into_a_table() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_table_page(dir.path());
-        press(&mut app, "cs");
+        press(&mut app, "fs");
         press(&mut app, "s"); // second sentence: "Gamma delta."
         let (_, end) = app.focus_span().unwrap();
         assert_eq!(end.line, 1, "sentence leaked into the table");
@@ -6029,7 +6211,7 @@ mod tests {
         // therefore the highlight — covers all of it. Word scope is excluded
         // on purpose; it walks inside instead.
         let dir = tempfile::tempdir().unwrap();
-        for scope in ["ce", "cs", "cp"] {
+        for scope in ["fe", "fs", "fp"] {
             let mut app = app_with_table_page(dir.path());
             press(&mut app, scope);
             press_into_table(&mut app, "j");
@@ -6046,7 +6228,7 @@ mod tests {
     fn word_scope_spans_only_a_word_inside_a_table() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_table_page(dir.path());
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press_into_table(&mut app, "w");
         let (start, end) = app.focus_span().unwrap();
         assert_eq!(start.line, end.line, "a word span crossed table rows");
@@ -6060,11 +6242,11 @@ mod tests {
     fn char_scope_still_walks_into_table_characters() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_table_page(dir.path());
-        press(&mut app, "ce");
+        press(&mut app, "fe");
         press(&mut app, "jj");
         assert_caret(&app, 0, 2, 0);
         // Switching to char scope is the escape hatch into a table's contents.
-        press(&mut app, "cc");
+        press(&mut app, "fc");
         press(&mut app, "l");
         assert_caret(&app, 0, 2, 1);
         let (start, end) = app.focus_span().unwrap();
@@ -6076,7 +6258,7 @@ mod tests {
     fn a_count_treats_a_table_as_a_single_unit_at_line_scope() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_table_page(dir.path());
-        press(&mut app, "ce");
+        press(&mut app, "fe");
         // Two line stops of prose, the third lands on the table, and the
         // fourth is the prose past it — the table costs one repetition.
         press(&mut app, "3j");
@@ -6087,7 +6269,7 @@ mod tests {
     fn next_line_treats_the_table_as_a_single_step() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_table_page(dir.path());
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press_into_table(&mut app, "e");
         let caret = app.caret().unwrap();
         // Every scope stepper lands on a unit's *start*, and a table is one
@@ -6102,7 +6284,7 @@ mod tests {
     fn motion_never_rests_part_way_through_a_table() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_table_page(dir.path());
-        press(&mut app, "ce");
+        press(&mut app, "fe");
         for _ in 0..12 {
             press(&mut app, "j");
             let caret = app.caret().unwrap();
@@ -6117,7 +6299,7 @@ mod tests {
     fn visual_selection_covers_a_whole_table_in_one_step() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_table_page(dir.path());
-        press(&mut app, "ce");
+        press(&mut app, "fe");
         press(&mut app, "j"); // line 1, the prose above
         press(&mut app, "v");
         press(&mut app, "j"); // extend over the table
@@ -6133,7 +6315,7 @@ mod tests {
     fn a_char_scope_visual_end_inside_a_table_is_not_expanded() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_table_page(dir.path());
-        press(&mut app, "cc");
+        press(&mut app, "fc");
         press(&mut app, "jj"); // char scope walks into the table
         assert_caret(&app, 0, 2, 0);
         press(&mut app, "v");
@@ -6155,13 +6337,13 @@ mod tests {
     fn a_fully_selected_table_draws_as_one_rectangle() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_table_page(dir.path());
-        press(&mut app, "ce");
+        press(&mut app, "fe");
         press(&mut app, "jj");
         let rects = app.focus_screen_rects().unwrap();
         assert_eq!(rects.len(), 1, "expected one rect for the table: {rects:?}");
 
         // A partial (char-scope) selection inside it still draws per line.
-        press(&mut app, "cc");
+        press(&mut app, "fc");
         let rects = app.focus_screen_rects().unwrap();
         assert_eq!(rects.len(), 1);
         assert!(
@@ -6178,7 +6360,7 @@ mod tests {
         let path = write_pdf_bytes(dir.path(), "image.pdf", pdf_with_image());
         app.open_document(&path).unwrap();
 
-        press(&mut app, "cp");
+        press(&mut app, "fp");
         let (start, end) = app.focus_span().unwrap();
         let image_line = app.session.as_ref().unwrap().content[&0]
             .objects
@@ -6200,7 +6382,7 @@ mod tests {
         let path = write_pdf_bytes(dir.path(), "image.pdf", pdf_with_image());
         app.open_document(&path).unwrap();
 
-        press(&mut app, "cc");
+        press(&mut app, "fc");
         press(&mut app, "w");
         let image = app.caret().unwrap();
         let cell =
@@ -6213,7 +6395,7 @@ mod tests {
     #[test]
     fn caret_without_document_does_not_crash() {
         let mut app = App::new(Config::default(), None);
-        press(&mut app, "cc");
+        press(&mut app, "fc");
         assert!(app.focus_screen_rect().is_none());
         press(&mut app, "l");
         assert!(app.caret().is_none());
@@ -6233,8 +6415,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_doc(dir.path(), 3);
         assert_eq!(app.mode(), Mode::Normal);
-        // A single `c` is only the first half of `ce`: still pending.
-        press(&mut app, "c");
+        // A single `f` is only the first half of `fe`: still pending.
+        press(&mut app, "f");
         assert_eq!(app.mode(), Mode::Normal);
         press(&mut app, "e");
         assert_eq!((app.mode(), app.focus_scope()), (Mode::Focus, Scope::Line));
@@ -6249,7 +6431,7 @@ mod tests {
     fn line_vertical_crosses_pages() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_doc(dir.path(), 3);
-        press(&mut app, "ce");
+        press(&mut app, "fe");
         // Each page has a single line, so `j` crosses to the next page.
         press(&mut app, "j");
         assert_eq!(app.line_mark().unwrap().page, 1);
@@ -6264,7 +6446,7 @@ mod tests {
     fn line_exit_restores_scrolling() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_doc(dir.path(), 3);
-        press(&mut app, "ce");
+        press(&mut app, "fe");
         assert_eq!((app.mode(), app.focus_scope()), (Mode::Focus, Scope::Line));
         press(&mut app, "<Esc>");
         assert_eq!(app.mode(), Mode::Normal);
@@ -6279,7 +6461,7 @@ mod tests {
     fn line_focus_keeps_non_hjkl_bindings_and_carries_mark() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_doc(dir.path(), 5);
-        press(&mut app, "ce");
+        press(&mut app, "fe");
         press(&mut app, "G");
         assert_eq!(app.current_page(), 4);
         assert_eq!(app.line_mark().unwrap().page, 4);
@@ -6294,7 +6476,7 @@ mod tests {
     fn line_horizontal_is_noop_on_single_column() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_doc(dir.path(), 2);
-        press(&mut app, "ce");
+        press(&mut app, "fe");
         let before = app.line_mark().unwrap();
         press(&mut app, "l");
         assert_eq!(app.line_mark().unwrap(), before);
@@ -6306,7 +6488,7 @@ mod tests {
     fn line_horizontal_jumps_columns() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_two_column_page(dir.path());
-        press(&mut app, "ce");
+        press(&mut app, "fe");
         // Start in the left column on its first line.
         let start = app.line_mark().unwrap();
         // `l` jumps to the right column, keeping the goal row (same first line).
@@ -6325,7 +6507,7 @@ mod tests {
     fn sentence_horizontal_jumps_columns() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_two_column_page(dir.path());
-        press(&mut app, "cs");
+        press(&mut app, "fs");
         let start = app.sentence_mark().unwrap();
         press(&mut app, "l");
         let right = app.sentence_mark().unwrap();
@@ -6344,7 +6526,7 @@ mod tests {
     fn paragraph_horizontal_jumps_columns() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_two_column_page(dir.path());
-        press(&mut app, "cp");
+        press(&mut app, "fp");
         let start = app.paragraph_mark().unwrap();
         press(&mut app, "l");
         let right = app.paragraph_mark().unwrap();
@@ -6363,7 +6545,7 @@ mod tests {
     fn sentence_column_jump_tracks_goal_row() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_two_column_page(dir.path());
-        press(&mut app, "cs");
+        press(&mut app, "fs");
         // Drop one sentence in the left column, then jump across: land on the
         // right-column sentence nearest that new row, not the top one.
         press(&mut app, "j");
@@ -6382,7 +6564,7 @@ mod tests {
     #[test]
     fn line_without_document_does_not_crash() {
         let mut app = App::new(Config::default(), None);
-        press(&mut app, "ce");
+        press(&mut app, "fe");
         assert!(app.focus_screen_rect().is_none());
         press(&mut app, "j");
         assert!(app.line_mark().is_none());
@@ -6393,8 +6575,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_text_pages(dir.path(), &["alpha beta"]);
         assert_eq!(app.mode(), Mode::Normal);
-        // A single `c` is only the first half of `cw`: still pending.
-        press(&mut app, "c");
+        // A single `f` is only the first half of `fw`: still pending.
+        press(&mut app, "f");
         assert_eq!(app.mode(), Mode::Normal);
         press(&mut app, "w");
         assert_eq!((app.mode(), app.focus_scope()), (Mode::Focus, Scope::Word));
@@ -6415,7 +6597,7 @@ mod tests {
         let mut app = app_with_two_line_pdf(dir.path(), "alpha beta", "gamma delta");
         let first_line_bottom = app.line_bbox(0, 0).unwrap().y1;
         app.scroll_by_px(0.0, first_line_bottom + 1.0);
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         let mark = app.word_mark().expect("word marked");
         assert_eq!((mark.page, mark.line, mark.start_cell), (0, 1, 0));
     }
@@ -6426,7 +6608,7 @@ mod tests {
         // A colon, not a hyphen: a hyphen between two words joins them into a
         // single stop -- see `a_hyphenated_compound_is_one_word`.
         let mut app = app_with_text_pages(dir.path(), &["alpha beta:gamma"]);
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         // `l`/`w` advance to the next word run (the "beta" before the colon).
         press(&mut app, "l");
         let mark = app.word_mark().unwrap();
@@ -6448,14 +6630,14 @@ mod tests {
     fn word_right_crosses_lines_and_pages() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_two_line_pdf(dir.path(), "one two", "three four");
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press(&mut app, "2l");
         let mark = app.word_mark().unwrap();
         assert_eq!((mark.line, mark.start_cell), (1, 0)); // "three" on line 2
 
         let page_dir = tempfile::tempdir().unwrap();
         let mut app = app_with_text_pages(page_dir.path(), &["one two", "three four"]);
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press(&mut app, "2l");
         let mark = app.word_mark().unwrap();
         assert_eq!((mark.page, mark.start_cell), (1, 0));
@@ -6465,7 +6647,7 @@ mod tests {
     fn word_vertical_crosses_pages() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_text_pages(dir.path(), &["alpha beta", "gamma delta"]);
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         // Each page has a single line, so `j` crosses to the next page.
         press(&mut app, "j");
         assert_eq!(app.word_mark().unwrap().page, 1);
@@ -6480,7 +6662,7 @@ mod tests {
     fn word_exit_restores_scrolling() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_doc(dir.path(), 3);
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         assert_eq!((app.mode(), app.focus_scope()), (Mode::Focus, Scope::Word));
         press(&mut app, "<Esc>");
         assert_eq!(app.mode(), Mode::Normal);
@@ -6495,7 +6677,7 @@ mod tests {
     fn word_focus_keeps_non_hjkl_bindings_and_carries_mark() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_doc(dir.path(), 5);
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press(&mut app, "G");
         assert_eq!(app.current_page(), 4);
         assert_eq!(app.word_mark().unwrap().page, 4);
@@ -6512,18 +6694,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_doc(dir.path(), 5);
         // Establish a position at char scope on page 0, then leave it behind.
-        press(&mut app, "cc");
+        press(&mut app, "fc");
         assert_eq!(app.focus_caret().unwrap().page, 0);
         // Work at word scope, several pages away.
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press(&mut app, "G");
         assert_eq!(app.focus_caret().unwrap().page, 4);
         // Every other scope re-reads the position we are actually at.
         for (keys, scope) in [
-            ("ce", Scope::Line),
-            ("cs", Scope::Sentence),
-            ("cp", Scope::Paragraph),
-            ("cc", Scope::Char),
+            ("fe", Scope::Line),
+            ("fs", Scope::Sentence),
+            ("fp", Scope::Paragraph),
+            ("fc", Scope::Char),
         ] {
             press(&mut app, keys);
             assert_eq!(app.focus_scope(), scope);
@@ -6539,7 +6721,7 @@ mod tests {
     /// `<Esc>` does.
     ///
     /// The moving end of a selection *is* the focus position, so there is no
-    /// second copy to go stale. When they were separate fields, the `c` chords
+    /// second copy to go stale. When they were separate fields, the `f` chords
     /// read the pre-selection position and silently discarded the head.
     #[test]
     fn leaving_visual_by_scope_chord_keeps_the_position() {
@@ -6548,12 +6730,12 @@ mod tests {
         // the head rather than the start of a line — otherwise snapping would
         // hide the bug on a single-line fixture.
         let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma delta"]);
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press(&mut app, "vk");
         press(&mut app, "l");
         let head = app.visual_selection().expect("selection").head;
         assert!(head.cell > 0, "the head must have actually moved");
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         assert_eq!((app.mode(), app.focus_scope()), (Mode::Focus, Scope::Word));
         assert_eq!(
             app.focus_caret(),
@@ -6564,13 +6746,13 @@ mod tests {
         // And across lines, where a line-scope exit is meaningful: the head's
         // line is kept, snapping only the column.
         let mut app = app_with_two_line_pdf(dir.path(), "alpha beta", "gamma delta");
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         assert_eq!(app.focus_caret().unwrap().line, 0);
         press(&mut app, "vk");
         press(&mut app, "j"); // head down to the second line
         let head = app.visual_selection().expect("selection").head;
         assert_eq!(head.line, 1, "the head must have changed line");
-        press(&mut app, "ce");
+        press(&mut app, "fe");
         assert_eq!((app.mode(), app.focus_scope()), (Mode::Focus, Scope::Line));
         assert_eq!(
             app.focus_caret(),
@@ -6586,7 +6768,7 @@ mod tests {
     fn scope_carries_out_of_visual() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma delta"]);
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press(&mut app, "vk");
         press(&mut app, "ve");
         let head = app.visual_selection().expect("selection").head;
@@ -6601,7 +6783,7 @@ mod tests {
     fn swapping_ends_exchanges_positions_and_scopes() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma delta"]);
-        press(&mut app, "cc");
+        press(&mut app, "fc");
         press(&mut app, "vk"); // visual, char scope at both ends
         press(&mut app, "l"); // head moves off the anchor
         press(&mut app, "vw"); // head becomes word-granular
@@ -6632,11 +6814,11 @@ mod tests {
     fn visual_inherits_and_returns_every_focus_scope() {
         let dir = tempfile::tempdir().unwrap();
         for (keys, scope) in [
-            ("cc", Scope::Char),
-            ("cw", Scope::Word),
-            ("ce", Scope::Line),
-            ("cs", Scope::Sentence),
-            ("cp", Scope::Paragraph),
+            ("fc", Scope::Char),
+            ("fw", Scope::Word),
+            ("fe", Scope::Line),
+            ("fs", Scope::Sentence),
+            ("fp", Scope::Paragraph),
         ] {
             let mut app = app_with_text_pages(dir.path(), &["alpha beta. gamma delta."]);
             press(&mut app, keys);
@@ -6661,7 +6843,7 @@ mod tests {
     fn word_motions_work_at_every_scope() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma"]);
-        press(&mut app, "cs");
+        press(&mut app, "fs");
         // The whole sentence is highlighted, starting at cell 0.
         let (start, end) = app.focus_span().unwrap();
         assert_eq!(start.cell, 0);
@@ -6676,7 +6858,7 @@ mod tests {
     #[test]
     fn word_without_document_does_not_crash() {
         let mut app = App::new(Config::default(), None);
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         assert!(app.focus_screen_rect().is_none());
         press(&mut app, "l");
         assert!(app.word_mark().is_none());
@@ -6722,7 +6904,7 @@ mod tests {
     fn sentence_next_skips_a_footnote_block_entirely() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_footnote_page(dir.path());
-        press(&mut app, "cs");
+        press(&mut app, "fs");
         press(&mut app, "s"); // "Delta epsilon zeta."
         assert_caret(&app, 0, 1, 0);
         // Unlike a table, which costs `s` one stop of its own (see
@@ -6736,7 +6918,7 @@ mod tests {
     fn paragraph_next_skips_a_footnote_block_entirely() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_footnote_page(dir.path());
-        press(&mut app, "cp");
+        press(&mut app, "fp");
         let (start, end) = app.focus_span().unwrap();
         assert_eq!((start.line, end.line), (0, 1));
         // The footnote is its own paragraph (it splits paragraphs like every
@@ -6750,7 +6932,7 @@ mod tests {
     fn word_motion_can_still_step_into_a_footnote() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_footnote_page(dir.path());
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         for _ in 0..20 {
             if app.caret().unwrap().line == 2 {
                 return;
@@ -6764,13 +6946,13 @@ mod tests {
     fn a_sentence_started_inside_a_footnote_still_expands_normally() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_footnote_page(dir.path());
-        press(&mut app, "ce");
+        press(&mut app, "fe");
         press(&mut app, "jj");
         assert_caret(&app, 0, 2, 0);
         // Switching to sentence scope, still on the footnote's own line, must
         // expand it as an ordinary sentence: deliberate entry is unaffected
         // by the auto-search skip that keeps `s`/`p` from landing here.
-        press(&mut app, "cs");
+        press(&mut app, "fs");
         let (start, end) = app.focus_span().unwrap();
         assert_eq!((start.line, end.line), (2, 2));
         assert_eq!(start.cell, 0);
@@ -6783,8 +6965,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_text_pages(dir.path(), &["Alpha beta. Gamma delta."]);
         assert_eq!(app.mode(), Mode::Normal);
-        // A single `c` is only the first half of `cs`: still pending.
-        press(&mut app, "c");
+        // A single `f` is only the first half of `fs`: still pending.
+        press(&mut app, "f");
         assert_eq!(app.mode(), Mode::Normal);
         press(&mut app, "s");
         assert_eq!(
@@ -6804,14 +6986,14 @@ mod tests {
     /// `s` and `p` are *motions*, not scope changes: they move by their own
     /// unit whatever the active scope is, and the highlight stays the size the
     /// active scope makes it. That distinction is the whole point of the
-    /// feature — `cs` would change both.
+    /// feature — `fs` would change both.
     #[test]
     fn sentence_and_paragraph_motions_work_at_every_scope() {
         let dir = tempfile::tempdir().unwrap();
         for (enter, scope) in [
-            ("cc", Scope::Char),
-            ("cw", Scope::Word),
-            ("ce", Scope::Line),
+            ("fc", Scope::Char),
+            ("fw", Scope::Word),
+            ("fe", Scope::Line),
         ] {
             let mut app = app_with_text_pages(dir.path(), &["Alpha beta. Gamma delta."]);
             press(&mut app, enter);
@@ -6841,7 +7023,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // A two-column page has more than one paragraph (split at the gap).
         let mut app = app_with_two_column_page(dir.path());
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         let before = app.focus_caret().unwrap();
         press(&mut app, "p");
         assert_eq!((app.mode(), app.focus_scope()), (Mode::Focus, Scope::Word));
@@ -6852,7 +7034,7 @@ mod tests {
     fn scope_motions_take_counts() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_text_pages(dir.path(), &["Alpha beta. Gamma delta. Epsilon zeta."]);
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press(&mut app, "2s");
         // Third sentence: "Epsilon zeta." begins at cell 25.
         assert_eq!(app.focus_caret().unwrap().cell, 25);
@@ -6862,7 +7044,7 @@ mod tests {
     fn scope_motions_clamp_at_the_document_end() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_text_pages(dir.path(), &["Alpha beta. Gamma delta."]);
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press(&mut app, "s");
         let last = app.focus_caret().unwrap();
         // Already on the final sentence: further motion is a no-op, not a wrap
@@ -6875,7 +7057,7 @@ mod tests {
     fn sentence_motion_grows_a_selection_in_visual_mode() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_text_pages(dir.path(), &["Alpha beta. Gamma delta."]);
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press(&mut app, "vk");
         let anchor = app.visual_selection().unwrap().anchor;
         press(&mut app, "s");
@@ -6887,18 +7069,18 @@ mod tests {
         assert!(end.cell > start.cell, "the selection grew");
     }
 
-    /// A bare `s` and the `cs` chord live on different trie paths, so adding
+    /// A bare `s` and the `fs` chord live on different trie paths, so adding
     /// the motion must not shadow the scope chord.
     #[test]
     fn motion_keys_do_not_shadow_the_scope_chords() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_text_pages(dir.path(), &["Alpha beta. Gamma delta."]);
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         let at = app.focus_caret().unwrap();
-        // `cs` switches scope in place...
-        press(&mut app, "cs");
+        // `fs` switches scope in place...
+        press(&mut app, "fs");
         assert_eq!(app.focus_scope(), Scope::Sentence);
-        assert_eq!(app.focus_caret().unwrap(), at, "`cs` must not move");
+        assert_eq!(app.focus_caret().unwrap(), at, "`fs` must not move");
         // ...while `s` moves without touching the scope.
         press(&mut app, "s");
         assert_eq!(app.focus_scope(), Scope::Sentence);
@@ -6909,7 +7091,7 @@ mod tests {
     fn sentence_next_and_prev_step() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_text_pages(dir.path(), &["Alpha beta. Gamma delta."]);
-        press(&mut app, "cs");
+        press(&mut app, "fs");
         assert_eq!(app.sentence_mark().unwrap().start_cell, 0);
         // `j` advances to the next sentence ("Gamma delta." starting at G);
         // `h`/`l` are reserved for column jumps on multi-column pages.
@@ -6925,7 +7107,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // The first sentence runs from line 0 (no terminator) into line 1's period.
         let mut app = app_with_two_line_pdf(dir.path(), "Alpha beta", "gamma. Delta");
-        press(&mut app, "cs");
+        press(&mut app, "fs");
         let mark = app.sentence_mark().unwrap();
         assert_eq!(mark.start_line, 0);
         assert_eq!(mark.end_line, 1);
@@ -6938,7 +7120,7 @@ mod tests {
     fn a_line_final_colon_ends_the_sentence() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_two_lines(dir.path(), "A lead-in:", "Continued text here.");
-        press(&mut app, "cs");
+        press(&mut app, "fs");
         assert_eq!(span_text(&mut app), "A lead-in:");
         press(&mut app, "s");
         assert_eq!(span_text(&mut app), "Continued text here.");
@@ -6948,7 +7130,7 @@ mod tests {
     fn a_line_final_colon_with_trailing_spaces_ends_the_sentence() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_two_lines(dir.path(), "A lead-in:  ", "Continued text here.");
-        press(&mut app, "cs");
+        press(&mut app, "fs");
         assert_eq!(span_text(&mut app), "A lead-in:");
         press(&mut app, "s");
         assert_eq!(span_text(&mut app), "Continued text here.");
@@ -6958,7 +7140,7 @@ mod tests {
     fn a_mid_line_colon_does_not_end_a_sentence() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_line(dir.path(), "Note: more words here.");
-        press(&mut app, "cs");
+        press(&mut app, "fs");
         assert_eq!(span_text(&mut app), "Note: more words here.");
     }
 
@@ -6967,7 +7149,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // Tight spacing: without the colon rule these would be one paragraph.
         let mut app = app_with_two_lines(dir.path(), "A lead-in:", "Continued text here.");
-        press(&mut app, "cp");
+        press(&mut app, "fp");
         let mark = app.paragraph_mark().unwrap();
         assert_eq!(
             (mark.start_line, mark.end_line),
@@ -6983,7 +7165,7 @@ mod tests {
     fn sentence_next_crosses_pages() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_text_pages(dir.path(), &["One sentence.", "Second sentence."]);
-        press(&mut app, "cs");
+        press(&mut app, "fs");
         assert_eq!(app.sentence_mark().unwrap().page, 0);
         // The page has a single sentence, so `j` crosses to the next page.
         press(&mut app, "j");
@@ -6999,7 +7181,7 @@ mod tests {
     fn sentence_exit_restores_scrolling() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_doc(dir.path(), 3);
-        press(&mut app, "cs");
+        press(&mut app, "fs");
         assert_eq!(
             (app.mode(), app.focus_scope()),
             (Mode::Focus, Scope::Sentence)
@@ -7016,7 +7198,7 @@ mod tests {
     #[test]
     fn sentence_without_document_does_not_crash() {
         let mut app = App::new(Config::default(), None);
-        press(&mut app, "cs");
+        press(&mut app, "fs");
         assert!(app.focus_screen_rects().is_none());
         press(&mut app, "l");
         assert!(app.sentence_mark().is_none());
@@ -7028,7 +7210,7 @@ mod tests {
     fn paragraph_enter_marks_paragraph_and_shows_mode() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_text_pages(dir.path(), &["Hello world"]);
-        press(&mut app, "c");
+        press(&mut app, "f");
         assert_eq!(app.mode(), Mode::Normal);
         press(&mut app, "p");
         assert_eq!(
@@ -7046,7 +7228,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // A two-column page has more than one paragraph (split at the column gap).
         let mut app = app_with_two_column_page(dir.path());
-        press(&mut app, "cp");
+        press(&mut app, "fp");
         let first = app.paragraph_mark().unwrap();
         press(&mut app, "j");
         let next = app.paragraph_mark().unwrap();
@@ -7062,7 +7244,7 @@ mod tests {
     fn paragraph_next_crosses_pages() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_text_pages(dir.path(), &["First page", "Second page"]);
-        press(&mut app, "cp");
+        press(&mut app, "fp");
         assert_eq!(app.paragraph_mark().unwrap().page, 0);
         // Each page is a single paragraph, so `j` crosses to the next page.
         press(&mut app, "j");
@@ -7078,7 +7260,7 @@ mod tests {
     fn paragraph_exit_restores_scrolling() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_doc(dir.path(), 3);
-        press(&mut app, "cp");
+        press(&mut app, "fp");
         assert_eq!(
             (app.mode(), app.focus_scope()),
             (Mode::Focus, Scope::Paragraph)
@@ -7095,7 +7277,7 @@ mod tests {
     #[test]
     fn paragraph_without_document_does_not_crash() {
         let mut app = App::new(Config::default(), None);
-        press(&mut app, "cp");
+        press(&mut app, "fp");
         assert!(app.focus_screen_rect().is_none());
         press(&mut app, "j");
         assert!(app.paragraph_mark().is_none());
@@ -7125,22 +7307,22 @@ mod tests {
         assert!(app.status_text().contains("-- VISUAL (char) --"));
     }
 
-    /// A pause commits a half-typed sequence, so `c` and `v` can each enter
+    /// A pause commits a half-typed sequence, so `f` and `v` can each enter
     /// their mode on their own — keeping whatever scope is live.
     #[test]
-    fn pausing_after_c_or_v_enters_the_mode_keeping_the_scope() {
+    fn pausing_after_f_or_v_enters_the_mode_keeping_the_scope() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_text_pages(dir.path(), &["alpha beta. gamma delta."]);
 
-        // `c` alone from normal mode: focus at char, since normal resets it.
-        press(&mut app, "c");
+        // `f` alone from normal mode: focus at char, since normal resets it.
+        press(&mut app, "f");
         assert_eq!(app.mode(), Mode::Normal, "still waiting for a second key");
         assert!(app.handle_timeout().redraw);
         assert_eq!((app.mode(), app.focus_scope()), (Mode::Focus, Scope::Char));
 
-        // Change the scope, leave, and come back with a bare `c`: the scope is
+        // Change the scope, leave, and come back with a bare `f`: the scope is
         // whatever focus mode last had.
-        press(&mut app, "cs");
+        press(&mut app, "fs");
         assert_eq!(app.focus_scope(), Scope::Sentence);
         press(&mut app, "v");
         app.handle_timeout();
@@ -7151,9 +7333,9 @@ mod tests {
             "a bare `v` inherits the live scope"
         );
 
-        // `c` from visual mode keeps the selection's scope and drops the anchor.
+        // `f` from visual mode keeps the selection's scope and drops the anchor.
         let head = app.visual_selection().unwrap().head;
-        press(&mut app, "c");
+        press(&mut app, "f");
         app.handle_timeout();
         assert_eq!(
             (app.mode(), app.focus_scope()),
@@ -7170,8 +7352,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_text_pages(dir.path(), &["alpha beta"]);
         // Half a chord: the shell should arm its timer.
-        assert!(press(&mut app, "c").pending_input);
-        // Completing it disarms, and `cw` means word focus -- not "focus, then
+        assert!(press(&mut app, "f").pending_input);
+        // Completing it disarms, and `fw` means word focus -- not "focus, then
         // move a word", which is what a pause between the keys would give.
         let effects = press(&mut app, "w");
         assert!(!effects.pending_input);
@@ -7179,7 +7361,7 @@ mod tests {
         assert_eq!(
             app.focus_caret().unwrap().cell,
             0,
-            "`cw` must not also move"
+            "`fw` must not also move"
         );
         // A count on its own is not a partial sequence: nothing for a pause to
         // resolve, so no timer.
@@ -7194,7 +7376,7 @@ mod tests {
         let mut app = app_with_text_pages(dir.path(), &["alpha beta. gamma delta."]);
 
         // From focus mode.
-        press(&mut app, "cs");
+        press(&mut app, "fs");
         assert_eq!(app.focus_scope(), Scope::Sentence);
         press(&mut app, "<Esc>");
         assert_eq!((app.mode(), app.focus_scope()), (Mode::Normal, Scope::Char));
@@ -7213,7 +7395,7 @@ mod tests {
 
         // Leaving visual back into *focus* still carries the scope: focus does
         // have a granularity, so there is something to remember.
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press(&mut app, "vk");
         press(&mut app, "ve");
         press(&mut app, "<Esc>");
@@ -7224,7 +7406,7 @@ mod tests {
     fn visual_enter_inherits_the_focus_modes_scope() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_text_pages(dir.path(), &["alpha beta"]);
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         assert_eq!((app.mode(), app.focus_scope()), (Mode::Focus, Scope::Word));
         // A bare `v` inherits word granularity. `vk` is unbound, so `v` fires
         // via the longest-prefix fallback and `k` replays as a motion.
@@ -7341,7 +7523,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma delta"]);
         // Anchor on the third word, so the head has room to cross it.
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press(&mut app, "ll");
         press(&mut app, "vw");
         let before = app.visual_span().unwrap();
@@ -7411,7 +7593,7 @@ mod tests {
     fn visual_exit_restores_the_prior_mode_and_carries_the_mark() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma"]);
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press(&mut app, "vw");
         press(&mut app, "l");
         let head = app.visual_selection().unwrap().head;
@@ -7444,7 +7626,7 @@ mod tests {
         press(&mut app, "vw");
         assert!(app.visual_selection().is_some());
         // The focus-mode entry chords stay bound inside visual mode.
-        press(&mut app, "ce");
+        press(&mut app, "fe");
         assert_eq!((app.mode(), app.focus_scope()), (Mode::Focus, Scope::Line));
         assert!(app.visual_selection().is_none());
         assert!(app.visual_screen_rects().is_none());
@@ -7465,7 +7647,7 @@ mod tests {
     fn replayed_chords_use_the_new_modes_keymap() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma"]);
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         let before = app.word_mark().unwrap();
         // `vj` is unbound, so `v` fires and `j` replays. The replay must
         // resolve against the *visual* keymap: if it used the word-focus one
@@ -7519,7 +7701,7 @@ mod tests {
     fn a_from_focus_mode_starts_a_highlight_over_the_focused_word() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma"]);
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         let span = app.focus_span().expect("word focused");
 
         press(&mut app, "a");
@@ -7578,7 +7760,7 @@ mod tests {
     fn a_second_a_stores_the_highlight_and_returns_to_focus_mode() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma"]);
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press(&mut app, "a");
         press(&mut app, "w");
         let head = app.focus_caret().expect("head after growing");
@@ -7644,7 +7826,7 @@ mod tests {
     fn discarding_from_focus_mode_takes_the_synthesised_anchor_away_again() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma"]);
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         let span = app.focus_span().unwrap();
         press(&mut app, "a");
         press(&mut app, "l");
@@ -7660,12 +7842,12 @@ mod tests {
     }
 
     #[test]
-    fn v_and_c_store_the_highlight_and_switch_mode() {
+    fn v_and_f_store_the_highlight_and_switch_mode() {
         let dir = tempfile::tempdir().unwrap();
 
         // `vw`: keep it, carry on selecting, head now word-granular.
         let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma"]);
-        press(&mut app, "cc");
+        press(&mut app, "fc");
         press(&mut app, "a");
         press(&mut app, "l");
         let span = app.visual_span().unwrap();
@@ -7680,11 +7862,11 @@ mod tests {
             "{after:?} vs {span:?}"
         );
 
-        // `cw`: keep it, and go to focus mode, which has no second end.
+        // `fw`: keep it, and go to focus mode, which has no second end.
         let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma"]);
         press(&mut app, "vc");
         press(&mut app, "a");
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         assert_eq!(app.mode(), Mode::Focus);
         assert_eq!(app.focus_scope(), Scope::Word);
         assert_eq!(app.highlights().len(), 1);
@@ -7716,7 +7898,7 @@ mod tests {
         let mut app = app_with_text_pages(dir.path(), &["alpha beta"]);
         // Leave a focus position behind, then return to normal: `a` must not
         // resurrect it as a highlight.
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press(&mut app, "<Esc>");
         assert_eq!(app.mode(), Mode::Normal);
         press(&mut app, "a");
@@ -7739,7 +7921,7 @@ mod tests {
     fn a_highlight_can_span_pages() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_text_pages(dir.path(), &["alpha beta", "gamma delta"]);
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press(&mut app, "a");
         // Four words forward crosses onto the second page.
         press(&mut app, "4w");
@@ -7766,7 +7948,7 @@ mod tests {
             let mut app = App::new(Config::default(), Some(Storage::open(&db).unwrap()));
             app.set_viewport_size(595.0, 600.0);
             app.open_document(&path).unwrap();
-            press(&mut app, "cw");
+            press(&mut app, "fw");
             press(&mut app, "aa");
             let stored = app.highlights().to_vec();
             assert_eq!(stored.len(), 1);
@@ -7793,7 +7975,7 @@ mod tests {
         let path = app.document_path().unwrap().to_owned();
         let before = std::fs::read(&path).unwrap();
 
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press(&mut app, "aa");
         assert_eq!(app.mode(), Mode::Focus);
         let caret = app.focus_caret().unwrap();
@@ -7843,7 +8025,7 @@ mod tests {
             press(&mut app, "J"); // a distinctive reading position
             let scrolled = app.current_page();
             assert!(scrolled > 0);
-            press(&mut app, "cw");
+            press(&mut app, "fw");
             press(&mut app, "aa");
             press(&mut app, "<Space>w");
             assert!(app.last_error().is_none(), "{:?}", app.last_error());
@@ -7875,7 +8057,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma"]);
         let path = app.document_path().unwrap().to_owned();
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press(&mut app, "a");
         press(&mut app, "<Space>w");
         assert!(app.last_error().is_none(), "{:?}", app.last_error());
@@ -7899,7 +8081,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma"]);
         let path = app.document_path().unwrap().to_owned();
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press(&mut app, "aa");
         let before = std::fs::read(&path).unwrap();
 
@@ -7932,7 +8114,7 @@ mod tests {
         ))
         .unwrap();
         let path = app.document_path().unwrap().to_owned();
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press(&mut app, "aa");
         press(&mut app, ",w");
         assert!(app.last_error().is_none(), "{:?}", app.last_error());
@@ -7964,7 +8146,7 @@ mod tests {
     fn quit_with_unsaved_highlights_asks_first() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma"]);
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press(&mut app, "aa");
         assert_eq!(app.highlights().len(), 1);
 
@@ -7979,7 +8161,7 @@ mod tests {
     fn quit_commits_a_pending_highlight_before_deciding() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma"]);
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press(&mut app, "a"); // enter highlight mode, do not commit yet
         assert!(app.has_pending_highlight());
 
@@ -7995,7 +8177,7 @@ mod tests {
     fn quit_discarding_highlights_always_quits_and_leaves_highlights_recorded() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma"]);
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press(&mut app, "aa");
         assert_eq!(app.highlights().len(), 1);
 
@@ -8013,7 +8195,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma"]);
         let path = app.document_path().unwrap().to_owned();
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press(&mut app, "aa");
 
         let effects = app.save_and_quit();
@@ -8030,7 +8212,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma"]);
-        press(&mut app, "cw");
+        press(&mut app, "fw");
         press(&mut app, "aa");
 
         let original = std::fs::metadata(dir.path()).unwrap().permissions();

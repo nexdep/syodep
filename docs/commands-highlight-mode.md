@@ -41,7 +41,7 @@ at.
 
 ## Leaving into another mode
 
-`v` and `c`, with or without a scope letter, **keep** the highlight and go to
+`v` and `f`, with or without a scope letter, **keep** the highlight and go to
 the mode they name. They are not bound in `[highlight_keys]` at all: they fall
 through to the normal `[keys]` table's `visual_enter*` and `focus_enter*`, which
 store the pending highlight on the way out.
@@ -51,7 +51,7 @@ store the pending highlight on the way out.
 | `a` | keep it, back to focus mode on the moving end |
 | `v` | keep it, back to visual mode with the same text selected |
 | `vw` (`vc`/`ve`/`vs`/`vp`) | keep it, visual mode with the moving end at that scope |
-| `c`, `cw` (`cc`/`ce`/`cs`/`cp`) | keep it, focus mode at that scope on the moving end |
+| `f`, `fw` (`fc`/`fe`/`fs`/`fp`) | keep it, focus mode at that scope on the moving end |
 | `<leader>w` | keep it, then save the document |
 | `<Esc>` or `<BS>` | discard it |
 

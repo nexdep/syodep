@@ -87,7 +87,7 @@ input take plain data). Key pieces:
   scope; what is drawn is derived by `scope_span(caret, scope)` and cached in
   `focus_span`, so changing the scope reinterprets the position you are on
   rather than restoring a separate per-granularity mark. (It used to be five
-  `Mode` variants with five marks, which meant `cw` then `ce` teleported you to
+  `Mode` variants with five marks, which meant `fw` then `fe` teleported you to
   wherever you last were in line focus. The bug is unrepresentable now.)
   The focus keymap is the normal keymap plus the `[focus_keys]` overrides, so
   every other command still works while focused. Extracted page content is
@@ -105,7 +105,7 @@ input take plain data). Key pieces:
   `visual_selection()` — it is what the tests and status line read, never what
   the app stores.
 - **Why the moving end is not stored separately**: it was, and that was a bug.
-  `enter_focus` (the `c` chords) read `focus` while `hjkl` moved
+  `enter_focus` (the `f` chords) read `focus` while `hjkl` moved
   `visual.head`, and the two only reconciled inside `exit_visual` — so leaving
   visual mode any other way silently restored the pre-selection position. The
   fix was to delete the duplicate rather than sync it: `exit_visual` now just
@@ -136,7 +136,7 @@ input take plain data). Key pieces:
   mode synthesises the second end; `PendingHighlight` records the mode, position,
   scope and anchor to restore, so discarding is four assignments with nothing
   partially applied to unwind.
-  The exits that *keep* a highlight (`a`, `v`, `c`, saving) all call one
+  The exits that *keep* a highlight (`a`, `v`, `f`, saving) all call one
   `store_pending_highlight`, so "which exits keep it" is a fact about the
   keybindings rather than a condition repeated in four places. `enter_visual`
   needs one early branch for it: its ordinary path collapses the selection onto
@@ -146,6 +146,11 @@ input take plain data). Key pieces:
   15. Committing writes them to SQLite (migration v2) so they survive a reopen;
   `save_document` embeds them in the PDF as real `Highlight` annotations, after
   which syodep stops drawing them because MuPDF renders them itself.
+
+**Traversal audit:** the content pipeline, scope/object matrix, adjacency
+policies, cache invalidation, and findings for extending toward the annotation
+sidebar are recorded in [`docs/traversal-audit.md`](traversal-audit.md). Read
+that before changing motion, extraction order, or object policy.
 
 ### syodep-pdf
 

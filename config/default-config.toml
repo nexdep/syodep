@@ -67,6 +67,12 @@ detect_equations = true
 # sideways margin stamp or an inclined watermark. Headers and footers
 # are recognised by repeating across pages, never by position alone.
 skip_page_furniture = true
+# Treat each footnote as one stop from line scope up, drawn as a single
+# box (word and char scope still step through it). Sentence and paragraph
+# motion additionally skip a footnote entirely while auto-searching from
+# ordinary body text, so reading a page's prose never lands on one; moving
+# into it deliberately still reads it normally.
+detect_footnotes = true
 
 [files]
 # Starting directory for the Open dialog (<leader>o). When unset, the
@@ -79,7 +85,7 @@ skip_page_furniture = true
 [input]
 # How long (milliseconds) a half-typed key sequence waits before it acts
 # on its own. This is what lets a key that is both a command and the
-# start of a longer one -- "c", "v", or "o" while selecting -- be used
+# start of a longer one -- "f", "v", or "o" while selecting -- be used
 # by itself: press it, pause, and it acts. Sequences typed at normal
 # speed never reach the pause. Set to 0 to switch it off, so only the
 # next key press ever ends the wait.
@@ -115,12 +121,12 @@ leader = "<Space>"
 "G" = "goto_last_page"
 "J" = "next_page"
 "K" = "prev_page"
-"c" = "focus_enter"
-"cc" = "focus_enter_char"
-"ce" = "focus_enter_line"
-"cp" = "focus_enter_paragraph"
-"cs" = "focus_enter_sentence"
-"cw" = "focus_enter_word"
+"f" = "focus_enter"
+"fc" = "focus_enter_char"
+"fe" = "focus_enter_line"
+"fp" = "focus_enter_paragraph"
+"fs" = "focus_enter_sentence"
+"fw" = "focus_enter_word"
 "gg" = "goto_first_page"
 "h" = "scroll_left"
 "j" = "scroll_down"
@@ -139,13 +145,13 @@ leader = "<Space>"
 "zc" = "center_view"
 "zw" = "fit_width"
 
-# Focus-mode keybindings (active after pressing "cc", "cw", "ce", "cs" or
-# "cp"). These overlay the normal [keys] while focus mode is active: hjkl and
+# Focus-mode keybindings (active after pressing "fc", "fw", "fe", "fs" or
+# "fp"). These overlay the normal [keys] while focus mode is active: hjkl and
 # the arrows move the highlight by one unit of the active scope, w/e/b move a
 # word at a time whatever the scope, and <Esc> exits.
 # One table covers every scope, because the commands dispatch on the scope:
-# "focus_left" is a character in char scope, a word in word scope, a column
-# jump in line scope and the previous unit in sentence/paragraph scope.
+# "focus_left" is a character in char scope, a word in word scope, and a
+# column jump in line/sentence/paragraph scope.
 [focus_keys]
 "<Down>" = "focus_down"
 "<Esc>" = "focus_exit"
@@ -202,7 +208,7 @@ leader = "<Space>"
 # commands, because a pending highlight is a selection: hjkl/arrows and
 # w/e/b/s/p reshape it, "o" switches ends, "o" plus a scope letter does
 # both. "a" again keeps the highlight and returns to selecting; <Esc> or
-# <BS> throws it away and restores what you had. "v" and "c" are not
+# <BS> throws it away and restores what you had. "v" and "f" are not
 # listed because they fall through to [keys], where they keep the
 # highlight on the way into the mode they name.
 [highlight_keys]

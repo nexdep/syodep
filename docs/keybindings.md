@@ -37,7 +37,7 @@ that is also a prefix of a longer one could never be triggered on its own.
 
 **The pause** (`[input] timeout_ms`, 500 ms by default) is what lets such a
 binding be used on its own: press `o`, pause, and it runs. Sequences typed at
-normal speed never reach it — `cw` is word focus, while `c`, pause, `w` is
+normal speed never reach it — `fw` is word focus, while `f`, pause, `w` is
 focus mode followed by a word motion. Two details worth knowing:
 
 - a half-typed sequence bound to nothing (`g` on its own) is **dropped** by
@@ -91,12 +91,12 @@ focus mode:
 
 | Keys | Command |
 |---|---|
-| `c` | `focus_enter` — enter focus keeping the current scope (needs the pause) |
-| `cc` | `focus_enter_char` |
-| `ce` | `focus_enter_line` |
-| `cw` | `focus_enter_word` |
-| `cs` | `focus_enter_sentence` |
-| `cp` | `focus_enter_paragraph` |
+| `f` | `focus_enter` — enter focus keeping the current scope (needs the pause) |
+| `fc` | `focus_enter_char` |
+| `fe` | `focus_enter_line` |
+| `fw` | `focus_enter_word` |
+| `fs` | `focus_enter_sentence` |
+| `fp` | `focus_enter_paragraph` |
 
 Selection (see "Visual mode" below):
 
@@ -134,8 +134,8 @@ several at once opens the first and says so in the status bar.
 
 ## Focus mode
 
-In **normal mode** (the default) `hjkl` scroll the page. Press `cc`, `cw`,
-`ce`, `cs` or `cp` to switch to **focus mode**, where one position in the
+In **normal mode** (the default) `hjkl` scroll the page. Press `fc`, `fw`,
+`fe`, `fs` or `fp` to switch to **focus mode**, where one position in the
 document's content — text characters and images — is highlighted and `hjkl`
 move it:
 
@@ -159,13 +159,13 @@ thing as you change granularity:
 
 | Keys | Scope | `h` / `l` | `j` / `k` |
 |---|---|---|---|
-| `cc` | char | one character (wraps across lines and pages) | one line, keeping the goal column |
-| `cw` | word | one word run | one line, nearest the goal column |
-| `ce` | line | previous/next **column** (multi-column pages) | one line |
-| `cs` | sentence | previous/next **column** (multi-column pages) | previous/next sentence |
-| `cp` | paragraph | previous/next **column** (multi-column pages) | previous/next paragraph |
+| `fc` | char | one character (wraps across lines and pages) | one line, keeping the goal column |
+| `fw` | word | one word run | one line, nearest the goal column |
+| `fe` | line | previous/next **column** (multi-column pages) | one line |
+| `fs` | sentence | previous/next **column** (multi-column pages) | previous/next sentence |
+| `fp` | paragraph | previous/next **column** (multi-column pages) | previous/next paragraph |
 
-Line scope is `ce`, not `cl`: `l` is the forward motion in every mode — and `e`
+Line scope is `fe`, not `cl`: `l` is the forward motion in every mode — and `e`
 is the line letter for the same reason, since `l` was already taken.
 
 `w`/`b` move by Vim-like word runs in *every* scope: letters/digits/underscore
@@ -175,11 +175,11 @@ paragraphs — `e` always lands at column 0, a line's own start, rather than
 keeping the goal column `hjkl` was aiming for.
 
 **These are motions, not scope changes.** In word focus, `s` jumps to the first
-word of the next sentence and the highlight stays word-sized; `cs` stays put and
+word of the next sentence and the highlight stays word-sized; `fs` stays put and
 makes the highlight a whole sentence. There is no backward sentence or
-paragraph key — use `cs`/`cp` and then `h`.
+paragraph key — use `fs`/`fp` and then `h`.
 
-**The entry chords also change the scope, in place.** Pressing `ce` while
+**The entry chords also change the scope, in place.** Pressing `fe` while
 already focused on a word highlights the line you are on — it does not move
 you. There is one position and the scope reinterprets it.
 
@@ -200,7 +200,7 @@ foundation for highlighting and search in later phases
 ## Visual mode
 
 Press `v` (`visual_enter`) to switch to **visual mode** and select a range. A
-bare `v` inherits the granularity of the mode you were in, so `cw` then `v`
+bare `v` inherits the granularity of the mode you were in, so `fw` then `v`
 selects word by word; `vc`/`ve`/`vw`/`vs`/`vp` name the granularity instead.
 
 Motion moves one end of the selection — the **head** — while the other stays
@@ -268,7 +268,7 @@ Only three keys mean something specific to a highlight:
 | `<Esc>` | `highlight_discard` — throw it away, restoring the mode and selection `a` was pressed on |
 | `<BS>` | `highlight_discard` |
 
-`v` and `c`, with or without a scope letter, also **keep** the highlight and go
+`v` and `f`, with or without a scope letter, also **keep** the highlight and go
 to the mode they name — they are not bound here at all, but fall through to
 `[keys]`, where `visual_enter*` and `focus_enter*` store the pending highlight on
 the way out. So `vw` means "keep it and carry on selecting by word", and the only

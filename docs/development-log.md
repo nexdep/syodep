@@ -7,6 +7,52 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-07-31 — Document-traversal architecture audit
+
+Step-1 audit before the annotation sidebar. Mapped the content pipeline,
+traversal/selection call graphs, mode and cache invalidation, the canonical
+ObjectKind×Scope matrix, and adjacency policies (immediate / synthetic-peek /
+link-bridge). Findings and refactor candidates live in
+`docs/traversal-audit.md`; `architecture.md` points there.
+
+Low-risk hardenings landed with the audit (no sidebar, no highlight-schema
+change, no reading-order rewrite):
+
+* Extraction failure still caches empty content (non-fatal) but records the
+  page and sets `last_error`, so it is distinguishable from a blank page.
+* `PageContent::object_invariants_ok` (+ shared `object_ranges_ok`) for the
+  sorted/disjoint/in-bounds/non-empty object contract.
+* Char and line steppers, plus content-page search, skip empty lines so a
+  caret cannot rest on `cell = 0` of a line with no cells.
+* Metamorphic tests: empty-line skip, word count ≡ repeated steps, focus ≡
+  visual word landing, visual `o` twice is identity.
+
+### Tests
+
+`char_motion_skips_empty_lines_between_content`,
+`word_count_matches_repeated_single_steps`,
+`focus_and_visual_word_motion_land_together`,
+`swapping_visual_ends_twice_is_identity`;
+`object_ranges_are_sorted_and_disjoint` now also asserts
+`object_invariants_ok`.
+
+---
+
+## 2026-07-31 — Focus prefix is `f`, not `c`
+
+The focus-mode entry chords move from `c`/`cc`/`cw`/`ce`/`cs`/`cp` to
+`f`/`fc`/`fw`/`fe`/`fs`/`fp`. Bare `f` (after the pause) still enters keeping
+the current scope; the scope letter is unchanged (`c` char, `w` word, `e`
+line, `s` sentence, `p` paragraph). Highlight-mode fall-through that stored
+via `c` now uses `f`. Visual chords (`v`/`vc`/…) are untouched.
+
+### Tests
+
+Config defaults and focus/highlight presses updated; existing suite covers
+the chords.
+
+---
+
 ## 2026-07-31 — Line-final colon breaks sentence and paragraph
 
 A colon that ends its line — optionally followed only by spaces — is now a

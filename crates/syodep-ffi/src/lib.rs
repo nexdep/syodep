@@ -974,17 +974,18 @@ mod tests {
             // Focus mode: inactive until entered, then valid at every scope.
             // One getter covers all five, so the round-trip walks the scope
             // letters rather than five different functions.
-            let c_key = CString::new("c").unwrap();
+            let f_key = CString::new("f").unwrap();
             let esc = CString::new("<Esc>").unwrap();
             let focus = syo_app_focus(app);
             assert_eq!(focus.valid, 0);
             syo_overlay_free(focus);
-            // `cc` is a two-key sequence: one `c` is pending, the second enters.
-            syo_app_key_event(app, c_key.as_ptr());
+            // `fc` is a two-key sequence: one `f` is pending, `c` enters char scope.
+            syo_app_key_event(app, f_key.as_ptr());
             let pending = syo_app_focus(app);
             assert_eq!(pending.valid, 0);
             syo_overlay_free(pending);
-            syo_app_key_event(app, c_key.as_ptr());
+            let c_scope = CString::new("c").unwrap();
+            syo_app_key_event(app, c_scope.as_ptr());
             let char_scope = syo_app_focus(app);
             assert_eq!(char_scope.valid, 1);
             assert_eq!(char_scope.rect_count, 1);
@@ -999,11 +1000,11 @@ mod tests {
             assert!((*moved.rects).x >= first_x);
             syo_overlay_free(moved);
 
-            // Every other scope, entered with `c` plus its letter. `e` rather
+            // Every other scope, entered with `f` plus its letter. `e` rather
             // than `l` for lines: `l` is the forward motion in every mode.
             for letter in ["w", "e", "s", "p"] {
                 let key = CString::new(letter).unwrap();
-                syo_app_key_event(app, c_key.as_ptr());
+                syo_app_key_event(app, f_key.as_ptr());
                 syo_app_key_event(app, key.as_ptr());
                 let overlay = syo_app_focus(app);
                 assert_eq!(overlay.valid, 1, "scope {letter} produced no overlay");
@@ -1062,7 +1063,7 @@ mod tests {
         )
         .unwrap();
         let commit_highlight = |app: *mut SyoApp| unsafe {
-            for key in ["c", "w", "a", "a"] {
+            for key in ["f", "w", "a", "a"] {
                 let c_key = CString::new(key).unwrap();
                 syo_app_key_event(app, c_key.as_ptr());
             }

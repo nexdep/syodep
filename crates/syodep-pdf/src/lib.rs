@@ -240,6 +240,42 @@ impl PageContent {
     pub fn block_object_at(&self, line: usize) -> Option<&ContentObject> {
         self.object_at(line).filter(|o| o.kind.is_block())
     }
+
+    /// Whether [`Self::objects`] matches the invariants [`Document::page_content`]
+    /// promises: sorted by `start_line`, pairwise disjoint, in range of
+    /// [`Self::lines`], and each range containing at least one non-empty line.
+    ///
+    /// Used by tests and debug assertions so those rules stay inspectable when
+    /// content is hand-built (`set_page_content`) rather than extracted.
+    pub fn object_invariants_ok(&self) -> bool {
+        object_ranges_ok(&self.lines, &self.objects)
+    }
+}
+
+/// Shared check for [`PageContent::object_invariants_ok`] and the
+/// `content_objects` debug assertion — avoids cloning lines just to validate.
+fn object_ranges_ok(lines: &[ContentLine], objects: &[ContentObject]) -> bool {
+    let n = lines.len();
+    for window in objects.windows(2) {
+        if window[0].start_line > window[0].end_line {
+            return false;
+        }
+        if window[0].end_line >= window[1].start_line {
+            return false;
+        }
+    }
+    for object in objects {
+        if object.start_line > object.end_line || object.end_line >= n {
+            return false;
+        }
+        let has_content = lines[object.start_line..=object.end_line]
+            .iter()
+            .any(|line| !line.cells.is_empty());
+        if !has_content {
+            return false;
+        }
+    }
+    true
 }
 
 /// Knobs for [`Document::page_content`].
@@ -2373,8 +2409,8 @@ fn content_objects(
 
     kept.sort_by_key(|o| o.start_line);
     debug_assert!(
-        kept.windows(2).all(|w| w[0].end_line < w[1].start_line),
-        "objects must stay sorted and disjoint: {kept:?}"
+        object_ranges_ok(lines, &kept),
+        "objects must stay sorted, disjoint, in-bounds, and non-empty: {kept:?}"
     );
     kept
 }
@@ -3122,6 +3158,15 @@ mod tests {
             &[],
             &[],
             &[],
+        );
+        let page = PageContent {
+            lines,
+            objects: objects.clone(),
+            furniture: Vec::new(),
+        };
+        assert!(
+            page.object_invariants_ok(),
+            "objects violate invariants: {objects:?}"
         );
         for pair in objects.windows(2) {
             assert!(

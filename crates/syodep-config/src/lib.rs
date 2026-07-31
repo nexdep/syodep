@@ -62,7 +62,7 @@ pub struct Config {
 pub struct InputConfig {
     /// Milliseconds a partial sequence waits before it resolves on its own.
     ///
-    /// This is what lets a key that is both a binding and a prefix — `c`, `v`,
+    /// This is what lets a key that is both a binding and a prefix — `f`, `v`,
     /// or `o` in visual mode — be used on its own: press it, pause, and it
     /// acts. Sequences typed at normal speed never reach the pause. `0`
     /// disables it, restoring "only the next key press ends the wait".
@@ -256,17 +256,17 @@ pub fn default_keybindings() -> BTreeMap<String, String> {
         ("zw", "fit_width"),
         ("z0", "zoom_reset"),
         ("zc", "center_view"),
-        // `c` plus a scope letter focuses at that granularity. The same
+        // `f` plus a scope letter focuses at that granularity. The same
         // bindings work *inside* focus mode, where they change the scope
         // without moving the highlight.
-        // `c` alone enters focus keeping the current scope, once the pause
-        // resolves it; `c` plus a scope letter names the granularity.
-        ("c", "focus_enter"),
-        ("cc", "focus_enter_char"),
-        ("ce", "focus_enter_line"),
-        ("cw", "focus_enter_word"),
-        ("cs", "focus_enter_sentence"),
-        ("cp", "focus_enter_paragraph"),
+        // `f` alone enters focus keeping the current scope, once the pause
+        // resolves it; `f` plus a scope letter names the granularity.
+        ("f", "focus_enter"),
+        ("fc", "focus_enter_char"),
+        ("fe", "focus_enter_line"),
+        ("fw", "focus_enter_word"),
+        ("fs", "focus_enter_sentence"),
+        ("fp", "focus_enter_paragraph"),
         // `v` alone inherits the focus scope; `v` plus a scope letter names
         // it. `v` is a binding *and* a prefix, which the input
         // state machine resolves by longest-prefix fallback.
@@ -324,9 +324,9 @@ pub fn default_focus_keybindings() -> BTreeMap<String, String> {
         ("b", "focus_prev_word"),
         // Line, sentence and paragraph each get a forward motion, the same way
         // `w` is the word one -- and `e` is the line letter for the same
-        // reason `ce` is: `l` is the forward motion in every mode, so line
-        // scope's own letter can't be `l`. `ce`/`cs`/`cp` still switch scope:
-        // `e` *moves* by a line, `ce` *focuses by* line.
+        // reason `fe` is: `l` is the forward motion in every mode, so line
+        // scope's own letter can't be `l`. `fe`/`fs`/`fp` still switch scope:
+        // `e` *moves* by a line, `fe` *focuses by* line.
         ("e", "focus_next_line"),
         ("s", "focus_next_sentence"),
         ("p", "focus_next_paragraph"),
@@ -394,7 +394,7 @@ pub fn default_visual_keybindings() -> BTreeMap<String, String> {
 /// `o` reshape it through exactly the code that reshapes a selection. Only the
 /// three keys whose meaning is specific to a pending highlight are new.
 ///
-/// `v` and `c` are absent on purpose. They fall through to the normal table's
+/// `v` and `f` are absent on purpose. They fall through to the normal table's
 /// `visual_enter*` / `focus_enter*`, which store the highlight on the way out —
 /// so `vw` means "keep it and carry on selecting by word" with no binding of its
 /// own.
@@ -658,7 +658,7 @@ pub fn default_config_doc() -> String {
         "[input]\n\
          # How long (milliseconds) a half-typed key sequence waits before it acts\n\
          # on its own. This is what lets a key that is both a command and the\n\
-         # start of a longer one -- \"c\", \"v\", or \"o\" while selecting -- be used\n\
+         # start of a longer one -- \"f\", \"v\", or \"o\" while selecting -- be used\n\
          # by itself: press it, pause, and it acts. Sequences typed at normal\n\
          # speed never reach the pause. Set to 0 to switch it off, so only the\n\
          # next key press ever ends the wait.\n",
@@ -685,8 +685,8 @@ pub fn default_config_doc() -> String {
     push_keytable(&mut out, "keys", &default_keybindings());
 
     out.push_str(
-        "\n# Focus-mode keybindings (active after pressing \"cc\", \"cw\", \"ce\", \"cs\" or\n\
-         # \"cp\"). These overlay the normal [keys] while focus mode is active: hjkl and\n\
+        "\n# Focus-mode keybindings (active after pressing \"fc\", \"fw\", \"fe\", \"fs\" or\n\
+         # \"fp\"). These overlay the normal [keys] while focus mode is active: hjkl and\n\
          # the arrows move the highlight by one unit of the active scope, w/e/b move a\n\
          # word at a time whatever the scope, and <Esc> exits.\n\
          # One table covers every scope, because the commands dispatch on the scope:\n\
@@ -709,7 +709,7 @@ pub fn default_config_doc() -> String {
          # commands, because a pending highlight is a selection: hjkl/arrows and\n\
          # w/e/b/s/p reshape it, \"o\" switches ends, \"o\" plus a scope letter does\n\
          # both. \"a\" again keeps the highlight and returns to selecting; <Esc> or\n\
-         # <BS> throws it away and restores what you had. \"v\" and \"c\" are not\n\
+         # <BS> throws it away and restores what you had. \"v\" and \"f\" are not\n\
          # listed because they fall through to [keys], where they keep the\n\
          # highlight on the way into the mode they name.\n",
     );
@@ -893,11 +893,11 @@ mod tests {
         // The enter bindings live in the normal table, one per scope. They are
         // also what changes the scope from inside focus mode.
         for (key, command) in [
-            ("cc", "focus_enter_char"),
-            ("cw", "focus_enter_word"),
-            ("ce", "focus_enter_line"),
-            ("cs", "focus_enter_sentence"),
-            ("cp", "focus_enter_paragraph"),
+            ("fc", "focus_enter_char"),
+            ("fw", "focus_enter_word"),
+            ("fe", "focus_enter_line"),
+            ("fs", "focus_enter_sentence"),
+            ("fp", "focus_enter_paragraph"),
         ] {
             assert_eq!(config.keys.get(key).map(String::as_str), Some(command));
         }
@@ -1002,7 +1002,7 @@ mod tests {
         assert_eq!(config.keys.get("a"), None);
         // `v` and `c` are left to fall through to [keys].
         assert_eq!(config.highlight_keys.get("v"), None);
-        assert_eq!(config.highlight_keys.get("c"), None);
+        assert_eq!(config.highlight_keys.get("f"), None);
     }
 
     #[test]

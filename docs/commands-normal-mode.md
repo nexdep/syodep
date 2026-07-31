@@ -1,7 +1,7 @@
 # Normal mode commands
 
 **Normal mode** is the default mode: `hjkl` (and the arrow keys) scroll the
-page. Press `cc` (`focus_enter_char`) to switch to **focus mode** — see
+page. Press `fc` (`focus_enter_char`) to switch to **focus mode** — see
 `docs/commands-focus-mode.md`.
 
 Every user-visible action is a *command*. Keybindings map key sequences to

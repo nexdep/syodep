@@ -8,12 +8,12 @@ shows `-- VISUAL (scope) --` with the selected line range.
 
 Each end carries its own **scope** - the granularity it moves and snaps by -
 so a selection can be line-granular at one edge and word-granular at the other.
-A bare `v` inherits the focus scope, so `cw` then `v` starts selecting word by
+A bare `v` inherits the focus scope, so `fw` then `v` starts selecting word by
 word with the same keys you were already using.
 
 Press `<Esc>` (`visual_exit`) to return to the mode visual mode was entered
 from. The moving end *is* the focus position, so both where you are and the
-granularity you were last using carry straight over — `cw`, `v`, `ve`, `<Esc>`
+granularity you were last using carry straight over — `fw`, `v`, `ve`, `<Esc>`
 leaves you in line focus at the head, not back where you started.
 
 Counts work here too (`3l`, `2w`).
@@ -135,9 +135,9 @@ lose work. Only the parts of the selection on screen are drawn.
 moving either end.
 
 **Entering focus mode discards the selection but keeps your place.** The
-focus entry chords (`cc`, `ce`, `cw`, `cs`, `cp`) still work in visual mode;
+focus entry chords (`fc`, `fe`, `fw`, `fs`, `fp`) still work in visual mode;
 they drop the anchor and leave you focused on the moving end at the scope you
-named. Leaving by a `c` chord and leaving by `<Esc>` differ only in whether you
+named. Leaving by a `f` chord and leaving by `<Esc>` differ only in whether you
 also change the scope.
 
 The application commands `open_file`, `quit` and `cancel` also keep their

@@ -31,17 +31,17 @@ Counts work here too (`5l`, `3j`).
 | `focus_enter_paragraph` | focus paragraph by paragraph | — |
 | `focus_exit` | leave focus mode (the position and scope are remembered) | — |
 
-Bound to `cc` / `cw` / `ce` / `cs` / `cp`. Line scope is `ce`, not `cl`: `l` is
+Bound to `fc` / `fw` / `fe` / `fs` / `fp`. Line scope is `fe`, not `cl`: `l` is
 the forward motion in every mode.
 
-`focus_enter` is bound to a bare `c`, which acts once you **pause** — `c` is
+`focus_enter` is bound to a bare `f`, which acts once you **pause** — `f` is
 also the start of the five chords above, so it waits to see whether another key
 follows (see the disambiguation rule in `docs/keybindings.md`). It keeps
 whatever scope is live: char coming from normal mode, which resets the scope,
 and the selection's scope coming from visual mode.
 
 **The same chords change the scope from inside focus mode**, and they do it
-*in place* — `cw` then `ce` highlights the line you are already on, it does not
+*in place* — `fw` then `fe` highlights the line you are already on, it does not
 jump you somewhere else. There is only one position, and changing the scope
 reinterprets it. (Five separate focus modes each kept their own mark, so
 switching between them teleported you to wherever you last were at that
@@ -88,15 +88,15 @@ scope afterwards. This mirrors visual mode exactly.
 | `s` | next sentence |
 | `p` | next paragraph |
 
-`e` is the line letter for the same reason `ce` is: `l` is the forward motion
+`e` is the line letter for the same reason `fe` is: `l` is the forward motion
 in every mode, so line scope's own letter can't be `l`. This is also why `e`
 always lands at column 0 — a line's start *is* column 0 — rather than
 preserving whatever column `hjkl` was aiming for.
 
 **A motion is not a scope change.** In word focus, `s` jumps to the first word
-of the next sentence and the highlight stays *word*-sized; `cs` stays where you
+of the next sentence and the highlight stays *word*-sized; `fs` stays where you
 are and makes the highlight a whole sentence. Sentence and paragraph have no
-dedicated backward motion key — press `cs` or `cp` and use `k`, which walks
+dedicated backward motion key — press `fs` or `fp` and use `k`, which walks
 backwards a unit at a time.
 
 Word motions use Vim-like lowercase boundaries: letters/digits/underscore form
@@ -212,7 +212,7 @@ paragraph or sentence next to a table never reaches into it either, so `p` on
 the prose above a figure highlights just that prose.
 
 Word and char scope reach **inside** a table, because its cells are text you may
-well want a part of. `cw` then `w` walks the words in its cells, and `cc` then
+well want a part of. `fw` then `w` walks the words in its cells, and `fc` then
 `h`/`l` walks its characters, so a single number in a cell stays selectable.
 Their highlights shrink to the word or character rather than covering the whole
 table. Switching back to line scope or coarser snaps to the whole table again.
@@ -260,7 +260,7 @@ whole thing: stopping on row two of a system is never what you meant. That is
 the one way it differs from a heading, whose wrapped lines *are* reading lines
 and keep a stop each.
 
-Word and char scope still reach inside: `w` steps through its terms and `cc`
+Word and char scope still reach inside: `w` steps through its terms and `fc`
 then `h`/`l` walks its characters, so a single variable or coefficient stays
 selectable, with the highlight shrinking to match.
 
@@ -330,7 +330,7 @@ normal-mode behavior. See `docs/commands-normal-mode.md` for those.
 A focus highlight is a selection whose two ends coincide. Pressing `v` from
 focus mode enters visual mode inheriting the focus scope; visual mode's moving
 end *is* the focus position, so leaving it — by `<Esc>` or by naming a new
-scope with a `c` chord — always leaves you where that end was. The two modes
+scope with a `f` chord — always leaves you where that end was. The two modes
 share one per-scope motion table, so a scope cannot mean one thing in focus
 mode and something else in visual mode. See `docs/commands-visual-mode.md`.
 

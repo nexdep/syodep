@@ -72,7 +72,7 @@ with the edge. Horizontal motion is unaffected.
 **Table detection.** With `detect_tables = true` a table is a single unit from
 line scope up: one `e` steps onto it, the next steps past it, selecting it in
 visual mode takes the whole table, and its highlight is one rectangle over the
-whole thing rather than a strip per row. Word and char scope (`cw`, `cc`) still
+whole thing rather than a strip per row. Word and char scope (`fw`, `fc`) still
 walk through the words and characters inside, so a single figure in a table
 stays selectable. Detection is a heuristic and costs a second text-extraction
 pass per page; set it to `false` to navigate tables line by line as before.
@@ -153,7 +153,7 @@ body line.
 **Footnote detection.** With `detect_footnotes = true` a footnote is one stop
 from line scope up, drawn as one box — the same shape as a table, not a
 heading: it is reachable only by deliberately walking into it with word or
-char scope (`cw`, `cc`), never by stepping through it line by line. `s` and
+char scope (`fw`, `fc`), never by stepping through it line by line. `s` and
 `p`, reading through a page's ordinary body prose, additionally skip a
 footnote **entirely** rather than costing it a single stop the way a table
 does — the goal is that reading through a page never lands on one by
@@ -224,12 +224,12 @@ open_dir = "/home/me/papers"
 | `timeout_ms` | integer (ms) | `500` | how long a half-typed key sequence waits before acting on its own; `0` disables the pause |
 | `leader` | string | `"<Space>"` | the key sequence `<leader>` stands for in bindings |
 
-Some keys are both a command and the start of a longer sequence — `c`, `v`, and
+Some keys are both a command and the start of a longer sequence — `f`, `v`, and
 `o` while selecting. Rather than firing eagerly, syodep waits to see whether
 another key follows. The pause is the second way that wait can end: press the
 key, stop, and it acts.
 
-Sequences typed at normal speed never reach it, so `cw` still means word focus.
+Sequences typed at normal speed never reach it, so `fw` still means word focus.
 Raise it if you type chords slowly and find them splitting in two; lower it if a
 deliberate pause feels sluggish. `0` restores the original behaviour, where only
 the next key press ever ends a wait — with the consequence that a binding which
@@ -267,8 +267,8 @@ the default bindings: `docs/keybindings.md`. Command names:
 
 ## `[focus_keys]`
 
-Keybindings that apply only in **focus mode** (entered with `cc`, `cw`, `ce`,
-`cs` or `cp`). They overlay the normal `[keys]` while focus mode is active, so
+Keybindings that apply only in **focus mode** (entered with `fc`, `fw`, `fe`,
+`fs` or `fp`). They overlay the normal `[keys]` while focus mode is active, so
 `hjkl`/`<Esc>` can mean focus motions there while every other binding keeps its
 normal behavior. Like `[keys]`, entries overlay the defaults — list only
 changes.
@@ -319,7 +319,7 @@ implementation of reshaping a selection. Only three keys are specific to it: `a`
 (`highlight_commit`) keeps the highlight and returns to focus mode, and `<Esc>` or `<BS>`
 (`highlight_discard`) throws it away.
 
-`v` and `c` are deliberately absent, so they fall through to `[keys]` and store
+`v` and `f` are deliberately absent, so they fall through to `[keys]` and store
 the highlight on the way into the mode they name. See `docs/keybindings.md` and
 `docs/commands-highlight-mode.md`.
 

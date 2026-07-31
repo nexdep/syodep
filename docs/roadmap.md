@@ -38,7 +38,9 @@ Ordered roughly by dependency:
 7. ⬜ Jump history: jump-back / jump-forward (`<C-o>` / `<C-i>`)
 8. ⬜ Fuzzy search over highlights and notes
 9. ⬜ Export annotations to Markdown and JSON
-10. ⬜ Annotation sidebar (Qt, read-only first)
+10. ⬜ Annotation sidebar (Qt, read-only first) — *blocked on completing the
+    traversal audit in `docs/traversal-audit.md`; read-only listing of existing
+    highlights may start; caret-anchored comments/chat wait on findings there*
 
 Delivered ahead of the rest: a **modal caret** (`c` to enter, then `hjkl`)
 navigates the content layer character- and line-wise across text and images,
