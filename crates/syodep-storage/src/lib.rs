@@ -12,6 +12,7 @@
 
 mod migrations;
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use rusqlite::{Connection, OptionalExtension};
@@ -34,6 +35,10 @@ pub enum StorageError {
          refusing to open"
     )]
     SchemaTooNew { found: u32, supported: u32 },
+    #[error("invalid highlight pdf_state value {0}")]
+    InvalidHighlightState(i64),
+    #[error("highlight {0} was not pending for document {1}")]
+    HighlightNotPending(i64, i64),
 }
 
 /// A saved reading position for a document.
@@ -42,6 +47,43 @@ pub struct Position {
     pub scroll_x: f32,
     pub scroll_y: f32,
     pub zoom: f32,
+}
+
+/// Stable identity of a persisted highlight row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct HighlightId(pub i64);
+
+/// Whether a highlight has been written into the PDF yet.
+///
+/// Integer values are stored in `highlights.pdf_state` and must stay stable:
+/// `0` Pending, `1` Embedded, `2` External.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum HighlightPdfState {
+    /// Stored by syodep but not yet successfully embedded. Drawn as a syodep
+    /// overlay and included in the next PDF save.
+    Pending = 0,
+    /// Successfully embedded into the PDF. Kept in SQLite for the sidebar and
+    /// export; MuPDF draws it, so the overlay must not.
+    Embedded = 1,
+    /// Reserved for a future annotation discovered in the PDF that syodep did
+    /// not create or cannot confidently match to a local record.
+    External = 2,
+}
+
+impl HighlightPdfState {
+    pub fn from_i64(value: i64) -> Result<Self, StorageError> {
+        match value {
+            0 => Ok(Self::Pending),
+            1 => Ok(Self::Embedded),
+            2 => Ok(Self::External),
+            other => Err(StorageError::InvalidHighlightState(other)),
+        }
+    }
+
+    pub fn as_i64(self) -> i64 {
+        self as i64
+    }
 }
 
 /// One rectangle of a highlight, in page points with the origin at the top left
@@ -55,7 +97,7 @@ pub struct HighlightRect {
     pub y1: f32,
 }
 
-/// A stored highlight: its geometry and the text it covers.
+/// A stored highlight: its geometry, covered text, and PDF lifecycle state.
 ///
 /// Geometry rather than a document position, because rectangles are what all
 /// three consumers need — the overlay renderer, the PDF writer's per-page
@@ -63,12 +105,23 @@ pub struct HighlightRect {
 /// re-extracting the page's content layer on reload.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StoredHighlight {
-    pub id: i64,
+    pub id: HighlightId,
     /// `#rrggbb`.
     pub color: String,
     pub text: String,
     /// In document order, one per covered line.
     pub rects: Vec<HighlightRect>,
+    pub pdf_state: HighlightPdfState,
+}
+
+/// Optional user-authored Markdown comment for one highlight.
+///
+/// Distinct from [`StoredHighlight::text`], which is the immutable PDF source
+/// quote. Absence of a row means no comment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredHighlightNote {
+    pub highlight_id: HighlightId,
+    pub body_markdown: String,
 }
 
 /// Handle to the syodep database.
@@ -195,14 +248,15 @@ impl Storage {
         Ok(())
     }
 
-    /// Store a highlight and its rectangles, returning the new row id.
+    /// Store a highlight and its rectangles as [`HighlightPdfState::Pending`],
+    /// returning the new row id.
     pub fn insert_highlight(
         &self,
         document_id: i64,
         color: &str,
         text: &str,
         rects: &[HighlightRect],
-    ) -> Result<i64, StorageError> {
+    ) -> Result<HighlightId, StorageError> {
         // One transaction: a highlight with no rectangles would be invisible and
         // unreachable, so the two inserts must not be separable.
         self.conn.execute("BEGIN", [])?;
@@ -220,19 +274,25 @@ impl Storage {
         color: &str,
         text: &str,
         rects: &[HighlightRect],
-    ) -> Result<i64, StorageError> {
+    ) -> Result<HighlightId, StorageError> {
         self.conn.execute(
-            "INSERT INTO highlights (document_id, color, text) VALUES (?1, ?2, ?3)",
-            (document_id, color, text),
+            "INSERT INTO highlights (document_id, color, text, pdf_state)
+             VALUES (?1, ?2, ?3, ?4)",
+            (
+                document_id,
+                color,
+                text,
+                HighlightPdfState::Pending.as_i64(),
+            ),
         )?;
-        let id = self.conn.last_insert_rowid();
+        let id = HighlightId(self.conn.last_insert_rowid());
         let mut statement = self.conn.prepare(
             "INSERT INTO highlight_rects (highlight_id, ordinal, page, x0, y0, x1, y1)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         )?;
         for (ordinal, rect) in rects.iter().enumerate() {
             statement.execute((
-                id,
+                id.0,
                 ordinal as i64,
                 rect.page as i64,
                 rect.x0 as f64,
@@ -244,23 +304,35 @@ impl Storage {
         Ok(id)
     }
 
-    /// Every highlight of a document, oldest first, each with its rectangles in
-    /// the order they were stored.
+    /// Every highlight of a document, oldest first (stable id order), each with
+    /// its rectangles in the order they were stored. Includes Pending, Embedded,
+    /// and External rows.
     pub fn load_highlights(&self, document_id: i64) -> Result<Vec<StoredHighlight>, StorageError> {
         let mut statement = self.conn.prepare(
-            "SELECT id, color, text FROM highlights
+            "SELECT id, color, text, pdf_state FROM highlights
              WHERE document_id = ?1 ORDER BY id",
         )?;
-        let mut highlights = statement
+        let rows = statement
             .query_map((document_id,), |row| {
-                Ok(StoredHighlight {
-                    id: row.get(0)?,
-                    color: row.get(1)?,
-                    text: row.get(2)?,
-                    rects: Vec::new(),
-                })
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
+
+        let mut highlights = Vec::with_capacity(rows.len());
+        for (id, color, text, state) in rows {
+            highlights.push(StoredHighlight {
+                id: HighlightId(id),
+                color,
+                text,
+                rects: Vec::new(),
+                pdf_state: HighlightPdfState::from_i64(state)?,
+            });
+        }
 
         let mut statement = self.conn.prepare(
             "SELECT page, x0, y0, x1, y1 FROM highlight_rects
@@ -268,7 +340,7 @@ impl Storage {
         )?;
         for highlight in &mut highlights {
             highlight.rects = statement
-                .query_map((highlight.id,), |row| {
+                .query_map((highlight.id.0,), |row| {
                     Ok(HighlightRect {
                         page: row.get::<_, i64>(0)? as usize,
                         x0: row.get::<_, f64>(1)? as f32,
@@ -282,16 +354,151 @@ impl Storage {
         Ok(highlights)
     }
 
-    /// Forget every highlight of a document. Called once they have been written
-    /// into the PDF itself, where the renderer picks them up instead.
+    /// Mark the exact highlight ids as [`HighlightPdfState::Embedded`] in one
+    /// transaction. Only those ids — never every pending row of the document —
+    /// so a save that wrote a subset cannot silently claim the rest.
+    ///
+    /// Each id must currently be Pending and belong to `document_id`; otherwise
+    /// the whole transaction rolls back.
+    pub fn mark_highlights_embedded(
+        &self,
+        document_id: i64,
+        highlight_ids: &[HighlightId],
+    ) -> Result<(), StorageError> {
+        if highlight_ids.is_empty() {
+            return Ok(());
+        }
+        self.conn.execute("BEGIN", [])?;
+        let result = self.mark_highlights_embedded_inner(document_id, highlight_ids);
+        match &result {
+            Ok(_) => self.conn.execute("COMMIT", [])?,
+            Err(_) => self.conn.execute("ROLLBACK", [])?,
+        };
+        result
+    }
+
+    fn mark_highlights_embedded_inner(
+        &self,
+        document_id: i64,
+        highlight_ids: &[HighlightId],
+    ) -> Result<(), StorageError> {
+        let mut statement = self.conn.prepare(
+            "UPDATE highlights
+             SET pdf_state = ?1, updated_at = datetime('now')
+             WHERE id = ?2 AND document_id = ?3 AND pdf_state = ?4",
+        )?;
+        for id in highlight_ids {
+            let updated = statement.execute((
+                HighlightPdfState::Embedded.as_i64(),
+                id.0,
+                document_id,
+                HighlightPdfState::Pending.as_i64(),
+            ))?;
+            if updated != 1 {
+                return Err(StorageError::HighlightNotPending(id.0, document_id));
+            }
+        }
+        Ok(())
+    }
+
+    /// Forget every highlight of a document. Kept for cascade tests and a
+    /// future delete command; the save path no longer uses this.
     pub fn delete_highlights(&self, document_id: i64) -> Result<(), StorageError> {
-        // `highlight_rects` goes with them: the foreign key cascades, and
-        // `foreign_keys` is ON for every connection this type hands out.
+        // `highlight_rects` and `highlight_notes` go with them: the foreign
+        // keys cascade, and `foreign_keys` is ON for every connection this
+        // type hands out.
         self.conn.execute(
             "DELETE FROM highlights WHERE document_id = ?1",
             (document_id,),
         )?;
         Ok(())
+    }
+
+    /// Load every Markdown note belonging to highlights of `document_id`.
+    ///
+    /// Joined through `highlights` so a note cannot leak from another document.
+    pub fn load_highlight_notes(
+        &self,
+        document_id: i64,
+    ) -> Result<HashMap<HighlightId, StoredHighlightNote>, StorageError> {
+        let mut statement = self.conn.prepare(
+            "SELECT n.highlight_id, n.body_markdown
+             FROM highlight_notes n
+             JOIN highlights h ON h.id = n.highlight_id
+             WHERE h.document_id = ?1
+             ORDER BY h.id",
+        )?;
+        let rows = statement.query_map((document_id,), |row| {
+            Ok(StoredHighlightNote {
+                highlight_id: HighlightId(row.get(0)?),
+                body_markdown: row.get(1)?,
+            })
+        })?;
+        let mut notes = HashMap::new();
+        for note in rows {
+            let note = note?;
+            notes.insert(note.highlight_id, note);
+        }
+        Ok(notes)
+    }
+
+    /// Upsert or clear a note for a highlight that belongs to `document_id`.
+    ///
+    /// Whitespace-only bodies (`trim().is_empty()`) delete the row. Returns
+    /// `Ok(true)` when the highlight belonged to the document (even if the
+    /// body was a no-op), `Ok(false)` when the id is missing or belongs to
+    /// another document. Equal non-empty bodies skip the write.
+    pub fn set_highlight_note_for_document(
+        &self,
+        document_id: i64,
+        highlight_id: HighlightId,
+        body_markdown: &str,
+    ) -> Result<bool, StorageError> {
+        let owned: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT document_id FROM highlights WHERE id = ?1",
+                (highlight_id.0,),
+                |row| row.get(0),
+            )
+            .optional()?;
+        match owned {
+            Some(id) if id == document_id => {}
+            _ => return Ok(false),
+        }
+
+        if body_markdown.trim().is_empty() {
+            self.conn.execute(
+                "DELETE FROM highlight_notes WHERE highlight_id = ?1",
+                (highlight_id.0,),
+            )?;
+            return Ok(true);
+        }
+
+        let existing: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT body_markdown FROM highlight_notes WHERE highlight_id = ?1",
+                (highlight_id.0,),
+                |row| row.get(0),
+            )
+            .optional()?;
+        if existing.as_deref() == Some(body_markdown) {
+            return Ok(true);
+        }
+
+        self.conn.execute(
+            "INSERT INTO highlight_notes (
+                highlight_id, body_markdown, created_at, updated_at
+             )
+             VALUES (?1, ?2, datetime('now'), datetime('now'))
+             ON CONFLICT(highlight_id)
+             DO UPDATE SET
+                body_markdown = excluded.body_markdown,
+                updated_at = datetime('now')",
+            (highlight_id.0, body_markdown),
+        )?;
+        Ok(true)
     }
 }
 
@@ -435,10 +642,129 @@ mod tests {
                 color: "#ffe066".to_owned(),
                 text: "hello there".to_owned(),
                 rects: rects.clone(),
+                pdf_state: HighlightPdfState::Pending,
             }
         );
         assert_eq!(loaded[1].id, second);
         assert_eq!(loaded[1].rects, vec![rect(2, 90.0)]);
+        assert_eq!(loaded[1].pdf_state, HighlightPdfState::Pending);
+    }
+
+    #[test]
+    fn new_highlights_start_pending() {
+        let storage = Storage::in_memory().unwrap();
+        let id = storage.upsert_document("fp", "/a.pdf").unwrap();
+        storage
+            .insert_highlight(id, "#ffe066", "hello", &[rect(0, 72.0)])
+            .unwrap();
+        let loaded = storage.load_highlights(id).unwrap();
+        assert_eq!(loaded[0].pdf_state, HighlightPdfState::Pending);
+    }
+
+    #[test]
+    fn mark_embedded_updates_only_the_named_ids() {
+        let storage = Storage::in_memory().unwrap();
+        let id = storage.upsert_document("fp", "/a.pdf").unwrap();
+        let first = storage
+            .insert_highlight(id, "#ffe066", "one", &[rect(0, 72.0)])
+            .unwrap();
+        let second = storage
+            .insert_highlight(id, "#88ccff", "two", &[rect(0, 90.0)])
+            .unwrap();
+        let third = storage
+            .insert_highlight(id, "#aaffaa", "three", &[rect(1, 10.0)])
+            .unwrap();
+
+        storage
+            .mark_highlights_embedded(id, &[first, third])
+            .unwrap();
+
+        let loaded = storage.load_highlights(id).unwrap();
+        assert_eq!(loaded[0].pdf_state, HighlightPdfState::Embedded);
+        assert_eq!(loaded[1].id, second);
+        assert_eq!(loaded[1].pdf_state, HighlightPdfState::Pending);
+        assert_eq!(loaded[2].pdf_state, HighlightPdfState::Embedded);
+    }
+
+    #[test]
+    fn embedded_records_survive_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("syodep.sqlite3");
+        let highlight_id = {
+            let storage = Storage::open(&path).unwrap();
+            let id = storage.upsert_document("fp", "/a.pdf").unwrap();
+            let hid = storage
+                .insert_highlight(id, "#ffe066", "kept", &[rect(0, 72.0)])
+                .unwrap();
+            storage.mark_highlights_embedded(id, &[hid]).unwrap();
+            hid
+        };
+        let storage = Storage::open(&path).unwrap();
+        let id = storage.upsert_document("fp", "/a.pdf").unwrap();
+        let loaded = storage.load_highlights(id).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, highlight_id);
+        assert_eq!(loaded[0].pdf_state, HighlightPdfState::Embedded);
+        assert_eq!(loaded[0].text, "kept");
+        assert_eq!(loaded[0].rects, vec![rect(0, 72.0)]);
+    }
+
+    #[test]
+    fn invalid_pdf_state_values_are_refused_on_load() {
+        let storage = Storage::in_memory().unwrap();
+        let id = storage.upsert_document("fp", "/a.pdf").unwrap();
+        storage
+            .insert_highlight(id, "#ffe066", "bad", &[rect(0, 72.0)])
+            .unwrap();
+        assert!(matches!(
+            HighlightPdfState::from_i64(99),
+            Err(StorageError::InvalidHighlightState(99))
+        ));
+        // Known values round-trip through storage.
+        storage
+            .conn
+            .execute(
+                "UPDATE highlights SET pdf_state = 1 WHERE document_id = ?1",
+                (id,),
+            )
+            .unwrap();
+        assert_eq!(
+            storage.load_highlights(id).unwrap()[0].pdf_state,
+            HighlightPdfState::Embedded
+        );
+        storage
+            .conn
+            .execute(
+                "UPDATE highlights SET pdf_state = 2 WHERE document_id = ?1",
+                (id,),
+            )
+            .unwrap();
+        assert_eq!(
+            storage.load_highlights(id).unwrap()[0].pdf_state,
+            HighlightPdfState::External
+        );
+    }
+
+    #[test]
+    fn mark_embedded_rolls_back_when_one_id_is_not_pending() {
+        let storage = Storage::in_memory().unwrap();
+        let id = storage.upsert_document("fp", "/a.pdf").unwrap();
+        let first = storage
+            .insert_highlight(id, "#ffe066", "one", &[rect(0, 72.0)])
+            .unwrap();
+        let second = storage
+            .insert_highlight(id, "#88ccff", "two", &[rect(0, 90.0)])
+            .unwrap();
+
+        let err = storage
+            .mark_highlights_embedded(id, &[first, HighlightId(999_999)])
+            .unwrap_err();
+        assert!(matches!(err, StorageError::HighlightNotPending(999_999, _)));
+        let loaded = storage.load_highlights(id).unwrap();
+        assert_eq!(loaded[0].id, first);
+        assert_eq!(loaded[0].pdf_state, HighlightPdfState::Pending);
+        assert_eq!(loaded[1].id, second);
+        assert_eq!(loaded[1].pdf_state, HighlightPdfState::Pending);
     }
 
     #[test]
@@ -519,5 +845,104 @@ mod tests {
             )
             .unwrap();
         assert_eq!(stale, 0);
+    }
+
+    #[test]
+    fn highlight_notes_upsert_clear_and_scope() {
+        let storage = Storage::in_memory().unwrap();
+        let doc_a = storage.upsert_document("fp-a", "/a.pdf").unwrap();
+        let doc_b = storage.upsert_document("fp-b", "/b.pdf").unwrap();
+        let hid_a = storage
+            .insert_highlight(doc_a, "#ffe066", "alpha", &[rect(0, 72.0)])
+            .unwrap();
+        let hid_b = storage
+            .insert_highlight(doc_b, "#88ccff", "beta", &[rect(0, 90.0)])
+            .unwrap();
+
+        assert!(storage
+            .set_highlight_note_for_document(doc_a, hid_a, "first note")
+            .unwrap());
+        assert!(storage
+            .set_highlight_note_for_document(doc_a, hid_a, "updated note")
+            .unwrap());
+        // Equal body is a no-op write.
+        assert!(storage
+            .set_highlight_note_for_document(doc_a, hid_a, "updated note")
+            .unwrap());
+
+        let notes_a = storage.load_highlight_notes(doc_a).unwrap();
+        assert_eq!(notes_a.len(), 1);
+        assert_eq!(notes_a[&hid_a].body_markdown, "updated note");
+        assert!(storage.load_highlight_notes(doc_b).unwrap().is_empty());
+
+        // Cross-document id is rejected.
+        assert!(!storage
+            .set_highlight_note_for_document(doc_a, hid_b, "nope")
+            .unwrap());
+        assert!(storage.load_highlight_notes(doc_b).unwrap().is_empty());
+
+        // Whitespace-only clears.
+        assert!(storage
+            .set_highlight_note_for_document(doc_a, hid_a, "  \n\t  ")
+            .unwrap());
+        assert!(storage.load_highlight_notes(doc_a).unwrap().is_empty());
+
+        // Unicode / multiline.
+        assert!(storage
+            .set_highlight_note_for_document(doc_a, hid_a, "# 标题\n\n- one\n- two")
+            .unwrap());
+        assert_eq!(
+            storage.load_highlight_notes(doc_a).unwrap()[&hid_a].body_markdown,
+            "# 标题\n\n- one\n- two"
+        );
+    }
+
+    #[test]
+    fn highlight_notes_cascade_on_highlight_delete() {
+        let storage = Storage::in_memory().unwrap();
+        let doc = storage.upsert_document("fp", "/a.pdf").unwrap();
+        let hid = storage
+            .insert_highlight(doc, "#ffe066", "gone", &[rect(0, 72.0)])
+            .unwrap();
+        storage
+            .set_highlight_note_for_document(doc, hid, "orphan me")
+            .unwrap();
+        storage.delete_highlights(doc).unwrap();
+        let notes: i64 = storage
+            .conn
+            .query_row("SELECT count(*) FROM highlight_notes", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(notes, 0);
+    }
+
+    #[test]
+    fn highlight_notes_survive_pending_to_embedded_and_rekey() {
+        let storage = Storage::in_memory().unwrap();
+        let doc = storage.upsert_document("old-fp", "/a.pdf").unwrap();
+        let hid = storage
+            .insert_highlight(doc, "#ffe066", "quoted", &[rect(0, 72.0)])
+            .unwrap();
+        storage
+            .set_highlight_note_for_document(doc, hid, "keeps going")
+            .unwrap();
+        storage.mark_highlights_embedded(doc, &[hid]).unwrap();
+        assert_eq!(
+            storage.load_highlight_notes(doc).unwrap()[&hid].body_markdown,
+            "keeps going"
+        );
+        storage.rekey_document(doc, "new-fp", "/a.pdf").unwrap();
+        assert_eq!(
+            storage.load_highlight_notes(doc).unwrap()[&hid].body_markdown,
+            "keeps going"
+        );
+    }
+
+    #[test]
+    fn unknown_highlight_note_target_is_rejected() {
+        let storage = Storage::in_memory().unwrap();
+        let doc = storage.upsert_document("fp", "/a.pdf").unwrap();
+        assert!(!storage
+            .set_highlight_note_for_document(doc, HighlightId(999), "x")
+            .unwrap());
     }
 }

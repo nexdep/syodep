@@ -12,50 +12,146 @@
 #include <QCommandLineParser>
 #include <QFile>
 #include <QFileInfo>
+#include <QTemporaryDir>
 #include <QTimer>
 
 #include <cstdio>
 
+#include "core_controller.h"
 #include "diagnostics.h"
 #include "main_window.h"
+#include "sidebar/annotation_sidebar.h"
+#include "sidebar/highlight_comment_editor.h"
+#include "sidebar/highlight_list_model.h"
 #include "syodep_ffi.h"
 
 namespace {
 
 int runSmokeTest(const QString &pdfPath)
 {
-    // Drive the core exactly like the window does, but without persistence
-    // so CI runs do not touch the user database.
-    SyoApp *app = syo_app_new(nullptr, nullptr);
-    if (!app) {
+    // Drive the core through CoreController without persistence so CI runs
+    // do not touch the user database.
+    syodep::CoreController core(syodep::CorePersistence::Disabled);
+    if (!core.isValid()) {
         std::fprintf(stderr, "SMOKE FAIL: core construction\n");
         return 1;
     }
-    syo_app_set_viewport(app, 800.0f, 600.0f);
-    if (!syo_app_open_document(app, pdfPath.toUtf8().constData())) {
+    core.setViewportSize(800.0f, 600.0f);
+    if (!core.openDocument(pdfPath)) {
         std::fprintf(stderr, "SMOKE FAIL: cannot open %s\n", qPrintable(pdfPath));
-        syo_app_free(app);
         return 1;
     }
-    SyoVisiblePage pages[8];
-    const size_t visible = syo_app_visible_pages(app, pages, 8);
-    if (visible == 0) {
+    const QVector<syodep::CoreVisiblePage> pages = core.visiblePages();
+    if (pages.isEmpty()) {
         std::fprintf(stderr, "SMOKE FAIL: no visible pages\n");
-        syo_app_free(app);
         return 1;
     }
-    SyoBitmap *bitmap = syo_app_render_page(app, pages[0].page);
-    if (!bitmap || bitmap->width == 0 || bitmap->height == 0) {
+    const QImage image = core.renderPage(pages.first().page);
+    if (image.isNull() || image.width() == 0 || image.height() == 0) {
         std::fprintf(stderr, "SMOKE FAIL: render\n");
-        syo_bitmap_free(bitmap);
-        syo_app_free(app);
         return 1;
     }
-    syo_bitmap_free(bitmap);
-    syo_app_free(app);
+
+    // Annotation snapshot must be queryable (empty is fine for a fresh PDF).
+    const syodep::HighlightSnapshot snapshot = core.highlightSnapshot();
+    (void)snapshot;
+    (void)core.statusText();
+    (void)core.focusOverlay();
+    (void)core.selectionOverlay();
+    (void)core.highlightOverlay();
+
+    // Comment path needs a real database. Use a temp DB so CI never writes the
+    // user profile store.
+    QTemporaryDir tmp;
+    if (!tmp.isValid()) {
+        std::fprintf(stderr, "SMOKE FAIL: temp dir\n");
+        return 1;
+    }
+    const QString dbPath = tmp.filePath(QStringLiteral("smoke.sqlite3"));
+    syodep::CoreController noteCore(dbPath);
+    if (!noteCore.isValid()) {
+        std::fprintf(stderr, "SMOKE FAIL: note core construction\n");
+        return 1;
+    }
+    noteCore.setViewportSize(800.0f, 600.0f);
+    if (!noteCore.openDocument(pdfPath)) {
+        std::fprintf(stderr, "SMOKE FAIL: note core open\n");
+        return 1;
+    }
+    // Commit one highlight via the same keys the UI would send.
+    for (const char *key : {"f", "w", "a", "a"})
+        noteCore.sendKey(QString::fromUtf8(key));
+
+    syodep::AnnotationSidebar sidebar(&noteCore);
+    sidebar.refreshAnnotations(true);
+    if (sidebar.contentState() != syodep::AnnotationSidebar::ContentState::HighlightList) {
+        std::fprintf(stderr, "SMOKE FAIL: expected highlight list after commit\n");
+        return 1;
+    }
+    if (!sidebar.commentEditor()) {
+        std::fprintf(stderr, "SMOKE FAIL: comment editor missing\n");
+        return 1;
+    }
+    const auto *item = sidebar.model()->itemAt(0);
+    if (!item) {
+        std::fprintf(stderr, "SMOKE FAIL: missing highlight item\n");
+        return 1;
+    }
+    sidebar.commentEditor()->loadHighlight(*item);
+    if (sidebar.commentEditor()->isDirty() || sidebar.commentEditor()->hasHighlight() == false) {
+        std::fprintf(stderr, "SMOKE FAIL: editor load\n");
+        return 1;
+    }
+    if (!sidebar.commentEditor()->markdown().isEmpty()) {
+        std::fprintf(stderr, "SMOKE FAIL: expected empty note\n");
+        return 1;
+    }
+
+    const quint64 revBefore = noteCore.annotationRevision();
+    const QString note = QStringLiteral("Smoke comment");
+    if (!noteCore.setHighlightNote(item->id, note)) {
+        std::fprintf(stderr, "SMOKE FAIL: setHighlightNote\n");
+        return 1;
+    }
+    if (noteCore.annotationRevision() <= revBefore) {
+        std::fprintf(stderr, "SMOKE FAIL: revision did not advance\n");
+        return 1;
+    }
+    sidebar.refreshAnnotations(true);
+    const auto *updated = sidebar.model()->itemAt(0);
+    if (!updated || !updated->hasNote || updated->noteMarkdown != note) {
+        std::fprintf(stderr, "SMOKE FAIL: note missing after refresh\n");
+        return 1;
+    }
+    const QString exported = noteCore.highlightMarkdown(item->id);
+    if (!exported.contains(note)) {
+        std::fprintf(stderr, "SMOKE FAIL: export missing note\n");
+        return 1;
+    }
 
     // And once through the actual widgets: construct, show, paint one frame.
     syodep::MainWindow window;
+    if (!window.annotationSidebar() || !window.annotationsDock()) {
+        std::fprintf(stderr, "SMOKE FAIL: annotation sidebar not constructed\n");
+        return 1;
+    }
+    if (window.annotationSidebar()->contentState()
+        != syodep::AnnotationSidebar::ContentState::NoDocument) {
+        std::fprintf(stderr, "SMOKE FAIL: expected no-document sidebar state\n");
+        return 1;
+    }
+    if (!window.openDocument(pdfPath)) {
+        std::fprintf(stderr, "SMOKE FAIL: MainWindow open %s\n", qPrintable(pdfPath));
+        return 1;
+    }
+    window.annotationSidebar()->refreshAnnotations(true);
+    const auto state = window.annotationSidebar()->contentState();
+    if (state != syodep::AnnotationSidebar::ContentState::EmptyHighlights
+        && state != syodep::AnnotationSidebar::ContentState::HighlightList) {
+        std::fprintf(stderr, "SMOKE FAIL: unexpected sidebar state after open\n");
+        return 1;
+    }
+
     window.show();
     QTimer::singleShot(0, &window, &QWidget::close);
     QApplication::processEvents();

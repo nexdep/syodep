@@ -12,8 +12,11 @@ pub mod input;
 pub mod layout;
 pub mod render_cache;
 
-pub use app::{App, Effects, VisiblePage};
+pub use app::{
+    App, DocumentAnchor, Effects, Highlight, HighlightNote, HighlightSummary, VisiblePage,
+};
 pub use caret::{Caret, Mode};
 pub use command::Command;
 pub use input::{InputState, KeyOutcome, Keymap, KeymapError};
 pub use layout::{DocumentLayout, View};
+pub use syodep_storage::{HighlightId, HighlightPdfState};

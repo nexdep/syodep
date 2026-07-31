@@ -1,27 +1,32 @@
-// Main application window: canvas + status line + native file dialog.
-// Owns the core (SyoApp) handle. Contains no document logic.
+// Main application window: canvas + status line + highlights dock + dialogs.
+// Composes the UI and manages dialogs; CoreController owns the SyoApp*.
 #pragma once
 
 #include <QLabel>
 #include <QMainWindow>
 
-#include "syodep_ffi.h"
-
 class QCloseEvent;
+class QDockWidget;
 
 namespace syodep {
 
+class AnnotationSidebar;
 class CanvasWidget;
+class CoreController;
 
 class MainWindow : public QMainWindow
 {
     Q_OBJECT
 public:
     explicit MainWindow(QWidget *parent = nullptr);
-    ~MainWindow() override;
+    ~MainWindow() override = default;
 
     // Returns false (and shows the error in the status line) on failure.
     bool openDocument(const QString &path);
+
+    // Exposed for smoke tests that need to assert sidebar construction.
+    AnnotationSidebar *annotationSidebar() const { return m_annotationSidebar; }
+    QDockWidget *annotationsDock() const { return m_annotationsDock; }
 
 protected:
     // Dropping a PDF onto the window opens it. The canvas fills the window but
@@ -43,8 +48,10 @@ private:
     // the answer. Returns true when the window may close now.
     bool confirmQuit();
 
-    SyoApp *m_app = nullptr;
+    CoreController *m_core = nullptr;
     CanvasWidget *m_canvas = nullptr;
+    AnnotationSidebar *m_annotationSidebar = nullptr;
+    QDockWidget *m_annotationsDock = nullptr;
     QLabel *m_status = nullptr;
     // Set once confirmQuit() has resolved (nothing to confirm, or the user
     // answered). Guards against onConfirmQuitRequested() -> close() ->

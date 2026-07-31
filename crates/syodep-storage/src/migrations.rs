@@ -62,6 +62,39 @@ pub const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (highlight_id, ordinal)
     );
     ",
+    // v3: highlight PDF lifecycle. Rows used to be deleted after a successful
+    // save; they are kept now so the sidebar, export, and later comments can
+    // still address them by stable id. `pdf_state` is 0=Pending (syodep
+    // overlay, included in the next save), 1=Embedded (MuPDF draws it from
+    // the PDF; not re-written), 2=External (reserved for annotations found in
+    // the PDF that syodep did not create). Existing rows become Pending: under
+    // the previous lifecycle successfully embedded rows were already gone, so
+    // anything still here has not been removed after a save.
+    "
+    ALTER TABLE highlights
+    ADD COLUMN pdf_state INTEGER NOT NULL DEFAULT 0
+    CHECK (pdf_state IN (0, 1, 2));
+
+    ALTER TABLE highlights
+    ADD COLUMN updated_at TEXT;
+
+    CREATE INDEX highlights_document_state
+    ON highlights(document_id, pdf_state);
+    ",
+    // v4: one optional Markdown comment per highlight. Separate from
+    // `highlights` so the immutable PDF source anchor stays distinct from
+    // user-authored notes, and so comment timestamps/metadata can evolve
+    // without widening the core annotation row. Chat/threads are a different
+    // feature and must not reuse this table.
+    "
+    CREATE TABLE highlight_notes (
+        highlight_id INTEGER PRIMARY KEY
+                     REFERENCES highlights(id) ON DELETE CASCADE,
+        body_markdown TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    ",
 ];
 
 /// Apply all pending migrations inside transactions.
@@ -98,7 +131,13 @@ mod tests {
             .unwrap();
         assert_eq!(version, MIGRATIONS.len() as u32);
         // Tables exist.
-        for table in ["documents", "positions", "highlights", "highlight_rects"] {
+        for table in [
+            "documents",
+            "positions",
+            "highlights",
+            "highlight_rects",
+            "highlight_notes",
+        ] {
             let count: i64 = conn
                 .query_row(
                     "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
@@ -148,5 +187,141 @@ mod tests {
             )
             .unwrap();
         assert_eq!(path, "/x.pdf");
+    }
+
+    #[test]
+    fn a_v2_database_upgrades_without_losing_highlights() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(&format!(
+            "BEGIN;\n{}\n{}\nPRAGMA user_version = 2;\nCOMMIT;",
+            MIGRATIONS[0], MIGRATIONS[1]
+        ))
+        .unwrap();
+        conn.execute(
+            "INSERT INTO documents (fingerprint, path) VALUES ('abc', '/x.pdf')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO highlights (document_id, color, text) VALUES (1, '#ffe066', 'kept')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO highlight_rects (highlight_id, ordinal, page, x0, y0, x1, y1)
+             VALUES (1, 0, 0, 10.0, 20.0, 30.0, 40.0)",
+            [],
+        )
+        .unwrap();
+
+        run(&conn).unwrap();
+
+        assert_eq!(
+            conn.query_row::<u32, _, _>("PRAGMA user_version", [], |row| row.get(0))
+                .unwrap(),
+            MIGRATIONS.len() as u32
+        );
+        let (text, state): (String, i64) = conn
+            .query_row(
+                "SELECT text, pdf_state FROM highlights WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(text, "kept");
+        assert_eq!(state, 0, "existing rows become Pending");
+        let rect_count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM highlight_rects WHERE highlight_id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rect_count, 1);
+        // Idempotent: rerunning does not disturb the upgraded rows.
+        run(&conn).unwrap();
+        let state_again: i64 = conn
+            .query_row("SELECT pdf_state FROM highlights WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(state_again, 0);
+    }
+
+    #[test]
+    fn migrations_apply_from_scratch_include_pdf_state() {
+        let conn = Connection::open_in_memory().unwrap();
+        run(&conn).unwrap();
+        let has_column: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('highlights')
+                 WHERE name = 'pdf_state'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_column, 1);
+    }
+
+    #[test]
+    fn a_v3_database_upgrades_with_notes_table() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(&format!(
+            "BEGIN;\n{}\n{}\n{}\nPRAGMA user_version = 3;\nCOMMIT;",
+            MIGRATIONS[0], MIGRATIONS[1], MIGRATIONS[2]
+        ))
+        .unwrap();
+        conn.execute(
+            "INSERT INTO documents (fingerprint, path) VALUES ('abc', '/x.pdf')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO highlights (document_id, color, text, pdf_state)
+             VALUES (1, '#ffe066', 'kept', 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO highlight_rects (highlight_id, ordinal, page, x0, y0, x1, y1)
+             VALUES (1, 0, 0, 10.0, 20.0, 30.0, 40.0)",
+            [],
+        )
+        .unwrap();
+
+        run(&conn).unwrap();
+
+        assert_eq!(
+            conn.query_row::<u32, _, _>("PRAGMA user_version", [], |row| row.get(0))
+                .unwrap(),
+            MIGRATIONS.len() as u32
+        );
+        let notes_table: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master
+                 WHERE type = 'table' AND name = 'highlight_notes'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(notes_table, 1);
+        let (text, state): (String, i64) = conn
+            .query_row(
+                "SELECT text, pdf_state FROM highlights WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(text, "kept");
+        assert_eq!(state, 0);
+        let rect_count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM highlight_rects WHERE highlight_id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rect_count, 1);
+        run(&conn).unwrap();
     }
 }

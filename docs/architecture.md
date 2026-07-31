@@ -7,8 +7,10 @@ joined by a small C ABI:
 
 ```
  ┌────────────────────────── ui-qt (C++, Qt 6) ──────────────────────────┐
- │ MainWindow ── status line, file dialog                                │
+ │ MainWindow ── status line, file dialog, View menu, Highlights dock    │
  │ CanvasWidget (QOpenGLWidget) ── paints bitmaps, forwards input        │
+ │ AnnotationSidebar ── read-only highlight list (model/view/delegate)   │
+ │ CoreController ── owns SyoApp*, owned Qt values, effect → signals     │
  │ key_encoder ── QKeyEvent → "j" / "G" / "<C-d>" strings                │
  └──────────────────────────────┬────────────────────────────────────────┘
                                 │ C ABI (crates/syodep-ffi, cbindgen header)
@@ -74,12 +76,14 @@ input take plain data). Key pieces:
   thread in milestone 1; asynchronous tile rendering is a later milestone
   (see roadmap) and will live behind the same `App::render_page` seam.
 - **`App`** (`app.rs`): glues everything; input events come in, `Effects`
-  (redraw / quit / open-file-dialog / pending-input / reload) come out. The
-  last two are state rather than one-shot requests: `pending_input` tells the
-  shell whether to arm its pause timer, and `reload` tells it a save rewrote
-  the document, so cached page bitmaps must be dropped even though nothing
-  else about the view changed. Persists the reading position after every
-  navigation command and on drop.
+  (redraw / quit / open-file-dialog / pending-input / reload / confirm-quit /
+  annotations-changed) come out. The pending-input and reload bits are state
+  rather than one-shot requests: `pending_input` tells the shell whether to arm
+  its pause timer, and `reload` tells it a save rewrote the document, so cached
+  page bitmaps must be dropped even though nothing else about the view changed.
+  `annotations_changed` is distinct from `redraw`: a canvas refresh and a
+  sidebar list refresh are different requests. Persists the reading position
+  after every navigation command and on drop.
 - **Focus mode** (`caret.rs` + `app.rs`): one highlighted position over
   page-content geometry. `Mode` has exactly four variants — `Normal`, `Focus`,
   `Visual`, `Highlight` — and *granularity is not a mode*: `Focus` carries a `Scope` (char,
@@ -143,9 +147,29 @@ input take plain data). Key pieces:
   the head, which would throw away the extent the user just shaped.
 - **Highlights** (`app.rs` + `syodep-storage` + `syodep-pdf`): stored as
   page-space rectangles plus the covered text, not as a caret span — see decision
-  15. Committing writes them to SQLite (migration v2) so they survive a reopen;
-  `save_document` embeds them in the PDF as real `Highlight` annotations, after
-  which syodep stops drawing them because MuPDF renders them itself.
+  15. Committing writes them to SQLite as `Pending` so they survive a reopen;
+  `save_document` embeds only Pending rows into the PDF as real `Highlight`
+  annotations, then marks those exact ids `Embedded`. Rows are **kept** after a
+  save (stable ids for the sidebar, Markdown export, and comments).
+  Pending records are drawn by the syodep overlay; Embedded records are drawn by
+  MuPDF from the PDF and must not be painted again. Listing, reveal-by-id, and
+  Markdown export use the stored geometry and captured text — no content
+  extraction or caret traversal. Each highlight may carry one optional Markdown
+  comment in `highlight_notes` (migration v4), keyed by stable id and independent
+  of PDF state:
+
+  ```
+  Highlight
+  ├── DocumentAnchor (immutable PDF source text + page-space rects)
+  ├── PDF state (Pending / Embedded / External)
+  └── optional HighlightNote (mutable raw Markdown)
+  ```
+
+  Empty/whitespace-only saves delete the note row. Comment changes bump
+  `annotation_revision` and emit `annotations_changed` without a canvas redraw.
+  Chat/threads will use separate tables — notes are not chat history.
+  Traversal refactors (`ContentSession` / `MotionEngine`) remain deferred; see
+  [`docs/traversal-audit.md`](traversal-audit.md).
 
 **Traversal audit:** the content pipeline, scope/object matrix, adjacency
 policies, cache invalidation, and findings for extending toward the annotation
@@ -393,12 +417,26 @@ page, x0, y0, x1, y1). Geometry lives in a child table because one highlight
 covers a rectangle per line and may run across pages — and because PDF
 annotations are per-page, so the writer groups by `page` anyway.
 
+Schema v3: `highlights.pdf_state` (`0` Pending / `1` Embedded / `2` External)
+and `highlights.updated_at`. Schema v4: `highlight_notes` (one optional Markdown
+comment per highlight). SQLite remains the canonical annotation-metadata
+index; the PDF remains the portable visual representation. Existing v2 rows
+upgrade to Pending (under the previous lifecycle successfully embedded rows
+were deleted, so anything still present had not been cleared after a save).
+`External` is reserved for a future import of annotations syodep did not create.
+
 Phase 2 adds marks/bookmarks/notes tables as further migrations.
 
 **Consequence of saving:** writing highlights into the PDF changes its bytes and
 therefore its fingerprint, which is the document's identity. `rekey_document`
 moves the row to the new hash as part of the save, so the reading position
-survives; without it every save would silently orphan it. See decision 16.
+survives; without it every save would silently orphan it. The exact Pending ids
+included in the write are then marked Embedded in one SQLite transaction. The
+PDF rewrite and the database update cannot commit atomically: if the DB update
+fails after a successful rename, the session treats those ids as Embedded so a
+later save will not double-write them, but the next launch may still see Pending
+rows that already exist in the PDF — a known integrity window for a future
+annotation-import reconciliation. See decision 16.
 
 ### syodep-ffi
 
@@ -407,49 +445,102 @@ The C ABI. Owns nothing conceptually; it is a mechanical projection of
 panic must never unwind into C++). Strings/bitmaps returned to C++ are
 heap copies with explicit `syo_*_free` functions. The header is generated
 by cbindgen at build time into `crates/syodep-ffi/include/syodep_ffi.h`.
+Canvas overlays (`syo_app_highlights`) stay screen-space and Pending-only;
+the annotation list API (`syo_app_highlight_list`, revision, reveal,
+Markdown) feeds the Qt sidebar through `CoreController`.
 
 ### ui-qt
 
-Five small components; intentionally boring:
+```
+MainWindow
+    native dialogs and window composition
+    status bar, quit confirmation
+    View → Highlights dock toggle
 
+CoreController
+    owns SyoApp*
+    C ABI conversion to owned Qt values
+    effect-bit routing → signals
+    pending-key QTimer
+    annotation snapshot / revision / reveal / Markdown
+
+CanvasWidget
+    page and overlay painting
+    small QImage page cache
+    device-pixel-ratio conversion
+    forwards keyboard/wheel/resize through CoreController
+
+AnnotationSidebar (QDockWidget "Highlights")
+    HighlightListModel — disposable snapshot projection
+    HighlightDelegate — card paint (source + optional comment preview)
+    HighlightCommentEditor — one selected-item Markdown editor
+    SafeMarkdownView — preview with HTML/external resources blocked
+    empty states (no document / no highlights)
+    reveal + clipboard via CoreController
+    dirty-draft protection on selection / open / close
+```
+
+Six small components; intentionally boring:
+
+- `CoreController` is the only live-window owner of `SyoApp*` and the only
+  interpreter of `SYO_EFFECT_*`. Widgets receive owned Qt values and signals.
 - `key_encoder` translates `QKeyEvent` to the chord syntax (the shell's
   only input knowledge).
-- `CanvasWidget` (a `QOpenGLWidget`) forwards keys/wheel/resizes, asks the
-  core for visible page rects + bitmaps, paints them with `QPainter` on the
-  GL-backed surface, and fills the overlay rectangles the core reports —
-  `syo_app_focus`, `syo_app_selection`, `syo_app_highlights`, each a set of
-  screen rects in canvas pixels, at most one of the first two ever valid at
-  once — on top. Focus and visual go into one `QPainterPath` each so
-  overlapping rects blend once, then a single plain-alpha fill. Highlights are
-  different: each rectangle is composited with Multiply blending onto a copy
+- `CanvasWidget` (a `QOpenGLWidget`) forwards keys/wheel/resizes through
+  `CoreController`, asks for visible page rects + bitmaps + overlays via the
+  controller, and paints them with `QPainter` on the GL-backed surface.
+  Focus and visual go into one `QPainterPath` each so overlapping rects blend
+  once, then a single plain-alpha fill. Highlights are different: each
+  rectangle is composited with Multiply blending onto a copy
   of the page pixels it covers (a `QImage`, so the always-correct raster paint
   engine does the blending) before being drawn, because `QOpenGLWidget`'s own
   GL paint engine cannot be trusted with that composition mode — confirmed by
   testing, where a GPU/driver without the needed blend-equation extension
   painted solid black instead of blending at all. It keeps a tiny per-page
   `QImage` cache only to avoid re-copying bitmaps across the FFI every repaint
-  (cleared on a save's `reload` effect, or on opening a different document);
-  the real cache is in the core. Tiled GL texture rendering is planned for
-  phase 3 (roadmap).
-- `MainWindow` owns the `SyoApp*` handle, the status label and the native
-  file dialog, and accepts PDFs dropped onto the window. The canvas fills the
-  window but leaves `acceptDrops()` false, so Qt delivers drag events to the
-  window; only it needs the flag.
+  (cleared on `pageCacheInvalidationRequested` from save/open); the real cache
+  is in the core. Tiled GL texture rendering is planned for phase 3 (roadmap).
+  Canvas overlays stay Pending-only; Embedded highlights are drawn by MuPDF
+  inside the page bitmap and must not be double-painted by the overlay.
+- `AnnotationSidebar` is a dock beside the canvas with a vertical splitter:
+  the highlight list above and one `HighlightCommentEditor` below (never one
+  editor per row). It consumes disposable `HighlightSnapshot` values from
+  `CoreController`, refreshes only when `documentChanged` fires or
+  `annotationRevision` advances, and restores selection by stable highlight id.
+  Cards show a bounded plain-text comment preview; the editor edits raw
+  Markdown and previews via `SafeMarkdownView` (`MarkdownNoHTML`, no external
+  resources, no automatic link opening). Save/Revert go through
+  `setHighlightNote`; Qt owns only the unsaved draft. Canonical annotation
+  Markdown (quote + saved comment) is produced in Rust. Unsaved drafts are
+  prompted on selection change, document open, and application close. Both
+  Pending and Embedded rows appear in the list; Embedded ones stay absent from
+  the application overlay. No SQLite or raw FFI types reach the sidebar.
+- `MainWindow` composes the canvas, Highlights dock, and status line, owns
+  native dialogs (open file, quit confirmation), and accepts PDFs dropped onto
+  the window. It does not own or free `SyoApp*`. The canvas fills the window but
+  leaves `acceptDrops()` false, so Qt delivers drag events to the window; only
+  it needs the flag.
 - `diagnostics` detects the platform's graphics situation (WSL, software GL,
-  missing OpenGL) and produces the `--check`/`--version` reports.
-- `main.cpp` parses the CLI and implements `--smoke-test` for CI.
+  missing OpenGL) and produces the `--check`/`--version` reports. CLI-only
+  `syo_*` helpers (version, default paths, default config text) stay here and
+  in `main.cpp` rather than being forced through `CoreController`.
+- `main.cpp` parses the CLI and implements `--smoke-test` for CI (exercises
+  `CoreController` headlessly, then constructs `MainWindow` with the
+  annotation sidebar and checks empty-state transitions).
 
 ## Data flow example: pressing `5j`
 
 1. Qt delivers two key events; `key_encoder` produces `"5"`, `"j"`.
-2. Shell calls `syo_app_key_event` for each; core's `InputState` buffers
-   the count, then resolves `j` → `scroll_down` with count 5.
+2. `CanvasWidget` calls `CoreController::sendKey` for each; the controller
+   calls `syo_app_key_event`; core's `InputState` buffers the count, then
+   resolves `j` → `scroll_down` with count 5.
 3. `App::execute` scrolls the `View` by 5 × `scroll_step` pixels (converted
    to document space, clamped), saves the position to SQLite.
-4. The FFI returns `SYO_EFFECT_REDRAW`; the shell calls `update()` and
-   refreshes the status line from `syo_app_status_text`.
-5. `paintGL` asks for visible pages, fetches bitmaps (core render cache),
-   draws them.
+4. The FFI returns `SYO_EFFECT_REDRAW`; `CoreController::applyEffects` emits
+   `redrawRequested` and `statusChanged`; the canvas updates and the status
+   line refreshes.
+5. `paintGL` asks the controller for visible pages and bitmaps (core render
+   cache), draws them.
 
 ## Decisions log
 
@@ -463,7 +554,8 @@ Five small components; intentionally boring:
 | 12 | Visual-mode scope belongs to each *endpoint*, not to the start/end role | crossing the anchor and coming back is the identity, so the selection never silently changes shape on an overshoot | a use case needs "the first edge is always line-granular" |
 | 13 | Selection overlay is computed per visible page, not per selected page | cost is O(visible lines) however long the selection is, and page content is never force-extracted off-screen | ✅ done: storing a highlight needs the whole span, so `page_span_rects` is now the shared per-page geometry and `span_page_rects` walks every covered page |
 | 15 | A highlight is stored as page-space rectangles plus its text, not as a caret span | rectangles are what all three consumers need — the overlay, the PDF's `/QuadPoints`, and export — and they draw correctly on reload without re-extracting any page content | highlights need to be re-anchored to text that has moved (a re-flowed or replaced document) |
-| 16 | Saving re-keys the document row to the rewritten file's fingerprint, and drops the stored highlights | the fingerprint *is* the identity, so the position must follow the file; and once the highlights are annotations MuPDF renders, keeping rows too would paint them twice | notes/export need the rows after a save (then keep them with an `embedded_at` marker instead of deleting) |
+| 16 | Saving re-keys the document row to the rewritten file's fingerprint, and marks the exact saved highlight ids Embedded (rows kept) | the fingerprint *is* the identity, so the position must follow the file; keeping rows after embed preserves stable ids for the sidebar/export/comments while filtering overlays and later saves to Pending only, which prevents double-painting | a future import pass reconciles Pending rows that already exist in the PDF after a DB update failure (cross-resource integrity window) |
+| 18 | One optional Markdown comment per highlight in a separate `highlight_notes` table | keeps the immutable PDF source anchor distinct from user-authored notes; empty/whitespace clears the row; chat needs different concepts (roles, ordering, tools) so notes must not become message history | multiple human comments per highlight, or agent chat threads |
 | 17 | Highlight mode binds visual mode's commands rather than having its own | one implementation of reshaping a two-ended range, so a key provably cannot mean different things in the two modes; the feature cost three commands and no motion code | a highlight needs a motion a selection does not have |
 | 6 | Synchronous rendering + byte-bounded LRU cache | simplest correct thing for M1 | phase 3 (async tiles) |
 | 7 | Counts are runtime input, not part of binding syntax | matches Vim; keeps keymap finite | — |

@@ -7,6 +7,225 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-07-31 — Markdown comments on highlights
+
+Step 5 after the read-only sidebar. Each stable highlight may carry one
+optional Markdown comment.
+
+### Decision: one note per highlight, not a thread
+
+Academic annotation needs a durable note on a quote, not a chat transcript.
+`highlight_notes` is a separate table (migration v4) keyed by `highlight_id`
+with `ON DELETE CASCADE`. Chat will use different thread/message tables later
+— notes are not message history.
+
+Source quote (`DocumentAnchor::text`) stays immutable. The note is raw
+Markdown; whitespace-only saves (`trim().is_empty()`) delete the row.
+
+### Persistence and core
+
+* `Storage::load_highlight_notes` / `set_highlight_note_for_document` —
+  document-scoped ownership check, no-op equal body, clear on empty.
+* `App::set_highlight_note` persists first, then updates memory; failures leave
+  the previous comment and do not bump revision. Success emits
+  `annotations_changed` without `redraw`.
+* Markdown export appends the saved comment after the blockquote with one
+  blank line; Pending and Embedded serialize the same way.
+
+### Qt
+
+* Cards show a bounded plain-text comment preview (not full Markdown).
+* One `HighlightCommentEditor` under a vertical splitter: Edit (`QPlainTextEdit`)
+  + Preview (`SafeMarkdownView` with `MarkdownNoHTML`, blocked resources, no
+  auto-open links). No WebEngine; no per-row editors.
+* Dirty drafts prompted on selection change, document open, and close (before
+  Pending-highlight quit confirmation).
+* "Copy as Markdown" uses Rust (saved comment only). "Copy comment Markdown"
+  uses the editor draft when dirty.
+
+### Checks
+
+Storage/core/FFI note tests; offscreen smoke creates a highlight, saves a
+comment, refreshes, and checks export. Plus workspace tests, fmt, clippy,
+docs check, Qt build.
+
+---
+
+## 2026-07-31 — Read-only annotation sidebar
+
+Step 4 after `CoreController`. The Qt shell now shows a dockable Highlights
+panel beside the canvas.
+
+### Architecture
+
+```
+MainWindow
+├── CoreController
+├── CanvasWidget
+└── QDockWidget "Highlights"
+    └── AnnotationSidebar
+        ├── empty-state pages (no document / no highlights)
+        └── QListView
+            ├── HighlightListModel
+            └── HighlightDelegate
+```
+
+Sources live under `ui-qt/src/sidebar/`. The sidebar talks only to
+`CoreController` — no `SyoApp*`, no FFI structs, no SQLite.
+
+### Model / view / delegate
+
+`HighlightListModel` holds a disposable `HighlightSnapshot` and exposes roles
+for id, text, colour, zero-based pages, display page label, and state label.
+Full `beginResetModel` / `endResetModel` on snapshot replace — no row diffing.
+Order is whatever the core returns; Qt does not sort.
+
+`HighlightDelegate` paints a card (colour marker, page label, persistence
+label, wrapped source preview) with `QStyledItemDelegate`. No child widget
+per row — keeps thousands of annotations cheap and avoids focus/layout thrash
+inside the list. Height comes from `sizeHint` using the same margins and line
+limit as `paint` (~4 lines, elided).
+
+### Revision-aware refresh
+
+`AnnotationSidebar::refreshAnnotations(force)` compares
+`CoreController::annotationRevision()` to the model revision and skips when
+unchanged. `documentChanged` forces a refresh so a successful open cannot
+briefly show the previous document's rows; failed opens do not emit
+`documentChanged`, so a valid list is not cleared by a bad path. Selection is
+restored by stable highlight id across resets (Pending→Embedded keeps the
+same logical row selected).
+
+### Actions
+
+* Activate / Enter / "Go to highlight" → `revealHighlight(id)` (geometry in
+  Rust; sidebar keeps list focus afterward).
+* Ctrl+C → copy captured source text from the model item.
+* Ctrl+Shift+C / "Copy as Markdown" → `highlightMarkdown(id)` from Rust.
+* "Copy all highlights as Markdown" → `allHighlightsMarkdown()` from Rust.
+
+Qt never formats Markdown. Empty Markdown from an error does not overwrite
+the clipboard.
+
+### Why this shape
+
+* Disposable snapshots keep the sidebar out of the source-of-truth path.
+* Stable ids prepare later comment/chat actions without redesigning the list.
+* Dock is named "Highlights" under an `AnnotationSidebar` container so a
+  future chat tab can share the dock without claiming the whole sidebar is
+  only highlights forever.
+* Embedded rows appear in the list but stay off the Pending-only canvas
+  overlay (MuPDF draws them in the page bitmap).
+
+### Checks
+
+Offscreen smoke constructs `MainWindow`, asserts no-document sidebar state,
+opens a fixture PDF, asserts empty-highlights (or list) state, exits cleanly.
+Plus `cargo test --workspace`, fmt, clippy `-D warnings`,
+`./scripts/check-docs.sh`, Qt build.
+
+---
+
+## 2026-07-31 — Shared Qt `CoreController`
+
+Step 3 after persistent highlight records. The live window no longer talks to
+`SyoApp*` from multiple widgets.
+
+### Inventory (3.1)
+
+Live-window FFI (moved into `CoreController`):
+
+* lifecycle — `syo_app_new` / `syo_app_free`, default config/db paths
+* input — `syo_app_key_event`, `syo_app_key_timeout`, `syo_app_key_timeout_ms`,
+  `syo_app_scroll_by`, `syo_app_set_viewport`
+* view/render — `syo_app_has_document`, `syo_app_visible_pages`,
+  `syo_app_render_page`, `syo_bitmap_free`
+* overlays — `syo_app_focus` / `selection` / `highlights`, `syo_overlay_free`
+* colors/status — background/focus/visual/highlight colors, status text,
+  startup warnings, open dir
+* annotations — list/revision/reveal/Markdown (Step 2)
+* quit — unsaved query, quit save/discard, `SYO_EFFECT_*` decoding
+
+CLI/diagnostics (left on raw FFI):
+
+* `syo_core_version`, default config/db paths, default config TOML
+* `diagnostics.cpp` short-lived `SyoApp*` for `--check`
+
+### Previous structure
+
+`MainWindow` owned `SyoApp*`. `CanvasWidget` held a non-owning pointer, owned
+the pending-key `QTimer`, decoded `SYO_EFFECT_*`, and emitted application
+signals (`quitRequested`, `openFileRequested`, `confirmQuitRequested`,
+`coreStateChanged`). `MainWindow` also called FFI directly for open/status/
+quit/colors. That was fine with one interactive surface; a second (sidebar)
+would have duplicated ownership and effect handling.
+
+### New structure
+
+```
+MainWindow → CoreController (owns SyoApp*) ← CanvasWidget
+                              ↑
+                    (future AnnotationSidebar)
+```
+
+`CoreController` owns construction/destruction, converts every FFI allocation
+into owned Qt values (`takeSyoString`, deep-copied `QImage`, `CoreOverlay`,
+`HighlightSnapshot`), routes effect bits to signals, and owns the pending-key
+timer. `CanvasWidget` only paints and forwards input. `MainWindow` only
+composes the window and runs native dialogs. Quit confirmation uses
+`quitSaving`/`quitDiscarding` with `ReturnOnly` so `closeEvent` stays
+synchronous and non-reentrant. CLI/diagnostics keep their own short-lived
+`SyoApp*` where they never share the live window handle.
+
+No traversal or annotation behaviour changed in this step — only the Qt
+doorway.
+
+### Checks
+
+`cargo test --workspace`, fmt, clippy `-D warnings`, `./scripts/check-docs.sh`,
+Qt build, offscreen smoke test.
+
+---
+
+## 2026-07-31 — Persistent highlight records (sidebar-ready API)
+
+Step 2 after the traversal audit. Highlights no longer disappear from SQLite
+after a PDF save.
+
+### Previous lifecycle
+
+Commit → SQLite row → syodep overlay → save embeds into PDF → **delete the
+row** → MuPDF draws the annotation.
+
+### New lifecycle
+
+Commit → row as `Pending` → overlay draws Pending only → save embeds only
+Pending → mark those exact ids `Embedded` → keep id/text/color/geometry →
+overlay stops (MuPDF draws) → summaries/reveal/Markdown still work.
+
+Migration v3 adds `pdf_state` (`0` Pending / `1` Embedded / `2` External) and
+`updated_at`. Existing rows become Pending. SQLite is the annotation-metadata
+index; the PDF is the portable visual copy. Double-paint is prevented by
+filtering overlays and later saves to Pending. Cross-resource failure (PDF
+ok, DB mark fails) is an explicit integrity window: the session forces those
+ids Embedded in memory so the same session will not re-embed; next launch may
+still need reconciliation (not implemented).
+
+Core: `HighlightId`, `DocumentAnchor`, `HighlightPdfState`, summaries,
+`annotation_revision`, `Effects::annotations_changed`, `reveal_highlight`
+(stored geometry only — no traversal), deterministic Markdown. C ABI:
+`syo_app_highlight_list` / free, revision, reveal, Markdown (separate from
+the screen-space overlay API). No Qt sidebar. Traversal behaviour unchanged.
+
+### Tests
+
+Storage: Pending insert, mark-by-id, rollback, v2→v3 migration, reopen.
+Core: Pending→Embedded lifecycle, overlay filter, unsaved confirmation,
+revision, reveal, Markdown. FFI: list/revision/reveal/Markdown/null. Full
+suite including traversal metamorphic tests.
+
+---
+
 ## 2026-07-31 — Document-traversal architecture audit
 
 Step-1 audit before the annotation sidebar. Mapped the content pipeline,

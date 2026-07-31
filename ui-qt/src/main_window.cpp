@@ -1,10 +1,13 @@
 #include "main_window.h"
 
 #include <QCloseEvent>
+#include <QDockWidget>
 #include <QDragEnterEvent>
 #include <QDropEvent>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QMenu>
+#include <QMenuBar>
 #include <QMessageBox>
 #include <QMimeData>
 #include <QPushButton>
@@ -12,19 +15,12 @@
 #include <QUrl>
 
 #include "canvas_widget.h"
+#include "core_controller.h"
+#include "sidebar/annotation_sidebar.h"
 
 namespace syodep {
 
 namespace {
-
-QString takeSyoString(char *s)
-{
-    if (!s)
-        return {};
-    const QString out = QString::fromUtf8(s);
-    syo_string_free(s);
-    return out;
-}
 
 // Local .pdf paths carried by a drag, in the order they were dragged.
 //
@@ -53,19 +49,27 @@ MainWindow::MainWindow(QWidget *parent)
     setWindowTitle(QStringLiteral("syodep"));
     resize(960, 1000);
 
-    const QString configPath = takeSyoString(syo_default_config_path());
-    const QString dbPath = takeSyoString(syo_default_db_path());
-    m_app = syo_app_new(configPath.toUtf8().constData(), dbPath.toUtf8().constData());
-
-    m_canvas = new CanvasWidget(m_app, this);
+    // Controller first so its lifetime covers the canvas.
+    m_core = new CoreController(this);
+    m_canvas = new CanvasWidget(m_core, this);
     // Overlay colours come from [view] in the config, resolved by the core.
-    // Until now `background` was defined and documented but never read here.
-    const auto toQColor = [](SyoColor c) { return QColor(c.r, c.g, c.b, c.a); };
-    m_canvas->setBackgroundColor(toQColor(syo_app_background_color(m_app)));
-    m_canvas->setFocusColor(toQColor(syo_app_focus_color(m_app)));
-    m_canvas->setVisualColor(toQColor(syo_app_visual_color(m_app)));
-    m_canvas->setHighlightColor(toQColor(syo_app_highlight_color(m_app)));
+    m_canvas->setBackgroundColor(m_core->backgroundColor());
+    m_canvas->setFocusColor(m_core->focusColor());
+    m_canvas->setVisualColor(m_core->visualColor());
+    m_canvas->setHighlightColor(m_core->highlightColor());
     setCentralWidget(m_canvas);
+
+    m_annotationsDock = new QDockWidget(tr("Highlights"), this);
+    m_annotationsDock->setObjectName(QStringLiteral("highlightsDock"));
+    m_annotationsDock->setAllowedAreas(Qt::LeftDockWidgetArea | Qt::RightDockWidgetArea);
+    m_annotationSidebar = new AnnotationSidebar(m_core, m_annotationsDock);
+    m_annotationsDock->setWidget(m_annotationSidebar);
+    addDockWidget(Qt::RightDockWidgetArea, m_annotationsDock);
+    // Reasonable initial width; user can still resize freely.
+    resizeDocks({m_annotationsDock}, {340}, Qt::Horizontal);
+
+    QMenu *viewMenu = menuBar()->addMenu(tr("&View"));
+    viewMenu->addAction(m_annotationsDock->toggleViewAction());
 
     // The canvas covers the window but leaves acceptDrops() false, so Qt walks
     // up to the window for drag events. Only the window needs the flag.
@@ -75,33 +79,27 @@ MainWindow::MainWindow(QWidget *parent)
     m_status->setTextFormat(Qt::PlainText);
     statusBar()->addWidget(m_status, 1);
 
-    connect(m_canvas, &CanvasWidget::coreStateChanged, this, &MainWindow::refreshStatus);
-    connect(m_canvas, &CanvasWidget::quitRequested, this, &MainWindow::close);
-    connect(m_canvas, &CanvasWidget::openFileRequested, this, &MainWindow::showOpenDialog);
-    connect(m_canvas, &CanvasWidget::confirmQuitRequested, this, &MainWindow::onConfirmQuitRequested);
+    connect(m_core, &CoreController::statusChanged, this, &MainWindow::refreshStatus);
+    connect(m_core, &CoreController::quitRequested, this, &MainWindow::close);
+    connect(m_core, &CoreController::openFileRequested, this, &MainWindow::showOpenDialog);
+    connect(m_core, &CoreController::confirmQuitRequested,
+            this, &MainWindow::onConfirmQuitRequested);
 
-    const QString warnings = takeSyoString(syo_app_startup_warnings(m_app));
+    const QString warnings = m_core->startupWarnings();
     if (!warnings.isEmpty())
         statusBar()->showMessage(warnings.section(QLatin1Char('\n'), 0, 0), 10000);
 
     refreshStatus();
 }
 
-MainWindow::~MainWindow()
-{
-    syo_app_free(m_app);
-}
-
 bool MainWindow::openDocument(const QString &path)
 {
-    const bool ok = syo_app_open_document(m_app, path.toUtf8().constData());
-    // The cached images belong to the document we just replaced. The canvas only
-    // invalidates them on a width change, so two documents with the same page
-    // width would otherwise show the wrong pages.
-    m_canvas->clearPageCache();
-    m_canvas->update();
-    refreshStatus();
-    return ok;
+    // Resolve unsaved comment drafts before the core replaces the document.
+    if (m_annotationSidebar && !m_annotationSidebar->prepareForDocumentChange())
+        return false;
+    // Cache invalidation, redraw, and status refresh are emitted by the
+    // controller — do not duplicate them here.
+    return m_core->openDocument(path);
 }
 
 void MainWindow::dragEnterEvent(QDragEnterEvent *event)
@@ -137,7 +135,7 @@ void MainWindow::dropEvent(QDropEvent *event)
 
 void MainWindow::refreshStatus()
 {
-    m_status->setText(takeSyoString(syo_app_status_text(m_app)));
+    m_status->setText(m_core->statusText());
 }
 
 bool MainWindow::confirmQuit()
@@ -145,10 +143,14 @@ bool MainWindow::confirmQuit()
     if (m_closeConfirmed)
         return true;
 
-    if (!syo_app_has_unsaved_highlights(m_app)) {
+    // 1. Resolve unsaved comment drafts before Pending-highlight confirmation.
+    if (m_annotationSidebar && !m_annotationSidebar->prepareForClose())
+        return false;
+
+    if (!m_core->hasUnsavedHighlights()) {
         // Nothing to discard, but this still saves the reading position
         // eagerly rather than relying on an implicit save elsewhere.
-        syo_app_quit_discard(m_app);
+        m_core->quitDiscarding();
         m_closeConfirmed = true;
         return true;
     }
@@ -164,18 +166,17 @@ bool MainWindow::confirmQuit()
     box.setDefaultButton(saveBtn);
     box.exec();
 
-    uint32_t bits = 0;
+    bool quit = false;
     if (box.clickedButton() == saveBtn)
-        bits = syo_app_quit_save(m_app);
+        quit = m_core->quitSaving();
     else if (box.clickedButton() == discardBtn)
-        bits = syo_app_quit_discard(m_app);
+        quit = m_core->quitDiscarding();
     else
         return false; // Cancel
 
-    if (!(bits & SYO_EFFECT_QUIT)) {
-        // Save failed: surface it like openDocument() does. Not via
-        // CanvasWidget::applyEffects (private, and its QUIT branch would be
-        // wrong here since bits never has it set on this path).
+    if (!quit) {
+        // Save failed: surface it. ReturnOnly avoided a re-entrant
+        // quitRequested while closeEvent is deciding.
         m_canvas->update();
         refreshStatus();
         return false;
@@ -200,7 +201,7 @@ void MainWindow::onConfirmQuitRequested()
 
 void MainWindow::showOpenDialog()
 {
-    const QString start = takeSyoString(syo_app_open_dir(m_app));
+    const QString start = m_core->openDirectory();
     const QString path = QFileDialog::getOpenFileName(
         this, tr("Open PDF"), start, tr("PDF documents (*.pdf);;All files (*)"));
     if (!path.isEmpty())

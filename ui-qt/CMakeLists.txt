@@ -12,10 +12,25 @@ qt_add_executable(syodep
     src/main_window.h
     src/canvas_widget.cpp
     src/canvas_widget.h
+    src/core_controller.cpp
+    src/core_controller.h
     src/diagnostics.cpp
     src/diagnostics.h
     src/key_encoder.cpp
-    src/key_encoder.h)
+    src/key_encoder.h
+    src/sidebar/annotation_sidebar.cpp
+    src/sidebar/annotation_sidebar.h
+    src/sidebar/highlight_list_model.cpp
+    src/sidebar/highlight_list_model.h
+    src/sidebar/highlight_delegate.cpp
+    src/sidebar/highlight_delegate.h
+    src/sidebar/highlight_comment_editor.cpp
+    src/sidebar/highlight_comment_editor.h
+    src/sidebar/safe_markdown_view.cpp
+    src/sidebar/safe_markdown_view.h)
+
+# Sidebar sources live under src/sidebar/; keep #include "…" resolving from src/.
+target_include_directories(syodep PRIVATE src)
 
 target_link_libraries(syodep PRIVATE
     Qt6::Widgets

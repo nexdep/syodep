@@ -19,7 +19,7 @@ use syodep_pdf::{
     Bitmap, CellKind, ContentLine, ContentObject, ContentOptions, FurnitureProfile,
     HighlightAnnotation, ObjectKind, PageContent, Rect,
 };
-use syodep_storage::{HighlightRect, Position, Storage};
+use syodep_storage::{HighlightId, HighlightPdfState, HighlightRect, Position, Storage};
 
 use crate::caret::{
     column_index_of, column_ranges, continues_word_run, is_abbreviation, is_attached_number_suffix,
@@ -69,6 +69,10 @@ pub struct Effects {
     /// [`App::save_and_quit`] or [`App::quit_discarding_highlights`] with the
     /// answer, rather than quitting outright.
     pub confirm_quit: bool,
+    /// The annotation collection changed (commit, save, open/reload, or a
+    /// persistence degradation). Distinct from [`Self::redraw`]: a canvas
+    /// refresh and a sidebar list refresh are different requests.
+    pub annotations_changed: bool,
 }
 
 impl Effects {
@@ -88,6 +92,7 @@ impl Effects {
             open_file_dialog: self.open_file_dialog || other.open_file_dialog,
             reload: self.reload || other.reload,
             confirm_quit: self.confirm_quit || other.confirm_quit,
+            annotations_changed: self.annotations_changed || other.annotations_changed,
             // Not a request like the others: it describes the state left
             // behind, so the later value wins rather than OR-ing.
             pending_input: other.pending_input,
@@ -129,12 +134,36 @@ pub enum AppError {
     Storage(#[from] syodep_storage::StorageError),
     #[error("no document is open")]
     NoDocument,
+    #[error("unknown highlight {0}")]
+    UnknownHighlight(i64),
+    #[error("annotation storage is not available")]
+    PersistenceUnavailable,
     #[error("cannot write {path}: {source}")]
     Write {
         path: String,
         #[source]
         source: std::io::Error,
     },
+}
+
+/// Captured source text and page-space geometry for a highlight.
+///
+/// Immutable once committed: listing, export, and reveal use this rather than
+/// re-extracting page content (extraction is fallible and distinct from blank
+/// pages — see the traversal audit).
+#[derive(Debug, Clone, PartialEq)]
+pub struct DocumentAnchor {
+    pub text: String,
+    pub rects: Vec<HighlightRect>,
+}
+
+/// User-authored Markdown comment attached to a highlight.
+///
+/// Distinct from [`DocumentAnchor::text`]: the source quote is immutable PDF
+/// capture; this body is editable and optional.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HighlightNote {
+    pub body_markdown: String,
 }
 
 /// A stored highlight, held for the open document.
@@ -146,13 +175,84 @@ pub enum AppError {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Highlight {
     /// Row id in the database; `None` when persistence is disabled.
-    pub id: Option<i64>,
+    pub id: Option<HighlightId>,
     /// `#rrggbb`.
     pub color: String,
-    /// The characters the highlight covers, for notes and export.
+    pub anchor: DocumentAnchor,
+    pub pdf_state: HighlightPdfState,
+    /// Optional Markdown comment. `None` means no comment row.
+    pub note: Option<HighlightNote>,
+}
+
+/// UI-neutral summary of one highlight for the annotations sidebar.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HighlightSummary {
+    pub id: HighlightId,
     pub text: String,
-    /// One rectangle per covered line, in page points with the origin top left.
-    pub rects: Vec<HighlightRect>,
+    pub color: String,
+    /// Zero-based; derived from stored rectangles.
+    pub first_page: usize,
+    /// Zero-based; derived from stored rectangles.
+    pub last_page: usize,
+    pub pdf_state: HighlightPdfState,
+    /// Raw saved Markdown, when a comment exists.
+    pub note_markdown: Option<String>,
+}
+
+impl Highlight {
+    fn is_pending(&self) -> bool {
+        self.pdf_state == HighlightPdfState::Pending
+    }
+}
+
+/// First and last page of an ordered rect list. `None` when empty.
+fn page_range(rects: &[HighlightRect]) -> Option<(usize, usize)> {
+    let first = rects.first()?;
+    let last = rects.last()?;
+    let first_page = rects.iter().map(|r| r.page).min().unwrap_or(first.page);
+    let last_page = rects.iter().map(|r| r.page).max().unwrap_or(last.page);
+    Some((first_page, last_page))
+}
+
+/// One highlight as Markdown. Pages are one-based for the user.
+///
+/// The source quote is a blockquote. When a saved comment exists, it follows
+/// after one blank line as raw Markdown (not escaped, not re-quoted).
+fn format_highlight_markdown(highlight: &Highlight) -> String {
+    let (first, last) = page_range(&highlight.anchor.rects).unwrap_or((0, 0));
+    let heading = if first == last {
+        format!("### Page {}", first + 1)
+    } else {
+        format!("### Pages {}–{}", first + 1, last + 1)
+    };
+    let body = if highlight.anchor.text.is_empty() {
+        "> ".to_owned()
+    } else {
+        highlight
+            .anchor
+            .text
+            .split('\n')
+            .map(|line| format!("> {line}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    match highlight.note.as_ref() {
+        Some(note) if !note.body_markdown.trim().is_empty() => {
+            format!("{heading}\n\n{body}\n\n{}", note.body_markdown)
+        }
+        _ => format!("{heading}\n\n{body}"),
+    }
+}
+
+/// Canonicalise editor input: whitespace-only bodies clear the comment.
+fn canonicalize_note_markdown(body: String) -> Option<HighlightNote> {
+    if body.trim().is_empty() {
+        None
+    } else {
+        Some(HighlightNote {
+            body_markdown: body,
+        })
+    }
 }
 
 struct Session {
@@ -229,9 +329,13 @@ pub struct App {
     /// *extent* is not stored here — that is `visual_span`, because a pending
     /// highlight is a selection; this holds only what discarding must restore.
     pending: Option<PendingHighlight>,
-    /// Highlights stored for the open document but not yet written into the PDF.
-    /// Emptied by a successful save, after which the PDF renders them itself.
+    /// Highlights stored for the open document (Pending and Embedded). The
+    /// overlay and PDF save filter to Pending; the sidebar lists all of them.
     highlights: Vec<Highlight>,
+    /// Bumped whenever the annotation snapshot changes so a future Qt model
+    /// can cheaply decide whether it needs a fresh list. Not bumped by caret
+    /// motion or scrolling.
+    annotation_revision: u64,
     /// Config/keymap problems collected at startup, for the UI to surface.
     startup_warnings: Vec<String>,
     last_error: Option<String>,
@@ -311,6 +415,7 @@ impl App {
             visual_span: None,
             pending: None,
             highlights: Vec::new(),
+            annotation_revision: 0,
             startup_warnings,
             last_error: None,
             status_message: None,
@@ -430,12 +535,12 @@ impl App {
     }
 
     /// Whether quitting now would leave highlights not yet embedded in the
-    /// PDF — either already committed (`self.highlights`) or still being
-    /// placed. Read-only, unlike [`Command::Quit`]: never commits an
-    /// in-progress highlight, so a caller (the window-close path) can ask
-    /// "should I warn?" with no side effects.
+    /// PDF — either already committed as [`HighlightPdfState::Pending`] or
+    /// still being placed. Embedded records do not count. Read-only, unlike
+    /// [`Command::Quit`]: never commits an in-progress highlight, so a caller
+    /// (the window-close path) can ask "should I warn?" with no side effects.
     pub fn has_unsaved_highlights(&self) -> bool {
-        !self.highlights.is_empty() || self.has_pending_highlight()
+        self.has_pending_highlight() || self.highlights.iter().any(Highlight::is_pending)
     }
 
     /// Quit without embedding unsaved highlights into the PDF. Nothing is
@@ -468,13 +573,15 @@ impl App {
         effects
     }
 
-    /// Overwrite the open PDF with its highlights embedded as PDF annotations.
+    /// Overwrite the open PDF with its pending highlights embedded as PDF
+    /// annotations.
     ///
     /// The file is rewritten beside itself and renamed over the original, so an
     /// interrupted write can never leave a half-written PDF where the document
     /// was. Afterwards the document is reopened: its content hash has changed, so
     /// the annotations MuPDF now renders into the page bitmaps are the highlights
-    /// and the overlay must stop drawing them.
+    /// and the overlay must stop drawing them. The SQLite rows stay, marked
+    /// [`HighlightPdfState::Embedded`].
     fn save_document(&mut self) -> Effects {
         // Saving keeps a highlight in progress rather than losing it, the same
         // way `a`, `v` and `c` do — and lands in focus, like `a` and `c`.
@@ -489,6 +596,7 @@ impl App {
                 });
                 Effects {
                     reload: true,
+                    annotations_changed: true,
                     ..Effects::redraw()
                 }
             }
@@ -500,18 +608,22 @@ impl App {
     }
 
     /// The save itself, split out so every failure path is one `?` away from
-    /// leaving the document exactly as it was.
+    /// leaving the document exactly as it was — except the cross-resource case
+    /// where the PDF rewrite succeeds and the database state update fails; that
+    /// is handled explicitly below.
     fn write_document(&mut self) -> Result<usize, AppError> {
         let Some(session) = &self.session else {
             return Err(AppError::NoDocument);
         };
         let path = session.path.clone();
         let document_id = session.document_id;
-        if self.highlights.is_empty() {
+        let pending: Vec<&Highlight> = self.highlights.iter().filter(|h| h.is_pending()).collect();
+        if pending.is_empty() {
             return Ok(0);
         }
-        let annotations = self.highlight_annotations();
-        let count = self.highlights.len();
+        let pending_ids: Vec<HighlightId> = pending.iter().filter_map(|h| h.id).collect();
+        let annotations = self.pending_highlight_annotations();
+        let count = pending.len();
 
         // Beside the original, so the rename below stays within one filesystem
         // and is therefore atomic. A fixed name rather than a random one: a
@@ -539,23 +651,41 @@ impl App {
 
         // The rewritten file hashes differently, so move the document row to the
         // new fingerprint before reopening — otherwise every save orphans the
-        // reading position. Then forget the highlight rows: they live in the PDF
-        // now, and drawing them as well would paint them twice.
+        // reading position. Then mark the exact saved ids Embedded: they live in
+        // the PDF now, and drawing them as overlays as well would paint twice.
+        //
+        // Integrity window: the PDF and SQLite cannot commit atomically. If the
+        // database update fails after the rename, the session still treats the
+        // saved ids as Embedded (so a later save in this session will not
+        // double-write them), but the next launch may still see Pending rows
+        // that already exist in the PDF. A future annotation-import pass can
+        // reconcile that; guessing from geometry here would be worse.
+        let mut db_mark_error = None;
         if let (Some(storage), Some(id)) = (&self.storage, document_id) {
             let outcome = Storage::fingerprint_file(&path).and_then(|fingerprint| {
                 storage.rekey_document(id, &fingerprint, &path.display().to_string())?;
-                storage.delete_highlights(id)
+                storage.mark_highlights_embedded(id, &pending_ids)
             });
             if let Err(e) = outcome {
-                self.last_error = Some(format!("saved, but could not update the database: {e}"));
+                db_mark_error = Some(format!(
+                    "saved the PDF, but could not mark highlights embedded in the database: {e}"
+                ));
             }
         }
         self.open_document(&path)?;
         self.restore_selection_state(restore);
+        if let Some(message) = db_mark_error {
+            for highlight in &mut self.highlights {
+                if highlight.id.is_some_and(|id| pending_ids.contains(&id)) {
+                    highlight.pdf_state = HighlightPdfState::Embedded;
+                }
+            }
+            self.last_error = Some(message);
+        }
         Ok(count)
     }
 
-    /// The stored highlights as one annotation per (highlight, page).
+    /// The pending highlights as one annotation per (highlight, page).
     ///
     /// Opacity comes from the *current* `[view] highlight_opacity`, the same
     /// place the live overlay reads it from, rather than being captured per
@@ -565,16 +695,16 @@ impl App {
     /// looking the same before and after saving. Config has no hot-reload
     /// yet, so within one session this is indistinguishable from capturing
     /// it at creation time.
-    fn highlight_annotations(&self) -> Vec<HighlightAnnotation> {
+    fn pending_highlight_annotations(&self) -> Vec<HighlightAnnotation> {
         let opacity = self.config.view.highlight_opacity.clamp(0.0, 1.0);
         let mut out = Vec::new();
-        for highlight in &self.highlights {
+        for highlight in self.highlights.iter().filter(|h| h.is_pending()) {
             let color = syodep_config::parse_hex_color(&highlight.color)
                 .unwrap_or_else(default_highlight_rgb);
             // Grouped by page in one pass over rectangles that are already in
             // document order, so no sorting is needed.
             let mut current: Option<HighlightAnnotation> = None;
-            for rect in &highlight.rects {
+            for rect in &highlight.anchor.rects {
                 let rect_out = Rect {
                     x0: rect.x0,
                     y0: rect.y0,
@@ -743,7 +873,7 @@ impl App {
                 if self.mode == Mode::Highlight {
                     let _ = self.enter_focus(self.focus_scope);
                 }
-                if self.highlights.is_empty() {
+                if !self.has_unsaved_highlights() {
                     return self.quit_discarding_highlights();
                 }
                 return Effects {
@@ -3026,7 +3156,7 @@ impl App {
         }
         // A `c` chord out of highlight mode keeps the highlight, the same way `a`
         // and `v` do: the only way to throw one away is to ask for that.
-        self.store_pending_highlight();
+        let stored = self.store_pending_highlight();
         self.mode = Mode::Focus;
         self.focus_scope = scope;
         // A focus highlight and a selection are mutually exclusive.
@@ -3045,7 +3175,10 @@ impl App {
         self.refresh_focus_span();
         self.ensure_focus_visible();
         self.save_position();
-        Effects::redraw()
+        Effects {
+            annotations_changed: stored,
+            ..Effects::redraw()
+        }
     }
 
     /// Move the focus by `count` units of the active scope.
@@ -3253,15 +3386,17 @@ impl App {
         // would throw the selection away. A scope specifier still applies, which
         // is what makes `vw` "keep it, carry on selecting by word".
         if self.mode == Mode::Highlight {
-            self.store_pending_highlight();
+            let stored = self.store_pending_highlight();
             self.mode = Mode::Visual;
-            return match scope {
+            let mut effects = match scope {
                 Some(scope) => self.set_head_scope(scope, false),
                 None => {
                     self.refresh_visual_span();
                     Effects::redraw()
                 }
             };
+            effects.annotations_changed = effects.annotations_changed || stored;
+            return effects;
         }
         // Re-entering visual mode collapses the selection onto the head.
         let live = self.visual.filter(|_| self.mode == Mode::Visual);
@@ -3525,17 +3660,17 @@ impl App {
     }
 
     /// Store the pending highlight, if there is one, leaving the mode and the
-    /// selection alone.
+    /// selection alone. Returns true when a highlight was actually committed.
     ///
     /// Shared by every way out of highlight mode that keeps the highlight — `a`,
     /// `v`, `c`, and saving — so "which exits keep it" is one list in the
     /// bindings rather than a condition repeated in four places.
-    fn store_pending_highlight(&mut self) {
+    fn store_pending_highlight(&mut self) -> bool {
         let Some(pending) = self.pending.take() else {
-            return;
+            return false;
         };
         let Some((start, end)) = self.visual_span else {
-            return;
+            return false;
         };
         let rects: Vec<HighlightRect> = self
             .span_page_rects(start, end)
@@ -3551,16 +3686,19 @@ impl App {
             })
             .collect();
         if rects.is_empty() {
-            return;
+            return false;
         }
         let text = self.span_text(start, end);
         let id = self.persist_highlight(&pending.color, &text, &rects);
         self.highlights.push(Highlight {
             id,
             color: pending.color,
-            text,
-            rects,
+            anchor: DocumentAnchor { text, rects },
+            pdf_state: HighlightPdfState::Pending,
+            note: None,
         });
+        self.bump_annotation_revision();
+        true
     }
 
     /// Write a highlight to the database, returning its row id.
@@ -3573,7 +3711,7 @@ impl App {
         color: &str,
         text: &str,
         rects: &[HighlightRect],
-    ) -> Option<i64> {
+    ) -> Option<HighlightId> {
         let document_id = self.session.as_ref()?.document_id?;
         let storage = self.storage.as_ref()?;
         match storage.insert_highlight(document_id, color, text, rects) {
@@ -3585,34 +3723,198 @@ impl App {
         }
     }
 
-    /// Load the document's stored highlights. Called on open, so highlights made
-    /// in an earlier session are on screen before any page content is extracted.
+    /// Load the document's stored highlights and their optional notes. Called
+    /// on open, so annotations from an earlier session are available before any
+    /// page content is extracted.
     fn load_highlights(&mut self) {
         self.highlights.clear();
         let Some(document_id) = self.session.as_ref().and_then(|s| s.document_id) else {
+            self.bump_annotation_revision();
             return;
         };
         let Some(storage) = self.storage.as_ref() else {
+            self.bump_annotation_revision();
             return;
         };
         match storage.load_highlights(document_id) {
             Ok(stored) => {
+                let notes = match storage.load_highlight_notes(document_id) {
+                    Ok(notes) => notes,
+                    Err(e) => {
+                        self.last_error = Some(format!("could not load highlight notes: {e}"));
+                        Default::default()
+                    }
+                };
                 self.highlights = stored
                     .into_iter()
-                    .map(|h| Highlight {
-                        id: Some(h.id),
-                        color: h.color,
-                        text: h.text,
-                        rects: h.rects,
+                    .map(|h| {
+                        let note = notes.get(&h.id).map(|n| HighlightNote {
+                            body_markdown: n.body_markdown.clone(),
+                        });
+                        Highlight {
+                            id: Some(h.id),
+                            color: h.color,
+                            anchor: DocumentAnchor {
+                                text: h.text,
+                                rects: h.rects,
+                            },
+                            pdf_state: h.pdf_state,
+                            note,
+                        }
                     })
-                    .collect()
+                    .collect();
             }
             Err(e) => self.last_error = Some(format!("could not load highlights: {e}")),
         }
+        self.bump_annotation_revision();
     }
 
-    /// Every highlight to paint: the stored ones, plus the pending one while it
-    /// is being placed.
+    fn bump_annotation_revision(&mut self) {
+        self.annotation_revision = self.annotation_revision.wrapping_add(1);
+    }
+
+    /// Monotonic counter for the annotation snapshot. The sidebar compares
+    /// this against its last-seen value to decide whether to refresh.
+    pub fn annotation_revision(&self) -> u64 {
+        self.annotation_revision
+    }
+
+    /// Every highlight of the open document, in stable database-id order.
+    /// Includes Pending and Embedded records; does not require content extraction.
+    pub fn highlight_summaries(&self) -> Vec<HighlightSummary> {
+        self.highlights
+            .iter()
+            .filter_map(|h| {
+                let id = h.id?;
+                let (first_page, last_page) = page_range(&h.anchor.rects)?;
+                Some(HighlightSummary {
+                    id,
+                    text: h.anchor.text.clone(),
+                    color: h.color.clone(),
+                    first_page,
+                    last_page,
+                    pdf_state: h.pdf_state,
+                    note_markdown: h.note.as_ref().map(|n| n.body_markdown.clone()),
+                })
+            })
+            .collect()
+    }
+
+    /// Set or clear the Markdown comment for a highlight of the open document.
+    ///
+    /// Whitespace-only bodies clear the comment. Persistence must succeed before
+    /// the in-memory value changes; failures leave the previous comment and do
+    /// not bump the annotation revision. A no-op equal body returns empty
+    /// effects without rewriting storage.
+    pub fn set_highlight_note(
+        &mut self,
+        id: HighlightId,
+        body_markdown: String,
+    ) -> Result<Effects, AppError> {
+        let document_id = self
+            .session
+            .as_ref()
+            .and_then(|s| s.document_id)
+            .ok_or(AppError::NoDocument)?;
+        let Some(index) = self.highlights.iter().position(|h| h.id == Some(id)) else {
+            self.last_error = Some(format!("unknown highlight {}", id.0));
+            return Err(AppError::UnknownHighlight(id.0));
+        };
+        let new_note = canonicalize_note_markdown(body_markdown);
+        let previous = self.highlights[index].note.clone();
+        if previous == new_note {
+            return Ok(Effects::default());
+        }
+
+        let Some(storage) = self.storage.as_ref() else {
+            self.last_error = Some(
+                "Comments are unavailable because annotation storage is not available.".to_owned(),
+            );
+            return Err(AppError::PersistenceUnavailable);
+        };
+
+        let body_for_storage = new_note
+            .as_ref()
+            .map(|n| n.body_markdown.as_str())
+            .unwrap_or("");
+        match storage.set_highlight_note_for_document(document_id, id, body_for_storage) {
+            Ok(true) => {}
+            Ok(false) => {
+                self.last_error = Some(format!("unknown highlight {}", id.0));
+                return Err(AppError::UnknownHighlight(id.0));
+            }
+            Err(e) => {
+                self.last_error = Some(format!("could not save comment: {e}"));
+                return Err(AppError::Storage(e));
+            }
+        }
+
+        self.highlights[index].note = new_note;
+        self.bump_annotation_revision();
+        Ok(Effects {
+            annotations_changed: true,
+            ..Effects::default()
+        })
+    }
+
+    /// Scroll so the highlight's first stored rectangle is centered in the
+    /// viewport. Uses only stored geometry — no content extraction, caret
+    /// reconstruction, or traversal.
+    pub fn reveal_highlight(&mut self, id: HighlightId) -> Effects {
+        let Some(highlight) = self.highlights.iter().find(|h| h.id == Some(id)) else {
+            self.last_error = Some(format!("unknown highlight {}", id.0));
+            return Effects {
+                redraw: true,
+                ..Effects::default()
+            };
+        };
+        let Some(rect) = highlight.anchor.rects.first().copied() else {
+            self.last_error = Some(format!("highlight {} has no geometry", id.0));
+            return Effects {
+                redraw: true,
+                ..Effects::default()
+            };
+        };
+        if self.session.is_none() {
+            self.last_error = Some("no document is open".to_owned());
+            return Effects::default();
+        }
+        self.center_page_rect(
+            rect.page,
+            Rect {
+                x0: rect.x0,
+                y0: rect.y0,
+                x1: rect.x1,
+                y1: rect.y1,
+            },
+        );
+        self.save_position();
+        Effects::redraw()
+    }
+
+    /// Deterministic Markdown for one highlight. Uses the captured source text.
+    pub fn highlight_markdown(&self, id: HighlightId) -> Result<String, AppError> {
+        let highlight = self
+            .highlights
+            .iter()
+            .find(|h| h.id == Some(id))
+            .ok_or(AppError::UnknownHighlight(id.0))?;
+        Ok(format_highlight_markdown(highlight))
+    }
+
+    /// Deterministic Markdown for every highlight, in canonical id order.
+    pub fn all_highlights_markdown(&self) -> String {
+        self.highlights
+            .iter()
+            .filter(|h| h.id.is_some())
+            .map(format_highlight_markdown)
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+
+    /// Pending highlights to paint, plus the one being placed while highlight
+    /// mode is active. Embedded records are omitted: MuPDF already renders them
+    /// from the PDF, and painting both would double-blend.
     ///
     /// One overlay and one colour for both, so the shell's single merged fill
     /// cannot double-blend a pending highlight over the stored one it overlaps.
@@ -3620,8 +3922,8 @@ impl App {
         let session = self.session.as_ref()?;
         let mut rects = Vec::new();
         for (page, _) in session.view.visible_pages() {
-            for highlight in &self.highlights {
-                for rect in highlight.rects.iter().filter(|r| r.page == page) {
+            for highlight in self.highlights.iter().filter(|h| h.is_pending()) {
+                for rect in highlight.anchor.rects.iter().filter(|r| r.page == page) {
                     if let Some(rect) = session
                         .view
                         .page_rect_to_screen(page, rect.x0, rect.y0, rect.x1, rect.y1)
@@ -7775,10 +8077,11 @@ mod tests {
         assert_eq!(app.highlights().len(), 1);
         let stored = &app.highlights()[0];
         assert_eq!(stored.color, highlight_color());
-        assert_eq!(stored.text, "alpha beta");
-        assert!(!stored.rects.is_empty());
-        assert!(stored.rects.iter().all(|r| r.page == 0));
+        assert_eq!(stored.anchor.text, "alpha beta");
+        assert!(!stored.anchor.rects.is_empty());
+        assert!(stored.anchor.rects.iter().all(|r| r.page == 0));
         assert!(stored.id.is_some(), "persisted to the database");
+        assert_eq!(stored.pdf_state, HighlightPdfState::Pending);
         // The stored highlight keeps being drawn now that the pending one is gone.
         assert!(app.highlight_screen_rects().is_some());
     }
@@ -7928,10 +8231,10 @@ mod tests {
         press(&mut app, "a");
 
         let stored = &app.highlights()[0];
-        let pages: Vec<usize> = stored.rects.iter().map(|r| r.page).collect();
+        let pages: Vec<usize> = stored.anchor.rects.iter().map(|r| r.page).collect();
         assert!(pages.contains(&0) && pages.contains(&1), "{pages:?}");
-        assert!(stored.text.contains("alpha"));
-        assert!(stored.text.contains("gamma"));
+        assert!(stored.anchor.text.contains("alpha"));
+        assert!(stored.anchor.text.contains("gamma"));
     }
 
     #[test]
@@ -8002,10 +8305,13 @@ mod tests {
         assert_eq!(app.mode(), Mode::Focus);
         assert_eq!(app.focus_caret(), Some(caret));
         assert_eq!(app.zoom(), zoom);
-        // The highlight lives in the PDF now, so the overlay stops drawing it —
-        // otherwise it would be painted twice.
-        assert!(app.highlights().is_empty());
+        // The highlight lives in the PDF now and remains as an Embedded record.
+        // The overlay stops drawing it — otherwise it would be painted twice.
+        assert_eq!(app.highlights().len(), 1);
+        assert_eq!(app.highlights()[0].pdf_state, HighlightPdfState::Embedded);
         assert!(app.highlight_screen_rects().is_none());
+        assert!(!app.has_unsaved_highlights());
+        assert_eq!(app.highlight_summaries().len(), 1);
     }
 
     #[test]
@@ -8201,7 +8507,8 @@ mod tests {
         let effects = app.save_and_quit();
         assert!(effects.quit);
         assert!(effects.reload);
-        assert!(app.highlights().is_empty());
+        assert_eq!(app.highlights().len(), 1);
+        assert_eq!(app.highlights()[0].pdf_state, HighlightPdfState::Embedded);
         assert_eq!(syodep_pdf::page_highlights(&path, 0).unwrap().len(), 1);
     }
 
@@ -8224,5 +8531,430 @@ mod tests {
         assert!(app.last_error().is_some());
         assert_eq!(app.highlights().len(), 1, "the highlight is still there");
         assert!(app.has_document(), "still open");
+    }
+
+    // ---- Persistent annotation records ------------------------------------
+
+    #[test]
+    fn save_marks_highlights_embedded_and_keeps_them_after_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_pdf_bytes(
+            dir.path(),
+            "text.pdf",
+            pdf_with_pages(&["alpha beta gamma"]),
+        );
+        let db = dir.path().join("syodep.sqlite3");
+        let id = {
+            let mut app = App::new(Config::default(), Some(Storage::open(&db).unwrap()));
+            app.set_viewport_size(595.0, 600.0);
+            app.open_document(&path).unwrap();
+            press(&mut app, "fw");
+            press(&mut app, "aa");
+            let id = app.highlights()[0].id.unwrap();
+            assert_eq!(app.highlights()[0].pdf_state, HighlightPdfState::Pending);
+            assert!(app.highlight_screen_rects().is_some());
+            assert_eq!(app.highlight_summaries().len(), 1);
+
+            let effects = press(&mut app, "<Space>w");
+            assert!(effects.reload);
+            assert!(effects.annotations_changed);
+            assert_eq!(app.highlights()[0].pdf_state, HighlightPdfState::Embedded);
+            assert!(app.highlight_screen_rects().is_none());
+            assert_eq!(app.highlight_summaries().len(), 1);
+            assert!(!app.has_unsaved_highlights());
+            id
+        };
+
+        let mut app = App::new(Config::default(), Some(Storage::open(&db).unwrap()));
+        app.set_viewport_size(595.0, 600.0);
+        app.open_document(&path).unwrap();
+        assert_eq!(app.highlights().len(), 1);
+        assert_eq!(app.highlights()[0].id, Some(id));
+        assert_eq!(app.highlights()[0].pdf_state, HighlightPdfState::Embedded);
+        assert!(app.highlight_screen_rects().is_none());
+        assert!(!app.has_unsaved_highlights());
+    }
+
+    #[test]
+    fn repeated_save_does_not_duplicate_pdf_annotations() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma"]);
+        let path = app.document_path().unwrap().to_owned();
+        press(&mut app, "fw");
+        press(&mut app, "aa");
+        press(&mut app, "<Space>w");
+        assert_eq!(syodep_pdf::page_highlights(&path, 0).unwrap().len(), 1);
+        press(&mut app, "<Space>w");
+        assert_eq!(syodep_pdf::page_highlights(&path, 0).unwrap().len(), 1);
+        assert!(!app.has_unsaved_highlights());
+    }
+
+    #[test]
+    fn embedded_only_document_does_not_confirm_quit() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma"]);
+        press(&mut app, "fw");
+        press(&mut app, "aa");
+        press(&mut app, "<Space>w");
+        assert!(!app.has_unsaved_highlights());
+        let effects = press(&mut app, "<Space>q");
+        assert!(effects.quit);
+        assert!(!effects.confirm_quit);
+    }
+
+    #[test]
+    fn pending_placement_triggers_unsaved_confirmation() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma"]);
+        press(&mut app, "fw");
+        press(&mut app, "a");
+        assert!(app.has_unsaved_highlights());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_pdf_save_leaves_records_pending() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma"]);
+        press(&mut app, "fw");
+        press(&mut app, "aa");
+        let original = std::fs::metadata(dir.path()).unwrap().permissions();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+        press(&mut app, "<Space>w");
+        std::fs::set_permissions(dir.path(), original).unwrap();
+        assert_eq!(app.highlights()[0].pdf_state, HighlightPdfState::Pending);
+        assert!(app.has_unsaved_highlights());
+    }
+
+    #[test]
+    fn annotation_revision_increments_on_commit_and_save_not_on_motion() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma"]);
+        let after_open = app.annotation_revision();
+        press(&mut app, "fw");
+        press(&mut app, "l");
+        assert_eq!(
+            app.annotation_revision(),
+            after_open,
+            "caret motion must not bump the annotation revision"
+        );
+        let effects = press(&mut app, "aa");
+        assert!(effects.annotations_changed);
+        let after_commit = app.annotation_revision();
+        assert!(after_commit > after_open);
+        press(&mut app, "<Space>w");
+        assert!(app.annotation_revision() > after_commit);
+    }
+
+    #[test]
+    fn reveal_highlight_centers_on_stored_geometry() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta", "gamma delta"]);
+        press(&mut app, "fw");
+        press(&mut app, "aa");
+        let id = app.highlights()[0].id.unwrap();
+        // Scroll away so reveal has something to do.
+        press(&mut app, "G");
+        let before = app.session.as_ref().unwrap().view.scroll();
+        assert!(before.1 > 0.0);
+        let effects = app.reveal_highlight(id);
+        assert!(effects.redraw);
+        let after = app.session.as_ref().unwrap().view.scroll();
+        assert_ne!(before, after);
+        // First rectangle is on page 0, so we should have scrolled back up.
+        assert!(after.1 < before.1);
+    }
+
+    #[test]
+    fn reveal_unknown_id_leaves_view_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta"]);
+        let before = app.session.as_ref().unwrap().view.scroll();
+        let effects = app.reveal_highlight(HighlightId(999));
+        assert!(effects.redraw);
+        assert_eq!(app.session.as_ref().unwrap().view.scroll(), before);
+        assert!(app.last_error().unwrap().contains("unknown highlight"));
+    }
+
+    #[test]
+    fn reveal_works_for_embedded_and_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma"]);
+        press(&mut app, "fw");
+        press(&mut app, "aa");
+        let id = app.highlights()[0].id.unwrap();
+        press(&mut app, "G");
+        assert!(app.reveal_highlight(id).redraw);
+        press(&mut app, "<Space>w");
+        assert_eq!(app.highlights()[0].pdf_state, HighlightPdfState::Embedded);
+        press(&mut app, "G");
+        assert!(app.reveal_highlight(id).redraw);
+    }
+
+    #[test]
+    fn reveal_multipage_highlight_uses_first_rectangle() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta", "gamma delta"]);
+        press(&mut app, "fw");
+        press(&mut app, "a");
+        press(&mut app, "4w");
+        press(&mut app, "a");
+        let id = app.highlights()[0].id.unwrap();
+        assert!(app.highlights()[0].anchor.rects.iter().any(|r| r.page == 1));
+        press(&mut app, "G");
+        app.reveal_highlight(id);
+        assert_eq!(
+            app.highlights()[0].anchor.rects[0].page,
+            0,
+            "first rect is on page 0"
+        );
+        // After reveal we should be near the top of the document, not page 2.
+        assert!(app.session.as_ref().unwrap().view.scroll().1 < 400.0);
+    }
+
+    #[test]
+    fn markdown_export_is_deterministic() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma"]);
+        press(&mut app, "fw");
+        press(&mut app, "aa");
+        let id = app.highlights()[0].id.unwrap();
+        let pending_md = app.highlight_markdown(id).unwrap();
+        assert_eq!(pending_md, "### Page 1\n\n> alpha");
+        press(&mut app, "<Space>w");
+        let embedded_md = app.highlight_markdown(id).unwrap();
+        assert_eq!(embedded_md, pending_md);
+        assert_eq!(app.all_highlights_markdown(), pending_md);
+    }
+
+    #[test]
+    fn markdown_preserves_multiline_blank_lines_and_unicode() {
+        let highlight = Highlight {
+            id: Some(HighlightId(1)),
+            color: "#ffe066".to_owned(),
+            anchor: DocumentAnchor {
+                text: "line one\n\nunicodé 文字".to_owned(),
+                rects: vec![
+                    HighlightRect {
+                        page: 0,
+                        x0: 0.0,
+                        y0: 0.0,
+                        x1: 10.0,
+                        y1: 10.0,
+                    },
+                    HighlightRect {
+                        page: 1,
+                        x0: 0.0,
+                        y0: 0.0,
+                        x1: 10.0,
+                        y1: 10.0,
+                    },
+                ],
+            },
+            pdf_state: HighlightPdfState::Pending,
+            note: None,
+        };
+        assert_eq!(
+            format_highlight_markdown(&highlight),
+            "### Pages 1–2\n\n> line one\n> \n> unicodé 文字"
+        );
+        let empty = Highlight {
+            id: Some(HighlightId(2)),
+            color: "#ffe066".to_owned(),
+            anchor: DocumentAnchor {
+                text: String::new(),
+                rects: vec![HighlightRect {
+                    page: 2,
+                    x0: 0.0,
+                    y0: 0.0,
+                    x1: 1.0,
+                    y1: 1.0,
+                }],
+            },
+            pdf_state: HighlightPdfState::Embedded,
+            note: None,
+        };
+        assert_eq!(format_highlight_markdown(&empty), "### Page 3\n\n> ");
+    }
+
+    #[test]
+    fn markdown_orders_by_stable_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma delta"]);
+        press(&mut app, "fw");
+        press(&mut app, "aa");
+        press(&mut app, "w");
+        press(&mut app, "aa");
+        let all = app.all_highlights_markdown();
+        let first = app
+            .highlight_markdown(app.highlights()[0].id.unwrap())
+            .unwrap();
+        let second = app
+            .highlight_markdown(app.highlights()[1].id.unwrap())
+            .unwrap();
+        assert_eq!(all, format!("{first}\n\n{second}"));
+        assert!(first.contains("alpha"));
+        assert!(second.contains("beta"));
+    }
+
+    #[test]
+    fn summaries_include_pending_and_embedded() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma"]);
+        press(&mut app, "fw");
+        press(&mut app, "aa");
+        press(&mut app, "w");
+        press(&mut app, "aa");
+        // Save only once — both were Pending; after save both are Embedded.
+        press(&mut app, "<Space>w");
+        let summaries = app.highlight_summaries();
+        assert_eq!(summaries.len(), 2);
+        assert!(summaries
+            .iter()
+            .all(|s| s.pdf_state == HighlightPdfState::Embedded));
+        assert_eq!(summaries[0].first_page, 0);
+        assert_eq!(summaries[0].last_page, 0);
+    }
+
+    #[test]
+    fn highlight_notes_persist_across_save_and_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_pdf_bytes(
+            dir.path(),
+            "text.pdf",
+            pdf_with_pages(&["alpha beta gamma"]),
+        );
+        let db = dir.path().join("syodep.sqlite3");
+        let id = {
+            let mut app = App::new(Config::default(), Some(Storage::open(&db).unwrap()));
+            app.set_viewport_size(595.0, 600.0);
+            app.open_document(&path).unwrap();
+            press(&mut app, "fw");
+            press(&mut app, "aa");
+            let id = app.highlights()[0].id.unwrap();
+            let rev = app.annotation_revision();
+            let effects = app
+                .set_highlight_note(id, "Important because annotations survive.".to_owned())
+                .unwrap();
+            assert!(effects.annotations_changed);
+            assert!(!effects.redraw);
+            assert!(app.annotation_revision() > rev);
+            assert_eq!(
+                app.highlight_summaries()[0].note_markdown.as_deref(),
+                Some("Important because annotations survive.")
+            );
+            assert_eq!(
+                app.highlight_markdown(id).unwrap(),
+                "### Page 1\n\n> alpha\n\nImportant because annotations survive."
+            );
+            assert_eq!(app.highlights()[0].anchor.text, "alpha");
+            press(&mut app, "<Space>w");
+            assert_eq!(app.highlights()[0].pdf_state, HighlightPdfState::Embedded);
+            assert_eq!(
+                app.highlights()[0]
+                    .note
+                    .as_ref()
+                    .map(|n| n.body_markdown.as_str()),
+                Some("Important because annotations survive.")
+            );
+            id
+        };
+        let mut app = App::new(Config::default(), Some(Storage::open(&db).unwrap()));
+        app.set_viewport_size(595.0, 600.0);
+        app.open_document(&path).unwrap();
+        assert_eq!(app.highlights().len(), 1);
+        assert_eq!(app.highlights()[0].id, Some(id));
+        assert_eq!(
+            app.highlights()[0]
+                .note
+                .as_ref()
+                .map(|n| n.body_markdown.as_str()),
+            Some("Important because annotations survive.")
+        );
+    }
+
+    #[test]
+    fn highlight_note_clear_noop_and_unknown_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta"]);
+        press(&mut app, "fw");
+        press(&mut app, "aa");
+        let id = app.highlights()[0].id.unwrap();
+
+        app.set_highlight_note(id, "keep".to_owned()).unwrap();
+        let rev = app.annotation_revision();
+        let noop = app.set_highlight_note(id, "keep".to_owned()).unwrap();
+        assert_eq!(noop, Effects::default());
+        assert_eq!(app.annotation_revision(), rev);
+
+        let cleared = app.set_highlight_note(id, "  \n ".to_owned()).unwrap();
+        assert!(cleared.annotations_changed);
+        assert!(app.highlights()[0].note.is_none());
+        assert_eq!(app.highlight_markdown(id).unwrap(), "### Page 1\n\n> alpha");
+
+        // Clearing again is a no-op.
+        let rev2 = app.annotation_revision();
+        assert_eq!(
+            app.set_highlight_note(id, "".to_owned()).unwrap(),
+            Effects::default()
+        );
+        assert_eq!(app.annotation_revision(), rev2);
+
+        assert!(matches!(
+            app.set_highlight_note(HighlightId(999_999), "x".to_owned()),
+            Err(AppError::UnknownHighlight(999_999))
+        ));
+    }
+
+    #[test]
+    fn markdown_export_includes_multiline_and_structured_comments() {
+        let highlight = Highlight {
+            id: Some(HighlightId(1)),
+            color: "#ffe066".to_owned(),
+            anchor: DocumentAnchor {
+                text: "source quote".to_owned(),
+                rects: vec![HighlightRect {
+                    page: 0,
+                    x0: 0.0,
+                    y0: 0.0,
+                    x1: 10.0,
+                    y1: 10.0,
+                }],
+            },
+            pdf_state: HighlightPdfState::Pending,
+            note: Some(HighlightNote {
+                body_markdown:
+                    "# Why\n\n- one\n- two\n\n```text\ncode\n```\n\n[link](https://example.com)"
+                        .to_owned(),
+            }),
+        };
+        assert_eq!(
+            format_highlight_markdown(&highlight),
+            "### Page 1\n\n> source quote\n\n# Why\n\n- one\n- two\n\n```text\ncode\n```\n\n[link](https://example.com)"
+        );
+    }
+
+    #[test]
+    fn note_on_embedded_highlight_and_copy_all_mix() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma"]);
+        press(&mut app, "fw");
+        press(&mut app, "aa");
+        press(&mut app, "w");
+        press(&mut app, "aa");
+        let first = app.highlights()[0].id.unwrap();
+        let second = app.highlights()[1].id.unwrap();
+        press(&mut app, "<Space>w");
+        assert_eq!(app.highlights()[0].pdf_state, HighlightPdfState::Embedded);
+        app.set_highlight_note(first, "only first".to_owned())
+            .unwrap();
+        let all = app.all_highlights_markdown();
+        let first_md = app.highlight_markdown(first).unwrap();
+        let second_md = app.highlight_markdown(second).unwrap();
+        assert!(first_md.contains("only first"));
+        assert!(!second_md.contains("only first"));
+        assert_eq!(all, format!("{first_md}\n\n{second_md}"));
     }
 }

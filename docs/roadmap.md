@@ -29,18 +29,27 @@ Ordered roughly by dependency:
    mode, `v`/`vc`/`vw`/`ve`/`vs`/`vp`, two independently-scoped ends, `o` to
    switch ends); mouse selection still to come
 3. ✅ Highlight selected text (highlight mode, `a`); SQLite `highlights` table
-   (migration v2); highlight overlays rendered on reload; `<leader>w` saves the
-   PDF with the highlights embedded as real PDF annotations
+   (migrations v2–v3); Pending overlays on reload; `<leader>w` embeds Pending
+   highlights as PDF annotations and keeps the rows as Embedded (stable ids,
+   summaries, reveal-by-id, Markdown export, C ABI list)
 4. ⬜ Search within document; result overlays; `/`, `n`, `N`
-5. ⬜ Text notes attached to highlights
+5. ✅ Text notes attached to highlights — one optional Markdown comment per
+   stable highlight id (`highlight_notes` migration v4); sidebar Edit/Preview
+   editor; safe Qt preview; included in Rust Markdown clipboard export. Multiple
+   human comment threads and agent chat remain planned (separate storage)
 6. ⬜ Bookmarks (current position) and single-key marks (`m{a-z}`,
    `'{a-z}`)
 7. ⬜ Jump history: jump-back / jump-forward (`<C-o>` / `<C-i>`)
 8. ⬜ Fuzzy search over highlights and notes
-9. ⬜ Export annotations to Markdown and JSON
-10. ⬜ Annotation sidebar (Qt, read-only first) — *blocked on completing the
-    traversal audit in `docs/traversal-audit.md`; read-only listing of existing
-    highlights may start; caret-anchored comments/chat wait on findings there*
+9. 🚧 Export annotations to Markdown and JSON — clipboard Markdown for one/
+   all highlights (including saved comments) is available via the sidebar
+   (Rust-canonical serialization); a full export-file workflow is not yet
+   implemented
+10. ✅ Annotation sidebar (Qt) — dockable Highlights panel with
+    model/view/delegate cards, comment editor, revision-aware refresh,
+    reveal-by-id, plain/Markdown clipboard copy. Agent chat, filtering, and
+    external PDF annotation import remain planned. Caret-anchored chat waits on
+    later traversal refactors (`docs/traversal-audit.md`)
 
 Delivered ahead of the rest: a **modal caret** (`c` to enter, then `hjkl`)
 navigates the content layer character- and line-wise across text and images,
