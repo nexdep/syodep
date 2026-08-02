@@ -102,9 +102,12 @@ input take plain data). Key pieces:
   end is the app's `focus`/`focus_scope`. There is exactly one "where you are"
   in the whole app, and visual mode adds a second endpoint rather than a second
   position. `o` exchanges the anchor with the focus position, scopes included,
-  so there is no separate "which end is active" flag to drift. Rendering expands
-  each end by its own scope and takes the outermost edges, which makes the ends
-  crossing a non-case and `o` provably invisible.
+  so there is no separate "which end is active" flag to drift. Entering visual
+  (and changing the head's scope) snaps the moving end and refreshes
+  `focus_span` the same way focus enter does, so the cached head span cannot
+  lag behind `scope_span`. Rendering expands each end by its own scope and
+  takes the outermost edges, which makes the ends crossing a non-case and `o`
+  provably invisible.
   `VisualSelection` still exists, but as a *read-only view* assembled by
   `visual_selection()` — it is what the tests and status line read, never what
   the app stores.
@@ -190,28 +193,31 @@ It is also the only crate that *writes* a PDF: `write_highlights` (plus
 `HighlightAnnotation` and the read-back helper `page_highlights`, which lets tests
 assert against the file rather than the code that produced it).
 
-**Decision — tables are navigable units, found by a second text
-pass:** `page_content` extracts text once with `PRESERVE_IMAGES`, then runs a
-second pass with `TABLE_HUNT | COLLECT_VECTORS` from which it takes *only* the
-bounding boxes of the detected tables. Two passes are needed because the
-detection pass rewrites the page — it moves a table's text into a structure
+**Decision — tables are navigable units, found by MuPDF hunt plus an
+alignment fallback:** `page_content` extracts text once with `PRESERVE_IMAGES`,
+then runs a second pass with `TABLE_HUNT | COLLECT_VECTORS` from which it takes
+*only* the bounding boxes of the detected tables. Two passes are needed because
+the detection pass rewrites the page — it moves a table's text into a structure
 node whose children the Rust bindings cannot walk, and splits lines while
 redistributing characters into cells — so its geometry is unusable for text.
 `COLLECT_VECTORS` is not optional either: MuPDF hunts for tables among a page's
 ruled rectangles, and with no vectors collected it falls back to hunting the
 whole page at a loose threshold, which reports ordinary prose as one giant
-table. Trade-off: detection is a heuristic and costs a second pass (~2ms per
-page, cached), so `view.detect_tables` can switch it off. Boxes that claim
-every line on a page, or that map to a non-contiguous set of lines, are
-discarded rather than guessed at — degrading to line-by-line navigation is
-always safe, whereas a wrong unit is a very visible navigation bug. A
-box's *edges* are trimmed rather than trusted, because MuPDF reports the ruled
-region and it reaches past the last row: an edge line the box only clips, or one
-set apart from the table's own row rhythm, is the prose beside the table and not
-part of it. The stored box is then held back from the lines above and below, so
-a table's highlight can never tint a line the caret can reach — like a heading's
-box (the union of its lines) and an image's, it is bounded by the page's own
-content.
+table. Borderless / lightly-ruled grids often miss that hunt; a pure
+alignment pass then recovers short, cell-like lines whose left edges form
+≥2 stable columns across ≥3 rows, and fails closed (one column, page-wide
+span, or ordinary two-column prose yields nothing). Trade-off: detection is a
+heuristic and costs a second pass (~2ms per page, cached), so
+`view.detect_tables` can switch it off. Boxes that claim every line on a page,
+or that map to a non-contiguous set of lines, are discarded rather than guessed
+at — degrading to line-by-line navigation is always safe, whereas a wrong unit
+is a very visible navigation bug. A box's *edges* are trimmed rather than
+trusted, because MuPDF reports the ruled region and it reaches past the last
+row: an edge line the box only clips, or one set apart from the table's own
+row rhythm, is the prose beside the table and not part of it. The stored box is
+then held back from the lines above and below, so a table's highlight can never
+tint a line the caret can reach — like a heading's box (the union of its lines)
+and an image's, it is bounded by the page's own content.
 
 **Decision — page furniture is removed from the content layer, not skipped by
 motion:** running heads, folios, margin line numbers and text that does not run
@@ -225,19 +231,23 @@ sideways keep everything, and what makes the rule provably unable to empty a
 page, since the dominant cluster is the majority and is never flagged.
 *Repetition* flags a margin-band line whose digit-masked text and baseline recur
 across sampled pages; position alone is never evidence, so a title that appears
-once survives. Sampling takes four anchors of *two consecutive pages*, because
-evenly spaced single pages land on one parity and would miss the recto running
-head of any book that alternates. Baselines, not bounding boxes, are the
-position key — a descender moves a box by points. A line's characters are
-further split into `text_segments` wherever a gap exceeds `SEGMENT_GAP_POINTS`
-(20pt, comfortably past any word gap): a header and a folio sharing one
-baseline — a facing-page layout where the pair swaps sides between recto and
-verso is the case this exists for — are then two segments the vote can accept
-independently, rather than one string whose order depends on which side either
-field is on. Bare page numbers get a slightly deeper bottom band (20% rather
-than 15%), because journal layouts often set the folio a few points above the
-strict margin and an empty furniture profile leaves every folio in the caret
-path — sometimes even flagged as a heading. *Line numbering* flags a run of purely numeric lines (at least
+once survives. Sampling takes four anchors of *two consecutive pages*, plus the opening and
+closing page pairs, because evenly spaced single pages land on one parity and
+would miss the recto running head of any book that alternates, and because
+publisher mastheads often concentrate on the first leaves. Baselines, not
+bounding boxes, are the position key — a descender moves a box by points. A
+line's characters are further split into `text_segments` wherever a gap exceeds
+`SEGMENT_GAP_POINTS` (20pt, comfortably past any word gap): a header and a folio
+sharing one baseline — a facing-page layout where the pair swaps sides between
+recto and verso is the case this exists for — are then two segments the vote can
+accept independently, rather than one string whose order depends on which side
+either field is on. Normalised keys also drop a trailing page-count tag
+(`20pp`, `12 pages`) and accept a longer margin line that merely prefixes an
+established entry, so a journal head matches itself whether or not a given page
+also prints the article length. Bare page numbers get a slightly deeper bottom
+band (20% rather than 15%), because journal layouts often set the folio a few
+points above the strict margin and an empty furniture profile leaves every folio
+in the caret path — sometimes even flagged as a heading. *Line numbering* flags a run of purely numeric lines (at least
 `MIN_LINE_NUMBERS`) forming their own column left of the body text, separated
 from it by at least `LINE_NUMBER_GAP` — manuscript line-numbering, which
 restarts every page and so has no cross-page profile to learn from; it needs
@@ -347,7 +357,9 @@ Detected the same way headings are, mirrored: a line reads as a footnote when
 it sits in the page's bottom margin band and is set noticeably *smaller* than
 the page's body size, the inverse of a heading's larger-than-body rule; both
 share a factored-out `dominant_body_size` helper so the two detectors' notion
-of "the body" cannot drift apart. Found and claimed before list items in
+of "the body" cannot drift apart. Math-shaped lines in that band are excluded
+(`line_is_mathish`) so a display-formula fragment is not claimed as a footnote
+when it fails the fuller equation gates. Found and claimed before list items in
 `content_objects`, deliberately: a footnote's own citation text is often
 itself enumerator-shaped (`12. Author, Title`) and must not be misread as, or
 corrupt the extent of, an unrelated list elsewhere on the page.

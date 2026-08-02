@@ -769,12 +769,23 @@ pub fn column_ranges(lines: &[ContentLine]) -> Vec<(f32, f32)> {
         .filter(|l| !l.cells.iter().any(|c| matches!(c.kind, CellKind::Image)))
         .collect();
 
-    let cols = if let Some(seed) = column_seed_lines(&text_lines) {
-        accumulate_column_ranges(&seed)
+    if let Some(seed) = column_seed_lines(&text_lines) {
+        let cols = coalesce_column_ranges(accumulate_column_ranges(&seed));
+        // Slightly wide lines can still glue the two bands during overlap
+        // merge even after gutter-spanners are filtered. Rebuild from line
+        // centres when seeding clearly saw both sides.
+        if cols.len() >= 2 {
+            cols
+        } else {
+            center_cluster_columns(&seed).unwrap_or(cols)
+        }
     } else {
-        accumulate_column_ranges(&non_empty)
-    };
-    coalesce_column_ranges(cols)
+        coalesce_column_ranges(accumulate_column_ranges(&non_empty))
+    }
+}
+
+fn line_center_x(line: &ContentLine) -> f32 {
+    (line.bbox.x0 + line.bbox.x1) * 0.5
 }
 
 /// Non-spanning text lines to seed column detection, when both sides of the
@@ -795,14 +806,76 @@ fn column_seed_lines<'a>(text_lines: &[&'a ContentLine]) -> Option<Vec<&'a Conte
         return None;
     }
     let mid = (page_x0 + page_x1) * 0.5;
+    // Drop true gutter-spanners; classify the rest by centre so a line that
+    // merely overhangs the mid by a few points still belongs to one side.
     let columnar: Vec<&ContentLine> = text_lines
         .iter()
         .copied()
         .filter(|l| !(l.bbox.x0 < mid && l.bbox.x1 > mid))
         .collect();
-    let left = columnar.iter().filter(|l| l.bbox.x1 <= mid).count();
-    let right = columnar.iter().filter(|l| l.bbox.x0 >= mid).count();
+    let left = columnar.iter().filter(|l| line_center_x(l) < mid).count();
+    let right = columnar.iter().filter(|l| line_center_x(l) > mid).count();
     (left >= 2 && right >= 2).then_some(columnar)
+}
+
+/// Split seed lines into two columns at the largest gap between sorted centres.
+fn center_cluster_columns(lines: &[&ContentLine]) -> Option<Vec<(f32, f32)>> {
+    if lines.len() < 4 {
+        return None;
+    }
+    let mut indexed: Vec<(f32, usize)> = lines
+        .iter()
+        .enumerate()
+        .map(|(i, l)| (line_center_x(l), i))
+        .collect();
+    indexed.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut best_gap = 0.0_f32;
+    let mut split = 0usize;
+    for (k, w) in indexed.windows(2).enumerate() {
+        let gap = w[1].0 - w[0].0;
+        if gap > best_gap {
+            best_gap = gap;
+            split = k + 1;
+        }
+    }
+    if split < 2 || indexed.len() - split < 2 {
+        return None;
+    }
+    // Require a real gutter, not ordinary indentation jitter.
+    let page_width = {
+        let x0 = lines
+            .iter()
+            .map(|l| l.bbox.x0)
+            .fold(f32::INFINITY, f32::min);
+        let x1 = lines
+            .iter()
+            .map(|l| l.bbox.x1)
+            .fold(f32::NEG_INFINITY, f32::max);
+        x1 - x0
+    };
+    if best_gap < 0.08 * page_width {
+        return None;
+    }
+    let left_idxs: Vec<usize> = indexed[..split].iter().map(|(_, i)| *i).collect();
+    let right_idxs: Vec<usize> = indexed[split..].iter().map(|(_, i)| *i).collect();
+    let range = |idxs: &[usize]| {
+        let x0 = idxs
+            .iter()
+            .map(|&i| lines[i].bbox.x0)
+            .fold(f32::INFINITY, f32::min);
+        let x1 = idxs
+            .iter()
+            .map(|&i| lines[i].bbox.x1)
+            .fold(f32::NEG_INFINITY, f32::max);
+        (x0, x1)
+    };
+    let (l0, l1) = range(&left_idxs);
+    let (r0, r1) = range(&right_idxs);
+    if l1 >= r0 {
+        // Ranges still overlap — not a clean split.
+        return None;
+    }
+    Some(vec![(l0, l1), (r0, r1)])
 }
 
 /// Greedy overlap grouping: a line starts a column or merges into every
@@ -1162,6 +1235,27 @@ mod tests {
     fn column_ranges_single_column_when_lines_overlap() {
         let lines = [line(0.0, 0.0, 300.0, 10.0), line(10.0, 20.0, 290.0, 30.0)];
         assert_eq!(column_ranges(&lines).len(), 1);
+    }
+
+    #[test]
+    fn column_ranges_recovers_two_columns_when_overlap_merge_would_glue_them() {
+        // Body columns whose boxes nearly touch: greedy x-overlap merge
+        // collapses them, but centres still show a clear gutter.
+        let lines = [
+            line(40.0, 0.0, 290.0, 10.0),
+            line(300.0, 0.0, 550.0, 10.0),
+            line(40.0, 20.0, 290.0, 30.0),
+            line(300.0, 20.0, 550.0, 30.0),
+            line(40.0, 40.0, 290.0, 50.0),
+            line(300.0, 40.0, 550.0, 50.0),
+        ];
+        let cols = column_ranges(&lines);
+        assert_eq!(
+            cols.len(),
+            2,
+            "expected centre-cluster recovery, got {cols:?}"
+        );
+        assert!(cols[0].1 < cols[1].0);
     }
 
     #[test]

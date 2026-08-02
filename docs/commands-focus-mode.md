@@ -121,9 +121,13 @@ hanging-indent list whose following prose sits past the marker still stops
 cleanly. A numbered item is one sentence including its `1.`, not two.
 
 Both shapes of item count: a bullet followed by its text, and a bullet that
-extraction leaves on a line of its own with the text below it. A marker counts
+extraction leaves on a line of its own with the text below *or* above it
+(MuPDF sometimes emits the marker after the citation). A lone bullet is paired
+with the nearest indented neighbour in a small vertical window. A marker counts
 only when another item of the same kind lines up with it, so a sentence that
-merely opens with a numeral is not a list.
+merely opens with a numeral is not a list. Uppercase single-letter labels
+(`T. Author`) are not enumerators — only digits, roman numerals, and lowercase
+`a.`/`b.` — so citation initials cannot form a false list beside real bullets.
 
 Items bound sentences only. `w` still walks the marker and the words after it,
 and items do not split a list into paragraphs — though a list set with generous

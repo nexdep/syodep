@@ -7,6 +7,58 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-08-02 — Traversal hardening (order + segmentation)
+
+Audit of focus/visual word/line/paragraph motion on a real two-column journal
+PDF surfaced several goal mismatches. Fixes stay document-agnostic.
+
+### Visual enter matches focus enter
+
+`enter_visual` / `set_head_scope` now `snap_to_scope` and
+`refresh_focus_span`, so `vw`/`ve`/`vp` cannot leave a char-sized
+`focus_span` while `visual_span` expands. Tests:
+`visual_enter_snaps_and_refreshes_focus_span_like_focus_enter`,
+`word_scope_span_never_contains_authored_whitespace`.
+
+### Footnotes exclude math fragments
+
+`footnote_ranges` rejects `line_is_mathish` lines in the bottom band so
+`Ic,t = Ic,0`-shaped fragments are not footnotes when they miss full
+equation gates. Test: `footnote_ranges_ignore_math_fragments_in_the_bottom_band`.
+
+### List items: lone bullets + no uppercase initials
+
+- Lone bullets pair with the nearest indented neighbour above or below
+  (`pair_lone_bullet`), covering MuPDF “text then marker” emission.
+- Enumerated markers accept only digits, roman, or **lowercase** single
+  letters — `T. Author` is not a list. Tests:
+  `a_lone_bullet_pairs_with_text_emitted_before_it`,
+  `uppercase_initials_are_not_enumerated_list_markers`.
+
+### Columns by centre when overlap merge collapses
+
+`column_ranges` classifies seed lines by centre x; if overlap-merge still
+yields one column after two-sided seeding, `center_cluster_columns` rebuilds
+at the largest centre gap. Test:
+`column_ranges_recovers_two_columns_when_overlap_merge_would_glue_them`.
+
+### Furniture profile: front/back pages + page-count suffix
+
+Sampling always includes the first/last page pairs. Normalised keys strip
+trailing `Npp` / `N pages`, and mask matching accepts a longer line that
+prefixes an established entry. Assertions live in
+`normalise_masks_digit_runs_and_folds_case`.
+
+### Borderless table alignment fallback
+
+After MuPDF’s vector hunt, `alignment_table_bboxes` recovers short cell-like
+grids (≥3 rows, ≥2 stable left-edge columns) and fails closed on prose /
+page-wide spans. Tests:
+`alignment_table_bboxes_finds_a_borderless_parameter_grid`,
+`alignment_table_bboxes_ignore_ordinary_two_column_prose`.
+
+---
+
 ## 2026-07-31 — Markdown comments on highlights
 
 Step 5 after the read-only sidebar. Each stable highlight may carry one

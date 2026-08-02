@@ -3401,12 +3401,16 @@ impl App {
         // Re-entering visual mode collapses the selection onto the head.
         let live = self.visual.filter(|_| self.mode == Mode::Visual);
         if let (Some(mut a), Some(head)) = (live, self.focus) {
+            let scope = scope.unwrap_or(self.focus_scope);
+            let head = self.snap_to_scope(head, scope);
+            self.focus = Some(head);
+            self.focus_scope = scope;
             a.anchor = head;
-            if let Some(scope) = scope {
-                self.focus_scope = scope;
-            }
-            a.anchor_scope = self.focus_scope;
+            a.anchor_scope = scope;
             self.visual = Some(a);
+            self.update_focus_goal_x(head);
+            self.update_focus_goal_y(head);
+            self.refresh_focus_span();
             self.refresh_visual_span();
             return Effects::redraw();
         }
@@ -3414,6 +3418,7 @@ impl App {
         let Some(at) = self.visual_entry_caret() else {
             return Effects::default();
         };
+        let at = self.snap_to_scope(at, scope);
         self.visual = Some(VisualAnchor {
             anchor: at,
             anchor_scope: scope,
@@ -3423,6 +3428,8 @@ impl App {
         self.focus_scope = scope;
         self.mode = Mode::Visual;
         self.update_focus_goal_x(at);
+        self.update_focus_goal_y(at);
+        self.refresh_focus_span();
         self.refresh_visual_span();
         self.ensure_visual_head_visible();
         self.save_position();
@@ -3501,11 +3508,13 @@ impl App {
             self.swap_visual_ends();
         }
         self.focus_scope = scope;
-        if swap_first {
-            if let Some(head) = self.focus {
-                self.update_focus_goal_x(head);
-            }
+        if let Some(head) = self.focus {
+            let head = self.snap_to_scope(head, scope);
+            self.focus = Some(head);
+            self.update_focus_goal_x(head);
+            self.update_focus_goal_y(head);
         }
+        self.refresh_focus_span();
         self.refresh_visual_span();
         self.ensure_visual_head_visible();
         Effects::redraw()
@@ -7087,8 +7096,9 @@ mod tests {
         let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma delta"]);
         press(&mut app, "fc");
         press(&mut app, "vk"); // visual, char scope at both ends
-        press(&mut app, "l"); // head moves off the anchor
-        press(&mut app, "vw"); // head becomes word-granular
+        press(&mut app, "w"); // head onto "beta" so a later word-snap cannot
+                              // collapse onto the anchor at "alpha"
+        press(&mut app, "vw"); // head becomes word-granular (snaps to word start)
         let before = app.visual_selection().expect("selection");
         let span_before = app.visual_span();
         assert_ne!(before.head, before.anchor);
@@ -7722,6 +7732,61 @@ mod tests {
         let (start, end) = app.visual_span().unwrap();
         assert_eq!((start.cell, end.cell), (0, 4), "\"alpha\" is cells 0..=4");
         assert!(app.status_text().contains("-- VISUAL (word) --"));
+    }
+
+    /// Entering visual with an explicit scope must snap and refresh the head
+    /// the same way focus enter does — otherwise `focus_span` stays char-sized
+    /// while `visual_span` expands, and the two modes disagree on one position.
+    #[test]
+    fn word_scope_span_never_contains_authored_whitespace() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(
+            dir.path(),
+            &["alpha beta. 1. Introduction Nucl. Fusion next"],
+        );
+        press(&mut app, "fw");
+        for _ in 0..20 {
+            let Some((start, end)) = app.focus_span() else {
+                break;
+            };
+            let text = app.span_text(start, end);
+            assert!(
+                !text.chars().any(|c| c.is_whitespace()),
+                "word span must not contain whitespace: {text:?}"
+            );
+            let before = app.focus_caret();
+            press(&mut app, "w");
+            if app.focus_caret() == before {
+                break;
+            }
+        }
+    }
+
+    #[test]
+    fn visual_enter_snaps_and_refreshes_focus_span_like_focus_enter() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut focus = app_with_text_pages(dir.path(), &["alpha beta gamma"]);
+        let mut visual = app_with_text_pages(dir.path(), &["alpha beta gamma"]);
+        press(&mut focus, "fw");
+        press(&mut visual, "vw");
+        assert_eq!(focus.focus_caret(), visual.focus_caret());
+        assert_eq!(focus.focus_span(), visual.focus_span());
+        assert_eq!(
+            visual.focus_span(),
+            Some((
+                Caret {
+                    page: 0,
+                    line: 0,
+                    cell: 0
+                },
+                Caret {
+                    page: 0,
+                    line: 0,
+                    cell: 4
+                }
+            )),
+            "\"alpha\" must be the head's word span, not a single cell"
+        );
     }
 
     #[test]

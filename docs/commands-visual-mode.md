@@ -36,6 +36,11 @@ with the next key you press or after a brief pause - see the disambiguation
 rule in `docs/keybindings.md`. The same is true of `o`, so pausing after it
 swaps the ends without needing `oo`.
 
+Entering with an explicit scope (and changing the head's scope with `vw` /
+`ve` / …) **snaps** the moving end and refreshes `focus_span` the same way
+focus enter does, so the head's cached span always matches what
+`scope_span` would draw.
+
 ## Moving the selection
 
 | Command | Effect | Count |

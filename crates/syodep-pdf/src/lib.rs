@@ -762,11 +762,24 @@ impl Document {
         }
 
         // A single line can never form a table, so skip the second pass.
-        let tables = if opts.detect_tables && lines.len() > 1 {
+        let mut tables = if opts.detect_tables && lines.len() > 1 {
             self.table_bboxes(&mupdf_page)?
         } else {
             Vec::new()
         };
+        // Borderless / lightly-ruled tables often miss MuPDF's vector hunt.
+        // An alignment pass recovers grids of short, column-aligned cells
+        // without inventing a table from ordinary prose (fail closed).
+        if opts.detect_tables && lines.len() > 1 {
+            for bbox in alignment_table_bboxes(&lines) {
+                let overlaps = tables
+                    .iter()
+                    .any(|t| bbox.x0 < t.x1 && bbox.x1 > t.x0 && bbox.y0 < t.y1 && bbox.y1 > t.y0);
+                if !overlaps {
+                    tables.push(bbox);
+                }
+            }
+        }
         let headings = if opts.detect_headings {
             heading_ranges(&lines, &styles)
         } else {
@@ -813,6 +826,14 @@ impl Document {
             return Ok(FurnitureProfile::empty());
         }
         let mut pages: Vec<usize> = Vec::new();
+        // Always include the opening and closing pairs: publisher mastheads and
+        // journal chrome often concentrate on the first leaves and would miss
+        // a mid-document-only sample grid.
+        for p in [0usize, 1, count.saturating_sub(2), count.saturating_sub(1)] {
+            if p < count && !pages.contains(&p) {
+                pages.push(p);
+            }
+        }
         for k in 0..SAMPLE_ANCHORS {
             let anchor = k * (count - 1) / SAMPLE_ANCHORS.max(1);
             for p in [anchor, anchor + 1] {
@@ -1023,7 +1044,53 @@ fn normalise_furniture_text(text: &str) -> String {
         last_hash = mapped == '#';
         out.push(mapped);
     }
-    out.split_whitespace().collect::<Vec<_>>().join(" ")
+    let joined = out.split_whitespace().collect::<Vec<_>>().join(" ");
+    strip_furniture_page_count_suffix(&joined)
+}
+
+/// Drop a trailing page-count tag (`12pp`, `20 pages`) so a journal running
+/// head matches itself whether or not a given page also prints the length.
+fn strip_furniture_page_count_suffix(text: &str) -> String {
+    let tokens: Vec<&str> = text.split_whitespace().collect();
+    if tokens.len() < 2 {
+        return text.to_string();
+    }
+    let last = tokens[tokens.len() - 1];
+    let strip_last = last == "pp"
+        || last == "page"
+        || last == "pages"
+        || (last.ends_with("pp")
+            && last.chars().all(|c| c == '#' || c == 'p')
+            && last.contains('#'));
+    let strip_two = !strip_last
+        && tokens.len() >= 2
+        && matches!(tokens[tokens.len() - 1], "page" | "pages" | "pp")
+        && tokens[tokens.len() - 2].chars().all(|c| c == '#');
+    if strip_last {
+        tokens[..tokens.len() - 1].join(" ")
+    } else if strip_two {
+        tokens[..tokens.len() - 2].join(" ")
+    } else {
+        text.to_string()
+    }
+}
+
+/// Whether a profile entry and a line's normalised text are the same running
+/// head, allowing a longer line to carry an extra trailing field the profile
+/// never saw (or the reverse).
+fn furniture_text_matches(entry: &str, line: &str) -> bool {
+    if entry == line {
+        return true;
+    }
+    let et: Vec<&str> = entry.split_whitespace().collect();
+    let lt: Vec<&str> = line.split_whitespace().collect();
+    if et.len() >= 3 && lt.len() > et.len() && lt[..et.len()] == et[..] {
+        return true;
+    }
+    if lt.len() >= 3 && et.len() > lt.len() && et[..lt.len()] == lt[..] {
+        return true;
+    }
+    false
 }
 
 /// Which band a baseline falls in, and how far it sits from that page edge.
@@ -1063,7 +1130,7 @@ fn build_profile(samples: &[Vec<BandLine>]) -> FurnitureProfile {
         let mut counted: Vec<usize> = Vec::new();
         for line in page {
             let found = entries.iter().position(|e| {
-                e.text == line.text
+                furniture_text_matches(&e.text, &line.text)
                     && e.edge == line.edge
                     && (e.offset - line.offset).abs() <= BASELINE_TOLERANCE
             });
@@ -1182,7 +1249,9 @@ fn furniture_mask(
             // how well the text matches -- the band gate itself never
             // widens (see `mask_does_not_use_the_deeper_band_for_non_folio_text`).
             let strict = profile.entries.iter().any(|e| {
-                e.text == text && e.edge == edge && (e.offset - offset).abs() <= BASELINE_TOLERANCE
+                furniture_text_matches(&e.text, &text)
+                    && e.edge == edge
+                    && (e.offset - offset).abs() <= BASELINE_TOLERANCE
             });
             // Still in the margin band, but the strict offset match failed --
             // this page's own margin baseline may simply have drifted a few
@@ -1193,7 +1262,7 @@ fn furniture_mask(
             // rejected never reaches this fallback at all.
             let relaxed = strict
                 || profile.entries.iter().any(|e| {
-                    e.text == text
+                    furniture_text_matches(&e.text, &text)
                         && e.edge == edge
                         && (e.offset - offset).abs() <= RELAXED_BASELINE_TOLERANCE
                 });
@@ -1423,7 +1492,13 @@ fn line_marker(text: &str) -> Option<(Marker, usize)> {
             'i' | 'v' | 'x' | 'l' | 'c' | 'd' | 'm'
         )
     });
-    let single_letter = label.len() == 1 && label.chars().all(|c| c.is_ascii_alphabetic());
+    // Lowercase single letters only (`a.`, `b.`). An uppercase `T. Author`
+    // is an initial on a citation line, and a page of those would otherwise
+    // corroborate each other into a false enumerated list beside a real
+    // bullet list. Uppercase `A.`/`B.` legal-style lists are uncommon next
+    // to the damage that false positive does; digits and roman still cover
+    // ordinary enumerated prose.
+    let single_letter = label.len() == 1 && label.chars().all(|c| c.is_ascii_lowercase());
     // The label plus its closing `.` or `)`, after any indent.
     (all_digits || roman || single_letter)
         .then_some((Marker::Enumerated, indent + label.chars().count() + 1))
@@ -1476,19 +1551,31 @@ fn list_items(lines: &[ContentLine], blocked: &[ContentObject]) -> Vec<(usize, u
     let is_marker = |i: usize| starts.iter().any(|&(s, _)| s == i);
     let mut items: Vec<(usize, usize)> = starts
         .iter()
-        .map(|&(start, marker_x)| {
-            (
-                start,
-                extend_item(
-                    lines,
-                    &is_marker,
-                    &blocked_at,
-                    start,
-                    marker_x,
-                    median_height,
-                    None,
-                ),
-            )
+        .map(|&(marker_idx, marker_x)| {
+            let forward_end = extend_item(
+                lines,
+                &is_marker,
+                &blocked_at,
+                marker_idx,
+                marker_x,
+                median_height,
+                None,
+            );
+            // MuPDF sometimes emits a bullet *after* its text in reading
+            // order (and even above it in y). Pair a lone bullet with the
+            // nearest indented neighbour so the item covers marker + text.
+            let partner = pair_lone_bullet(
+                lines,
+                &is_marker,
+                &blocked_at,
+                marker_idx,
+                marker_x,
+                median_height,
+                &starts,
+            );
+            let start = partner.filter(|&p| p < marker_idx).unwrap_or(marker_idx);
+            let end = forward_end.max(partner.unwrap_or(marker_idx));
+            (start, end)
         })
         .collect();
 
@@ -1519,23 +1606,83 @@ fn list_items(lines: &[ContentLine], blocked: &[ContentObject]) -> Vec<(usize, u
                 Some(acc.map_or(gap, |a| a.max(gap)))
             });
         if let Some(max_observed_gap) = max_observed_gap {
-            let (start, marker_x) = starts[last_idx];
+            let (marker_idx, marker_x) = starts[last_idx];
             let cap = LIST_GAP_CALIBRATION_SLACK * max_observed_gap;
-            items[last_idx] = (
-                start,
-                extend_item(
-                    lines,
-                    &is_marker,
-                    &blocked_at,
-                    start,
-                    marker_x,
-                    median_height,
-                    Some(cap),
-                ),
+            let forward_end = extend_item(
+                lines,
+                &is_marker,
+                &blocked_at,
+                marker_idx,
+                marker_x,
+                median_height,
+                Some(cap),
             );
+            let partner = pair_lone_bullet(
+                lines,
+                &is_marker,
+                &blocked_at,
+                marker_idx,
+                marker_x,
+                median_height,
+                &starts,
+            );
+            let start = partner.filter(|&p| p < marker_idx).unwrap_or(marker_idx);
+            let end = forward_end.max(partner.unwrap_or(marker_idx));
+            items[last_idx] = (start, end);
         }
     }
     items
+}
+
+/// Find text that belongs to a bullet sitting alone on its line.
+///
+/// Extraction often splits `-` / `•` onto its own line; sometimes that line
+/// appears *after* the item text in the line vector (and occasionally above
+/// it on the page). Forward-only extension then leaves a bare marker. The
+/// partner must be indented past the marker, within a small vertical window,
+/// and not claimed by another marker.
+fn pair_lone_bullet(
+    lines: &[ContentLine],
+    is_marker: &impl Fn(usize) -> bool,
+    blocked_at: &impl Fn(usize) -> bool,
+    marker_idx: usize,
+    marker_x: f32,
+    median_height: f32,
+    starts: &[(usize, f32)],
+) -> Option<usize> {
+    let marker_text = line_text(&lines[marker_idx]);
+    let Some((Marker::Bullet, _)) = line_marker(&marker_text) else {
+        return None;
+    };
+    // Marker + body on the same line already form a complete item.
+    if marker_text.chars().filter(|c| !c.is_whitespace()).count() > 2 {
+        return None;
+    }
+    let claimed: Vec<usize> = starts.iter().map(|&(i, _)| i).collect();
+    let my_y = lines[marker_idx].bbox.y0;
+    let max_dy = 2.5 * median_height.max(1.0);
+    let mut best: Option<(usize, f32)> = None;
+    for (j, line) in lines.iter().enumerate() {
+        if j == marker_idx || is_marker(j) || blocked_at(j) || line.cells.is_empty() {
+            continue;
+        }
+        if claimed.contains(&j) {
+            continue;
+        }
+        if line.bbox.x0 <= marker_x + LIST_INDENT_EPS {
+            continue;
+        }
+        let dy = (line.bbox.y0 - my_y).abs();
+        if dy > max_dy {
+            continue;
+        }
+        // Prefer text below the bullet (larger y in MuPDF); accept above too.
+        let score = dy + if line.bbox.y0 >= my_y { 0.0 } else { 1.0 };
+        if best.map(|(_, s)| score < s).unwrap_or(true) {
+            best = Some((j, score));
+        }
+    }
+    best.map(|(j, _)| j)
 }
 
 /// One list item's line extent, from its marker through however many
@@ -1837,7 +1984,12 @@ fn footnote_ranges(
     let bottom_threshold = (1.0 - FOOTNOTE_BAND_SHARE) * page_height;
 
     let is_footnote_line = |i: usize| {
-        styles[i].baseline >= bottom_threshold && styles[i].size <= body * FOOTNOTE_SIZE_FACTOR
+        styles[i].baseline >= bottom_threshold
+            && styles[i].size <= body * FOOTNOTE_SIZE_FACTOR
+            // Display-math fragments often sit in the foot at a smaller size;
+            // claiming them as footnotes makes `s`/`p` skip real equations and
+            // splits a formula across kinds. Math-shaped lines stay out.
+            && !line_is_mathish(&lines[i], &styles[i])
     };
 
     let mut ranges: Vec<(usize, usize)> = Vec::new();
@@ -1874,6 +2026,57 @@ const MATH_FONT_MARKS: &[&str] = &[
 fn is_math_font(name: &str) -> bool {
     let lower = name.to_lowercase();
     MATH_FONT_MARKS.iter().any(|mark| lower.contains(mark))
+}
+
+/// Whether a line reads as mathematics for the purpose of keeping it out of
+/// the footnote detector.
+///
+/// Softer than a full [`equation_ranges`] hit: a fragment like `Ic,t = Ic,0`
+/// may fail the set-apart / word-count gates of display-equation detection
+/// while still being plainly not a footnote. Font share, rich math symbols,
+/// or an ASCII operator with almost no prose words is enough.
+fn line_is_mathish(line: &ContentLine, style: &LineStyle) -> bool {
+    let text: String = line
+        .cells
+        .iter()
+        .filter_map(|cell| match cell.kind {
+            CellKind::Char(c) => Some(c),
+            CellKind::Image => None,
+        })
+        .collect();
+    if text.chars().filter(|c| !c.is_whitespace()).count() == 0 {
+        return false;
+    }
+    if is_equation_number(&text) {
+        return true;
+    }
+    if style.math >= EQUATION_MATH_FONT_SHARE {
+        return true;
+    }
+    let has_operator = text.chars().any(is_math_operator);
+    if !has_operator {
+        return false;
+    }
+    let has_rich = text
+        .chars()
+        .any(|c| is_math_symbol(c) && !matches!(c, '=' | '+' | '<' | '>'));
+    if has_rich {
+        return true;
+    }
+    // ASCII operator with almost no prose words: `Ic,t = Ic,0`, `n = 2`.
+    let mut words = 0usize;
+    let mut run = 0usize;
+    for c in text.chars().chain(std::iter::once(' ')) {
+        if c.is_alphabetic() && !is_math_symbol(c) {
+            run += 1;
+        } else {
+            if run >= 3 {
+                words += 1;
+            }
+            run = 0;
+        }
+    }
+    words <= EQUATION_MAX_WORDS
 }
 
 /// Whether `c` is a mathematical operator or relation — the mark that makes a
@@ -2110,6 +2313,16 @@ fn equation_ranges(lines: &[ContentLine], styles: &[LineStyle]) -> Vec<(usize, u
     ranges
 }
 
+/// Minimum rows / columns for the alignment-based (borderless) table detector.
+const ALIGN_TABLE_MIN_ROWS: usize = 3;
+const ALIGN_TABLE_MIN_COLS: usize = 2;
+/// A cell-like line is narrower than this share of the page's content width.
+const ALIGN_TABLE_MAX_WIDTH_SHARE: f32 = 0.48;
+/// How close two cell left-edges must be to share a column.
+const ALIGN_TABLE_COL_ALIGN: f32 = 4.0;
+/// How close two baselines must be to share a row.
+const ALIGN_TABLE_ROW_ALIGN: f32 = 3.0;
+
 /// How much of a line's own height must fall inside a table box for the line to
 /// be one of that table's rows. A row's ascenders and descenders can poke a
 /// point or two past the outer rule; a line the box merely cuts through
@@ -2121,6 +2334,150 @@ const TABLE_MEMBER_OVERLAP: f32 = 0.7;
 /// it. Measured against the table's own rhythm rather than against line height,
 /// so a table with generously padded rows keeps all of them.
 const TABLE_GAP_FACTOR: f32 = 1.8;
+
+/// Bounding boxes of borderless tables found by cell alignment.
+///
+/// MuPDF's hunt needs ruled vectors; many journal parameter tables have none.
+/// A grid of short lines whose left edges form ≥2 stable columns across ≥3
+/// rows is recovered here. Fail closed: one column, sparse rows, or a span
+/// that claims the whole page yields nothing.
+fn alignment_table_bboxes(lines: &[ContentLine]) -> Vec<Rect> {
+    let content_width = {
+        let x0 = lines
+            .iter()
+            .filter(|l| !l.cells.is_empty())
+            .map(|l| l.bbox.x0)
+            .fold(f32::INFINITY, f32::min);
+        let x1 = lines
+            .iter()
+            .filter(|l| !l.cells.is_empty())
+            .map(|l| l.bbox.x1)
+            .fold(f32::NEG_INFINITY, f32::max);
+        if !x0.is_finite() || x1 <= x0 {
+            return Vec::new();
+        }
+        x1 - x0
+    };
+    let cell_idxs: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| {
+            !l.cells.is_empty()
+                && !l.cells.iter().any(|c| matches!(c.kind, CellKind::Image))
+                && (l.bbox.x1 - l.bbox.x0) <= ALIGN_TABLE_MAX_WIDTH_SHARE * content_width
+        })
+        .map(|(i, _)| i)
+        .collect();
+    if cell_idxs.len() < ALIGN_TABLE_MIN_ROWS * ALIGN_TABLE_MIN_COLS {
+        return Vec::new();
+    }
+
+    // Cluster into rows by y0.
+    let mut order = cell_idxs;
+    order.sort_by(|&a, &b| lines[a].bbox.y0.total_cmp(&lines[b].bbox.y0));
+    let mut rows: Vec<Vec<usize>> = Vec::new();
+    for i in order {
+        let y = lines[i].bbox.y0;
+        match rows.last_mut() {
+            Some(row)
+                if (y - lines[*row.last().unwrap()].bbox.y0).abs() <= ALIGN_TABLE_ROW_ALIGN =>
+            {
+                row.push(i);
+            }
+            _ => rows.push(vec![i]),
+        }
+    }
+    rows.retain(|r| r.len() >= ALIGN_TABLE_MIN_COLS);
+    if rows.len() < ALIGN_TABLE_MIN_ROWS {
+        return Vec::new();
+    }
+
+    // Walk contiguous row runs; each run needs ≥2 x-columns that recur.
+    let mut out = Vec::new();
+    let mut run_start = 0usize;
+    while run_start < rows.len() {
+        let mut run_end = run_start + 1;
+        while run_end < rows.len() {
+            let prev_y = lines[*rows[run_end - 1].last().unwrap()].bbox.y1;
+            let next_y = lines[rows[run_end][0]].bbox.y0;
+            // A large vertical gap ends the grid.
+            if next_y - prev_y > 3.0 * ALIGN_TABLE_ROW_ALIGN + 12.0 {
+                break;
+            }
+            run_end += 1;
+        }
+        if run_end - run_start >= ALIGN_TABLE_MIN_ROWS {
+            let run = &rows[run_start..run_end];
+            if let Some(bbox) = alignment_run_bbox(lines, run, content_width) {
+                out.push(bbox);
+            }
+        }
+        run_start = run_end;
+    }
+    out
+}
+
+fn alignment_run_bbox(
+    lines: &[ContentLine],
+    rows: &[Vec<usize>],
+    content_width: f32,
+) -> Option<Rect> {
+    // Collect left-edge clusters that appear in ≥ half the rows (and ≥2).
+    let mut edges: Vec<f32> = rows
+        .iter()
+        .flat_map(|r| r.iter().map(|&i| lines[i].bbox.x0))
+        .collect();
+    edges.sort_by(f32::total_cmp);
+    let mut clusters: Vec<(f32, usize)> = Vec::new();
+    for x in edges {
+        match clusters
+            .last_mut()
+            .filter(|(rep, _)| (x - *rep).abs() <= ALIGN_TABLE_COL_ALIGN)
+        {
+            Some((rep, n)) => {
+                *rep = (*rep * *n as f32 + x) / (*n as f32 + 1.0);
+                *n += 1;
+            }
+            None => clusters.push((x, 1)),
+        }
+    }
+    let min_hits = rows.len().div_ceil(2);
+    let cols: Vec<f32> = clusters
+        .into_iter()
+        .filter(|&(_, n)| n >= min_hits.max(2))
+        .map(|(x, _)| x)
+        .collect();
+    if cols.len() < ALIGN_TABLE_MIN_COLS {
+        return None;
+    }
+    // Every row should land in ≥2 of those columns.
+    let rows_ok = rows
+        .iter()
+        .filter(|r| {
+            let hits = cols
+                .iter()
+                .filter(|&&cx| {
+                    r.iter()
+                        .any(|&i| (lines[i].bbox.x0 - cx).abs() <= ALIGN_TABLE_COL_ALIGN)
+                })
+                .count();
+            hits >= ALIGN_TABLE_MIN_COLS
+        })
+        .count();
+    if rows_ok < ALIGN_TABLE_MIN_ROWS {
+        return None;
+    }
+    let members: Vec<usize> = rows.iter().flatten().copied().collect();
+    let bbox = members
+        .iter()
+        .map(|&i| lines[i].bbox)
+        .reduce(|a, b| a.union(b))?;
+    // Fail closed: a "table" as wide as the page is almost certainly prose.
+    if bbox.x1 - bbox.x0 >= 0.9 * content_width {
+        return None;
+    }
+    Some(bbox)
+}
 
 /// Drop the lines at the edges of `members` that belong to the prose around the
 /// table rather than to the table itself.
@@ -3908,6 +4265,25 @@ mod tests {
     }
 
     #[test]
+    fn footnote_ranges_ignore_math_fragments_in_the_bottom_band() {
+        let (mut lines, mut styles) = body_lines(10, 400.0);
+        let y = 900.0;
+        // `Ic,t = Ic,0` shape: small, at the foot, but plainly mathematics.
+        lines.push(text_line_at_x(100.0, y, "Ic,t = Ic,0"));
+        styles.push(LineStyle {
+            size: 8.0,
+            bold: false,
+            math: 0.0,
+            angle: Some(0.0),
+            baseline: y + 6.0,
+        });
+        assert!(
+            footnote_ranges(&lines, &styles, 1000.0).is_empty(),
+            "math fragment must not become a footnote"
+        );
+    }
+
+    #[test]
     fn footnote_ranges_ignore_ordinary_body_text_near_the_foot() {
         // Same bottom-band position as the line above, but set at the body's
         // own size: a page that legitimately ends with body prose near the
@@ -4182,6 +4558,44 @@ mod tests {
             text_line_at(80.0, "\u{2022} the third file"),
         ];
         assert_eq!(list_items(&lines, &[]), vec![(1, 1), (2, 2), (3, 3)]);
+    }
+
+    #[test]
+    fn uppercase_initials_are_not_enumerated_list_markers() {
+        // Sidebar citations: `T. Author, …` must not corroborate into a list
+        // beside real `-` bullets.
+        let lines = vec![
+            text_line_at(20.0, "-"),
+            text_line_at(40.0, "T. Puetterich, F. Albrecht et al."),
+            text_line_at(60.0, "-"),
+            text_line_at(80.0, "K. Tsuchiya, H. Murakami et al."),
+        ];
+        // Indent the citation lines past the bullets.
+        let mut lines = lines;
+        indent(&mut lines[1], 10.0);
+        indent(&mut lines[3], 10.0);
+        let items = list_items(&lines, &[]);
+        assert!(
+            items.iter().all(|&(s, _)| {
+                let t = line_text(&lines[s]);
+                line_marker(&t).is_some_and(|(m, _)| m == Marker::Bullet)
+            }),
+            "enumerated initials must not become list starts: {items:?}"
+        );
+    }
+
+    #[test]
+    fn a_lone_bullet_pairs_with_text_emitted_before_it() {
+        // Emission order: citation text, then the `-` above it on the page.
+        let mut lines = vec![
+            text_line_at(40.0, "A.D. Xu, Y.H. Li, T. Yu et al."),
+            text_line_at(20.0, "-"),
+            text_line_at(80.0, "K. Tsuchiya, H. Murakami et al."),
+            text_line_at(60.0, "-"),
+        ];
+        indent(&mut lines[0], 10.0);
+        indent(&mut lines[2], 10.0);
+        assert_eq!(list_items(&lines, &[]), vec![(0, 1), (2, 3)]);
     }
 
     /// Indent a line past the list's markers, as a wrapped continuation sits.
@@ -4551,6 +4965,15 @@ mod tests {
     #[test]
     fn normalise_masks_digit_runs_and_folds_case() {
         assert_eq!(normalise_furniture_text("Page 12 of 340"), "page # of #");
+        assert_eq!(
+            normalise_furniture_text("Nucl. Fusion 66 (2026) 086003 (20pp)"),
+            normalise_furniture_text("Nucl. Fusion 66 (2026) 086003"),
+            "trailing page-count tags must not split a running head key"
+        );
+        assert!(furniture_text_matches(
+            &normalise_furniture_text("Nucl. Fusion 66 (2026) 086003"),
+            &normalise_furniture_text("Nucl. Fusion 66 (2026) 086003 Extra"),
+        ));
         assert_eq!(
             normalise_furniture_text("Shared MIME-info Database"),
             "shared mimeinfo database"
@@ -5300,6 +5723,88 @@ mod tests {
             !content.objects.iter().any(|o| o.kind == ObjectKind::Table),
             "prose reported as a table: {:?}",
             content.objects
+        );
+    }
+
+    #[test]
+    fn alignment_table_bboxes_finds_a_borderless_parameter_grid() {
+        // Two short columns, three rows — the shape MuPDF's vector hunt misses.
+        let lines = vec![
+            text_line_at_x(50.0, 100.0, "Parameter"),
+            text_line_at_x(250.0, 100.0, "Value"),
+            text_line_at_x(50.0, 120.0, "Major radius"),
+            text_line_at_x(250.0, 120.0, "5.00 m"),
+            text_line_at_x(50.0, 140.0, "Minor radius"),
+            text_line_at_x(250.0, 140.0, "2.17 m"),
+            text_line_at_x(50.0, 160.0, "Aspect ratio"),
+            text_line_at_x(250.0, 160.0, "2.30"),
+            // Wide prose below must not join the grid.
+            text_line_at_x(
+                50.0,
+                220.0,
+                "These dimensions define the envelope for the core.",
+            ),
+        ];
+        // Stretch the prose line so it fails the cell-width gate.
+        let mut lines = lines;
+        let last = lines.len() - 1;
+        lines[last].bbox.x1 = 500.0;
+        let boxes = alignment_table_bboxes(&lines);
+        assert_eq!(
+            boxes.len(),
+            1,
+            "expected one borderless table, got {boxes:?}"
+        );
+        assert!(boxes[0].y1 < 200.0, "prose must stay outside the table");
+    }
+
+    #[test]
+    fn alignment_table_bboxes_ignore_ordinary_two_column_prose() {
+        // Full-width-ish column lines are not cell-like.
+        let lines = vec![
+            text_line_at_x(
+                40.0,
+                100.0,
+                "Left column prose that fills most of its measure here.",
+            ),
+            text_line_at_x(
+                320.0,
+                100.0,
+                "Right column prose that fills most of its measure here.",
+            ),
+            text_line_at_x(
+                40.0,
+                120.0,
+                "More left column prose continuing the paragraph along.",
+            ),
+            text_line_at_x(
+                320.0,
+                120.0,
+                "More right column prose continuing the paragraph along.",
+            ),
+            text_line_at_x(
+                40.0,
+                140.0,
+                "Still more left column text for a third aligned row.",
+            ),
+            text_line_at_x(
+                320.0,
+                140.0,
+                "Still more right column text for a third aligned row.",
+            ),
+        ];
+        let mut lines = lines;
+        for line in &mut lines {
+            // ~half page each — above ALIGN_TABLE_MAX_WIDTH_SHARE of ~500pt width.
+            if line.bbox.x0 < 200.0 {
+                line.bbox.x1 = 290.0;
+            } else {
+                line.bbox.x1 = 550.0;
+            }
+        }
+        assert!(
+            alignment_table_bboxes(&lines).is_empty(),
+            "two-column prose must not become a table"
         );
     }
 
