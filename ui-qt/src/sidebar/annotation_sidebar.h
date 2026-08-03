@@ -47,6 +47,8 @@ public:
     HighlightListModel *model() const;
     QListView *listView() const;
     QAction *exportAction() const;
+    // Stable File-menu action; creates the Annotations panel on first trigger.
+    QAction *annotationsExportAction() const { return m_annotationsExportAction; }
     void focusList();
 
     HighlightsPanel *highlightsPanel() const { return m_highlights; }
@@ -56,10 +58,16 @@ signals:
     void focusCanvasRequested();
 
 private:
+    // Annotations UI is created on first use so offscreen smoke (and first
+    // paint beside a failed QOpenGLWidget) does not construct QPlainTextEdit /
+    // preview widgets until the Annotations page is actually shown.
+    void ensureAnnotationsPanel();
+
     CoreController *m_core = nullptr;
     QStackedWidget *m_stack = nullptr;
     HighlightsPanel *m_highlights = nullptr;
     AnnotationsPanel *m_annotations = nullptr;
+    QAction *m_annotationsExportAction = nullptr;
     SidebarPage m_activePage = SidebarPage::Highlights;
 };
 

@@ -44,7 +44,7 @@ jobs:
             build-essential clang libclang-dev cmake ninja-build \
             qt6-base-dev libqt6opengl6-dev qt6-wayland libgl1-mesa-dev \
             libfontconfig1-dev libfreetype-dev \
-            curl file ca-certificates unzip
+            curl file ca-certificates unzip xvfb
       - name: Install Rust
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
@@ -93,7 +93,7 @@ jobs:
           cargo run -p syodep-pdf --features test-support \
             --example make_fixture -- fixture.pdf 5
           chmod +x syodep-x86_64.AppImage
-          QT_QPA_PLATFORM=offscreen ./syodep-x86_64.AppImage \
+          xvfb-run -a ./syodep-x86_64.AppImage \
             --appimage-extract-and-run --smoke-test fixture.pdf \
             || { echo '--- smoke-progress.txt ---'; cat smoke-progress.txt 2>/dev/null || true; exit 1; }
       - uses: actions/upload-artifact@v4

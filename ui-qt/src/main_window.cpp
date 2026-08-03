@@ -77,8 +77,7 @@ MainWindow::MainWindow(QWidget *parent)
 
     QMenu *fileMenu = menuBar()->addMenu(tr("&File"));
     fileMenu->addAction(m_annotationSidebar->exportAction());
-    if (m_annotationSidebar->annotationsPanel())
-        fileMenu->addAction(m_annotationSidebar->annotationsPanel()->exportAction());
+    fileMenu->addAction(m_annotationSidebar->annotationsExportAction());
 
     QMenu *viewMenu = menuBar()->addMenu(tr("&View"));
     viewMenu->addAction(m_highlightsAction);

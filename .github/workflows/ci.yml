@@ -97,7 +97,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake ninja-build qt6-base-dev \
             libqt6opengl6-dev libgl1-mesa-dev libfontconfig1-dev \
-            libfreetype-dev
+            libfreetype-dev xvfb
       - name: Configure
         run: cmake -B build -G Ninja
       - name: Build
@@ -106,7 +106,9 @@ jobs:
         run: |
           cargo run -p syodep-pdf --features test-support \
             --example make_fixture -- fixture.pdf 5
-          QT_QPA_PLATFORM=offscreen ./build/ui-qt/syodep --smoke-test fixture.pdf \
+          # xvfb gives a real X display so QOpenGLWidget/QTextEdit painting is
+          # less brittle than QT_QPA_PLATFORM=offscreen on the runner's Qt 6.4.
+          xvfb-run -a ./build/ui-qt/syodep --smoke-test fixture.pdf \
             || { echo '--- smoke-progress.txt ---'; cat smoke-progress.txt 2>/dev/null || true; exit 1; }
 
   qt-build-windows:
@@ -191,14 +193,15 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake ninja-build qt6-base-dev \
             libqt6opengl6-dev libgl1-mesa-dev libfontconfig1-dev \
-            libfreetype-dev
+            libfreetype-dev xvfb
       - name: Build release artifact
         run: |
           cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build build
           cargo run -p syodep-pdf --features test-support \
             --example make_fixture -- fixture.pdf 5
-          QT_QPA_PLATFORM=offscreen ./build/ui-qt/syodep --smoke-test fixture.pdf
+          xvfb-run -a ./build/ui-qt/syodep --smoke-test fixture.pdf \
+            || { echo '--- smoke-progress.txt ---'; cat smoke-progress.txt 2>/dev/null || true; exit 1; }
       - name: Package artifact
         run: |
           mkdir -p dist/package

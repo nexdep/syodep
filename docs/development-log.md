@@ -7,6 +7,15 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-08-03 — Fix Linux smoke: lazy Annotations panel + xvfb
+
+CI still segfaulted on `MainWindow::show` with the Annotations widgets in the
+dock tree under `QT_QPA_PLATFORM=offscreen` (Qt 6.4). The Annotations page is
+now created on first show/export, and Linux CI/release smoke runs under
+`xvfb-run` instead of the offscreen QPA plugin.
+
+---
+
 ## 2026-08-03 — Fix offscreen smoke segfault with lazy Markdown preview
 
 CI's Qt 6.4 offscreen smoke segfaulted while constructing MainWindow once the

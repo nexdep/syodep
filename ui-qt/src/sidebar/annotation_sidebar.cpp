@@ -21,26 +21,44 @@ AnnotationSidebar::AnnotationSidebar(CoreController *core, QWidget *parent)
 
     m_stack = new QStackedWidget(this);
     m_highlights = new HighlightsPanel(m_core, m_stack);
-    m_annotations = new AnnotationsPanel(m_core, m_stack);
     m_stack->addWidget(m_highlights);
-    m_stack->addWidget(m_annotations);
     root->addWidget(m_stack);
 
     connect(m_highlights, &HighlightsPanel::focusCanvasRequested,
             this, &AnnotationSidebar::focusCanvasRequested);
-    connect(m_annotations, &AnnotationsPanel::focusCanvasRequested,
-            this, &AnnotationSidebar::focusCanvasRequested);
+
+    // Owned here so File → Export stays available before the Annotations page
+    // has been realized. The panel is created on first trigger / page show.
+    m_annotationsExportAction = new QAction(tr("Export annotations as Markdown…"), this);
+    connect(m_annotationsExportAction, &QAction::triggered, this, [this]() {
+        ensureAnnotationsPanel();
+        m_annotations->exportAction()->trigger();
+    });
 
     showPage(SidebarPage::Highlights);
+}
+
+void AnnotationSidebar::ensureAnnotationsPanel()
+{
+    if (m_annotations)
+        return;
+
+    m_annotations = new AnnotationsPanel(m_core, m_stack);
+    m_stack->addWidget(m_annotations);
+    connect(m_annotations, &AnnotationsPanel::focusCanvasRequested,
+            this, &AnnotationSidebar::focusCanvasRequested);
 }
 
 void AnnotationSidebar::showPage(SidebarPage page)
 {
     clearPendingKeys();
     m_activePage = page;
-    m_stack->setCurrentWidget(page == SidebarPage::Highlights
-                                  ? static_cast<QWidget *>(m_highlights)
-                                  : static_cast<QWidget *>(m_annotations));
+    if (page == SidebarPage::Annotations) {
+        ensureAnnotationsPanel();
+        m_stack->setCurrentWidget(m_annotations);
+    } else {
+        m_stack->setCurrentWidget(m_highlights);
+    }
 }
 
 void AnnotationSidebar::focusActivePage()
@@ -49,6 +67,7 @@ void AnnotationSidebar::focusActivePage()
         m_highlights->focusList();
         return;
     }
+    ensureAnnotationsPanel();
     if (m_annotations->isCreating() || m_annotations->isDirty())
         m_annotations->focusEditor();
     else
@@ -57,6 +76,7 @@ void AnnotationSidebar::focusActivePage()
 
 void AnnotationSidebar::beginAnnotationCreation()
 {
+    ensureAnnotationsPanel();
     showPage(SidebarPage::Annotations);
     m_annotations->beginCreation();
 }
@@ -68,13 +88,16 @@ bool AnnotationSidebar::isDirty() const
 
 bool AnnotationSidebar::confirmDiscardDirty(const QString &actionLabel)
 {
+    if (!m_annotations)
+        return true;
     return m_annotations->confirmDiscardDirty(actionLabel);
 }
 
 void AnnotationSidebar::clearPendingKeys()
 {
     m_highlights->clearPendingKey();
-    m_annotations->clearPendingKey();
+    if (m_annotations)
+        m_annotations->clearPendingKey();
 }
 
 void AnnotationSidebar::refreshAnnotations(bool force)
