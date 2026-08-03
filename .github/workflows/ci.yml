@@ -106,7 +106,8 @@ jobs:
         run: |
           cargo run -p syodep-pdf --features test-support \
             --example make_fixture -- fixture.pdf 5
-          QT_QPA_PLATFORM=offscreen ./build/ui-qt/syodep --smoke-test fixture.pdf
+          QT_QPA_PLATFORM=offscreen ./build/ui-qt/syodep --smoke-test fixture.pdf \
+            || { echo '--- smoke-progress.txt ---'; cat smoke-progress.txt 2>/dev/null || true; exit 1; }
 
   qt-build-windows:
     name: Qt shell build + smoke test (Windows)
@@ -154,6 +155,10 @@ jobs:
           $proc = Start-Process -FilePath "build/ui-qt/syodep.exe" `
             -ArgumentList "--smoke-test", "fixture.pdf" -PassThru -Wait
           if ($proc.ExitCode -ne 0) {
+            if (Test-Path smoke-progress.txt) {
+              Write-Host "--- smoke-progress.txt ---"
+              Get-Content smoke-progress.txt
+            }
             Write-Error "smoke test failed with exit code $($proc.ExitCode)"
             exit 1
           }

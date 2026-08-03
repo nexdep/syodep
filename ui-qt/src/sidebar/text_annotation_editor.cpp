@@ -72,9 +72,11 @@ TextAnnotationEditor::TextAnnotationEditor(QWidget *parent)
     m_editor->setPlaceholderText(tr("Write a Markdown annotation…"));
     m_editor->setTabChangesFocus(false);
     m_editor->installEventFilter(this);
-    m_preview = new SafeMarkdownView(m_tabs);
+    // Placeholder until the Preview tab is opened — avoids constructing a
+    // QTextBrowser beside a failed offscreen GL context during smoke tests.
+    m_previewPlaceholder = new QWidget(m_tabs);
     m_tabs->addTab(m_editor, tr("Edit"));
-    m_tabs->addTab(m_preview, tr("Preview"));
+    m_tabs->addTab(m_previewPlaceholder, tr("Preview"));
     m_tabs->installEventFilter(this);
     pageLayout->addWidget(m_tabs, 1);
 
@@ -111,6 +113,25 @@ TextAnnotationEditor::TextAnnotationEditor(QWidget *parent)
     updateActions();
 }
 
+void TextAnnotationEditor::ensurePreview()
+{
+    if (m_preview)
+        return;
+
+    m_preview = new SafeMarkdownView(m_tabs);
+    m_preview->installEventFilter(this);
+    const int previewIndex = m_tabs->indexOf(m_previewPlaceholder);
+    if (previewIndex >= 0) {
+        m_tabs->removeTab(previewIndex);
+        m_previewPlaceholder->deleteLater();
+        m_previewPlaceholder = nullptr;
+        m_tabs->insertTab(previewIndex, m_preview, tr("Preview"));
+        m_tabs->setCurrentIndex(previewIndex);
+    } else {
+        m_tabs->addTab(m_preview, tr("Preview"));
+    }
+}
+
 void TextAnnotationEditor::loadAnnotation(const TextAnnotationListItem &item)
 {
     m_loading = true;
@@ -126,7 +147,8 @@ void TextAnnotationEditor::loadAnnotation(const TextAnnotationListItem &item)
     setSourceQuote(item.text);
     m_stack->setCurrentWidget(m_editorPage);
     setDirty(false);
-    updatePreview();
+    if (m_tabs->currentIndex() == 1)
+        updatePreview();
     updateActions();
     m_loading = false;
 }
@@ -146,7 +168,8 @@ void TextAnnotationEditor::beginCreate(const QString &sourceText)
     setSourceQuote(sourceText);
     m_stack->setCurrentWidget(m_editorPage);
     setDirty(false);
-    updatePreview();
+    if (m_tabs->currentIndex() == 1)
+        updatePreview();
     updateActions();
     m_loading = false;
     focusEditor();
@@ -165,7 +188,8 @@ void TextAnnotationEditor::clearAnnotation()
     }
     m_pageLabel->clear();
     m_sourceQuote->clear();
-    m_preview->setMarkdown(QString());
+    if (m_preview)
+        m_preview->setMarkdown(QString());
     m_emptyLabel->setText(tr("Select an annotation to view or edit."));
     m_stack->setCurrentWidget(m_emptyLabel);
     setDirty(false);
@@ -216,7 +240,8 @@ void TextAnnotationEditor::reloadPreservingDraft(const TextAnnotationListItem &i
     setSourceQuote(item.text);
     m_stack->setCurrentWidget(m_editorPage);
     setDirty(draft != savedBaseline);
-    updatePreview();
+    if (m_tabs->currentIndex() == 1)
+        updatePreview();
     updateActions();
     m_loading = false;
 }
@@ -227,14 +252,16 @@ void TextAnnotationEditor::revert()
         const QSignalBlocker blocker(m_editor);
         m_editor->clear();
         setDirty(false);
-        updatePreview();
+        if (m_tabs->currentIndex() == 1)
+            updatePreview();
         updateActions();
         return;
     }
     const QSignalBlocker blocker(m_editor);
     m_editor->setPlainText(m_savedMarkdown);
     setDirty(false);
-    updatePreview();
+    if (m_tabs->currentIndex() == 1)
+        updatePreview();
     updateActions();
 }
 
@@ -303,7 +330,9 @@ void TextAnnotationEditor::onCancelClicked()
 
 void TextAnnotationEditor::updatePreview()
 {
-    m_preview->setMarkdown(m_editor->toPlainText());
+    ensurePreview();
+    if (m_preview)
+        m_preview->setMarkdown(m_editor->toPlainText());
 }
 
 void TextAnnotationEditor::updateActions()

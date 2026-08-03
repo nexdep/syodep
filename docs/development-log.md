@@ -7,6 +7,15 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-08-03 — Fix offscreen smoke segfault with lazy Markdown preview
+
+CI's Qt 6.4 offscreen smoke segfaulted while constructing MainWindow once the
+Annotations editor eagerly built a `QTextBrowser` markdown preview beside a
+failed `QOpenGLWidget` context. The Preview tab now creates `SafeMarkdownView`
+on first visit. Smoke writes `smoke-progress.txt` checkpoints for triage.
+
+---
+
 ## 2026-08-03 — Stabilize highlights and Markdown annotations (Step 8)
 
 Reliability pass over Steps 6–7. No search, chat, tags, colors, combined export,

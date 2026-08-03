@@ -94,7 +94,8 @@ jobs:
             --example make_fixture -- fixture.pdf 5
           chmod +x syodep-x86_64.AppImage
           QT_QPA_PLATFORM=offscreen ./syodep-x86_64.AppImage \
-            --appimage-extract-and-run --smoke-test fixture.pdf
+            --appimage-extract-and-run --smoke-test fixture.pdf \
+            || { echo '--- smoke-progress.txt ---'; cat smoke-progress.txt 2>/dev/null || true; exit 1; }
       - uses: actions/upload-artifact@v4
         with:
           name: syodep-x86_64-appimage
@@ -152,6 +153,10 @@ jobs:
           $proc = Start-Process -FilePath "syodep-win64/syodep.exe" `
             -ArgumentList "--smoke-test", "fixture.pdf" -PassThru -Wait
           if ($proc.ExitCode -ne 0) {
+            if (Test-Path smoke-progress.txt) {
+              Write-Host "--- smoke-progress.txt ---"
+              Get-Content smoke-progress.txt
+            }
             Write-Error "staged smoke test failed with exit code $($proc.ExitCode)"
             exit 1
           }

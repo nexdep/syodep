@@ -62,6 +62,10 @@ private slots:
     void onCancelClicked();
 
 private:
+    // QTextBrowser markdown preview is created on first Preview-tab visit.
+    // Constructing/painting it under QT_QPA_PLATFORM=offscreen with a failed
+    // QOpenGLWidget sibling has segfaulted on CI's Qt 6.4.
+    void ensurePreview();
     void updatePreview();
     void updateActions();
     void setDirty(bool dirty);
@@ -84,6 +88,7 @@ private:
     QLabel *m_dirtyLabel = nullptr;
     QPlainTextEdit *m_editor = nullptr;
     SafeMarkdownView *m_preview = nullptr;
+    QWidget *m_previewPlaceholder = nullptr;
     QTabWidget *m_tabs = nullptr;
     QPushButton *m_saveButton = nullptr;
     QPushButton *m_revertButton = nullptr;

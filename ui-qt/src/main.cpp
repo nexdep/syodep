@@ -31,8 +31,21 @@
 
 namespace {
 
+void smokeStep(const char *msg)
+{
+    std::fprintf(stderr, "SMOKE: %s\n", msg);
+    std::fflush(stderr);
+    if (FILE *f = std::fopen("smoke-progress.txt", "a")) {
+        std::fprintf(f, "%s\n", msg);
+        std::fclose(f);
+    }
+}
+
 int runSmokeTest(const QString &pdfPath)
 {
+    std::remove("smoke-progress.txt");
+    smokeStep("start");
+
     // Drive the core through CoreController without persistence so CI runs
     // do not touch the user database.
     syodep::CoreController core(syodep::CorePersistence::Disabled);
@@ -55,6 +68,7 @@ int runSmokeTest(const QString &pdfPath)
         std::fprintf(stderr, "SMOKE FAIL: render\n");
         return 1;
     }
+    smokeStep("core render ok");
 
     // Annotation snapshot must be queryable (empty is fine for a fresh PDF).
     const syodep::HighlightSnapshot snapshot = core.highlightSnapshot();
@@ -86,6 +100,7 @@ int runSmokeTest(const QString &pdfPath)
     // word first, so the list can only be right if it is sorted by position.
     for (const char *key : {"f", "w", "w", "a", "a", "b", "a", "a"})
         annotationCore.sendKey(QString::fromUtf8(key));
+    smokeStep("highlights committed");
 
     syodep::AnnotationSidebar sidebar(&annotationCore);
     sidebar.refreshAnnotations(true);
@@ -134,6 +149,7 @@ int runSmokeTest(const QString &pdfPath)
         return 1;
     }
     exported.close();
+    smokeStep("highlights export ok");
 
     // Deleting a Pending highlight: the row goes, the other stays, and the
     // selection lands on what took its place.
@@ -150,6 +166,7 @@ int runSmokeTest(const QString &pdfPath)
         std::fprintf(stderr, "SMOKE FAIL: wrong highlight survived the delete\n");
         return 1;
     }
+    smokeStep("highlight delete ok");
 
     // Markdown annotation create → save → export → delete, via the same core
     // the Highlights path used (temp DB; never the user profile store).
@@ -198,9 +215,12 @@ int runSmokeTest(const QString &pdfPath)
         std::fprintf(stderr, "SMOKE FAIL: annotation survived delete\n");
         return 1;
     }
+    smokeStep("annotation api ok");
 
     // And once through the actual widgets: construct, show, paint one frame.
+    smokeStep("mainwindow construct");
     syodep::MainWindow window;
+    smokeStep("mainwindow constructed");
     if (!window.annotationSidebar() || !window.annotationsDock()) {
         std::fprintf(stderr, "SMOKE FAIL: annotation sidebar not constructed\n");
         return 1;
@@ -219,6 +239,7 @@ int runSmokeTest(const QString &pdfPath)
         std::fprintf(stderr, "SMOKE FAIL: MainWindow open %s\n", qPrintable(pdfPath));
         return 1;
     }
+    smokeStep("mainwindow open ok");
     window.annotationSidebar()->refreshAnnotations(true);
     const auto state = window.annotationSidebar()->contentState();
     if (state != syodep::AnnotationSidebar::ContentState::EmptyHighlights
@@ -229,6 +250,7 @@ int runSmokeTest(const QString &pdfPath)
 
     window.show();
     QApplication::processEvents();
+    smokeStep("mainwindow shown");
 
     // Highlights ↔ Annotations page matrix: self-toggle hides; cross-toggle
     // substitutes; hide leaves the canvas focused.
@@ -239,7 +261,9 @@ int runSmokeTest(const QString &pdfPath)
         std::fprintf(stderr, "SMOKE FAIL: Highlights page not visible\n");
         return 1;
     }
+    smokeStep("highlights page ok");
     window.toggleAnnotationsSidebar();
+    smokeStep("annotations page toggled");
     if (window.visibleSidebarPage() != syodep::SidebarPage::Annotations
         || !window.annotationsToggleAction()->isChecked()
         || window.highlightsToggleAction()->isChecked()) {
@@ -263,11 +287,14 @@ int runSmokeTest(const QString &pdfPath)
         std::fprintf(stderr, "SMOKE FAIL: hideSidebar left a visible page\n");
         return 1;
     }
+    smokeStep("sidebar matrix ok");
 
     QTimer::singleShot(0, &window, &QWidget::close);
     QApplication::processEvents();
+    smokeStep("closed");
 
     std::printf("SMOKE OK\n");
+    std::fflush(stdout);
     return 0;
 }
 
