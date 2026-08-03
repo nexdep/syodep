@@ -11,6 +11,8 @@
 //!   `<Home>`, `<End>`, `<BS>`.
 //! - Modifiers go inside the brackets: `<C-d>` (ctrl), `<A-x>` (alt),
 //!   `<C-A-d>` (both). Shift on letters is expressed by case: `<C-G>`.
+//! - A literal `<` is written bracketed — `<<>`, or `<C-<>` with ctrl —
+//!   because a bare `<` opens a bracket group.
 //! - A *sequence* is a concatenation of chords: `gg`, `zw`, `g<C-d>`.
 
 use std::fmt;
@@ -111,7 +113,12 @@ impl Chord {
 
 impl fmt::Display for Chord {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let needs_brackets = self.ctrl || self.alt || matches!(self.key, Key::Named(_));
+        // A literal '<' must render bracketed ("<<>"), or the output would
+        // open a bracket group and fail to parse back.
+        let needs_brackets = self.ctrl
+            || self.alt
+            || matches!(self.key, Key::Named(_))
+            || matches!(self.key, Key::Char('<'));
         if needs_brackets {
             write!(f, "<")?;
             if self.ctrl {
@@ -365,10 +372,39 @@ mod tests {
 
     #[test]
     fn display_round_trips() {
-        for s in ["j", "G", "gg", "<C-d>", "<Esc>", "<C-A-Left>", "g<C-d>"] {
+        for s in [
+            "j",
+            "G",
+            "gg",
+            "<C-d>",
+            "<Esc>",
+            "<C-A-Left>",
+            "g<C-d>",
+            "<<>",
+        ] {
             let chords = parse_sequence(s).unwrap();
             let rendered: String = chords.iter().map(|c| c.to_string()).collect();
             assert_eq!(parse_sequence(&rendered).unwrap(), chords, "for {s}");
         }
+    }
+
+    /// Regression: the shell encodes a pressed `<` as `<<>`, because a bare
+    /// `<` opens a bracket group and is rejected as unclosed — the key would
+    /// otherwise be silently swallowed and unbindable.
+    #[test]
+    fn literal_less_than_is_written_bracketed() {
+        assert_eq!(parse_sequence("<<>").unwrap(), vec![Chord::char('<')]);
+        assert_eq!(
+            parse_sequence("<C-<>").unwrap(),
+            vec![Chord {
+                key: Key::Char('<'),
+                ctrl: true,
+                alt: false
+            }]
+        );
+        assert_eq!(Chord::char('<').to_string(), "<<>");
+        // A bare `<` stays an error rather than becoming a fourth spelling.
+        let err = parse_sequence("<").unwrap_err();
+        assert!(err.message.contains("unclosed"), "{err}");
     }
 }

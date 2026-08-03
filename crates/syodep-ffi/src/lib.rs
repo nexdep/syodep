@@ -42,6 +42,9 @@ pub struct SyoApp {
     visual_color: SyoColor,
     /// Highlight colour, from `[view] highlight_color`/`highlight_opacity`.
     highlight_color: SyoColor,
+    /// Opacity applied to every pending-highlight overlay group (captured
+    /// colours supply the RGB; this supplies the alpha).
+    highlight_opacity: f32,
     /// Pause before a half-typed sequence resolves, from `[input] timeout_ms`.
     key_timeout_ms: u32,
 }
@@ -328,6 +331,7 @@ pub unsafe extern "C" fn syo_app_new(
         );
         warnings.extend(w);
         let key_timeout_ms = config.input.timeout_ms;
+        let highlight_opacity = config.view.highlight_opacity.clamp(0.0, 1.0);
         let mut app = App::new(config, storage);
         for warning in warnings {
             app.report_error(warning);
@@ -340,6 +344,7 @@ pub unsafe extern "C" fn syo_app_new(
             focus_color,
             visual_color,
             highlight_color,
+            highlight_opacity,
             key_timeout_ms,
         }
     });
@@ -405,6 +410,20 @@ pub unsafe extern "C" fn syo_app_set_viewport(app: *mut SyoApp, width: f32, heig
         let _ = catch_unwind(AssertUnwindSafe(|| {
             app.app.set_viewport_size(width, height)
         }));
+    }
+}
+
+/// Physical pixels per logical pixel (the shell's `devicePixelRatio`).
+/// Configured scroll distances are logical; the core multiplies them by this
+/// so a 2× display scrolls the same visual distance as a 1× one. Values below
+/// 1.0 are clamped to 1.0.
+///
+/// # Safety
+/// `app` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn syo_app_set_device_pixel_ratio(app: *mut SyoApp, ratio: f32) {
+    if let Some(app) = unsafe { app.as_mut() } {
+        let _ = catch_unwind(AssertUnwindSafe(|| app.app.set_device_pixel_ratio(ratio)));
     }
 }
 
@@ -635,9 +654,9 @@ pub unsafe extern "C" fn syo_app_selection(app: *const SyoApp) -> SyoOverlay {
 /// them). Distinct from [`syo_app_highlight_list`], which returns annotation
 /// metadata for every stored highlight.
 ///
-/// One call for both pending forms, and one colour, because the shell merges
-/// an overlay's rectangles into a single fill — two overlays in the same colour
-/// would double-blend wherever a pending highlight overlapped a stored one.
+/// Prefer [`syo_app_highlight_overlays`] when the shell needs each group's
+/// captured colour. This single-overlay form keeps geometry-only callers
+/// (smoke tests) working and paints everything in the current config colour.
 /// The result must be released with [`syo_overlay_free`].
 ///
 /// # Safety
@@ -651,6 +670,107 @@ pub unsafe extern "C" fn syo_app_highlights(app: *const SyoApp) -> SyoOverlay {
         overlay_from(app.app.highlight_screen_rects())
     }))
     .unwrap_or_else(|_| invalid_overlay())
+}
+
+/// One colour-grouped highlight overlay. `rects` is owned; free the whole
+/// list with [`syo_highlight_overlay_list_free`].
+#[repr(C)]
+pub struct SyoHighlightOverlay {
+    pub color: SyoColor,
+    pub rects: *mut SyoRect,
+    pub rect_count: usize,
+}
+
+/// Pending highlights grouped by captured colour. Owned by the caller; free
+/// with [`syo_highlight_overlay_list_free`].
+#[repr(C)]
+pub struct SyoHighlightOverlayList {
+    pub items: *mut SyoHighlightOverlay,
+    pub count: usize,
+}
+
+fn empty_highlight_overlay_list() -> *mut SyoHighlightOverlayList {
+    Box::into_raw(Box::new(SyoHighlightOverlayList {
+        items: std::ptr::null_mut(),
+        count: 0,
+    }))
+}
+
+/// Pending highlights grouped by the colour each one captured at creation.
+/// Alpha comes from the current `[view] highlight_opacity`. Same-colour
+/// rects share one group so the shell can merge them into a single Multiply
+/// fill. Free with [`syo_highlight_overlay_list_free`].
+///
+/// # Safety
+/// `app` must be NULL or valid.
+#[no_mangle]
+pub unsafe extern "C" fn syo_app_highlight_overlays(
+    app: *const SyoApp,
+) -> *mut SyoHighlightOverlayList {
+    let Some(app) = (unsafe { app.as_ref() }) else {
+        return empty_highlight_overlay_list();
+    };
+    catch_unwind(AssertUnwindSafe(|| {
+        let Some(groups) = app.app.highlight_overlay_groups() else {
+            return empty_highlight_overlay_list();
+        };
+        let alpha = (app.highlight_opacity * 255.0).round() as u8;
+        let fallback = app.highlight_color;
+        let items: Box<[SyoHighlightOverlay]> = groups
+            .into_iter()
+            .map(|(hex, rects)| {
+                let (r, g, b) = syodep_config::parse_hex_color(&hex)
+                    .unwrap_or((fallback.r, fallback.g, fallback.b));
+                let boxed: Box<[SyoRect]> = rects
+                    .into_iter()
+                    .map(|rect| SyoRect {
+                        x: rect.x,
+                        y: rect.y,
+                        width: rect.width,
+                        height: rect.height,
+                    })
+                    .collect();
+                let rect_count = boxed.len();
+                SyoHighlightOverlay {
+                    color: SyoColor { r, g, b, a: alpha },
+                    rects: Box::into_raw(boxed) as *mut SyoRect,
+                    rect_count,
+                }
+            })
+            .collect();
+        let count = items.len();
+        let items_ptr = Box::into_raw(items) as *mut SyoHighlightOverlay;
+        Box::into_raw(Box::new(SyoHighlightOverlayList {
+            items: items_ptr,
+            count,
+        }))
+    }))
+    .unwrap_or_else(|_| empty_highlight_overlay_list())
+}
+
+/// Free a list returned by [`syo_app_highlight_overlays`]. A no-op for NULL.
+///
+/// # Safety
+/// `list` must be NULL or a pointer from [`syo_app_highlight_overlays`].
+#[no_mangle]
+pub unsafe extern "C" fn syo_highlight_overlay_list_free(list: *mut SyoHighlightOverlayList) {
+    if list.is_null() {
+        return;
+    }
+    let _ = catch_unwind(AssertUnwindSafe(|| unsafe {
+        let list = Box::from_raw(list);
+        if !list.items.is_null() && list.count > 0 {
+            let items = Box::from_raw(std::ptr::slice_from_raw_parts_mut(list.items, list.count));
+            for item in items.iter() {
+                if !item.rects.is_null() && item.rect_count > 0 {
+                    drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(
+                        item.rects,
+                        item.rect_count,
+                    )));
+                }
+            }
+        }
+    }));
 }
 
 /// Free the `rects` buffer of a [`SyoOverlay`]. A no-op for an invalid overlay,
@@ -736,7 +856,10 @@ pub unsafe extern "C" fn syo_app_highlight_list(app: *const SyoApp) -> *mut SyoH
         if summaries.is_empty() {
             return empty_highlight_list(revision);
         }
-        let mut items: Vec<SyoHighlightItem> = summaries
+        // A boxed slice, not a leaked Vec: the free side rebuilds the
+        // allocation from `count`, which is only the allocation's true size
+        // once capacity has been shrunk to length.
+        let items: Box<[SyoHighlightItem]> = summaries
             .into_iter()
             .map(|s| SyoHighlightItem {
                 id: s.id.0,
@@ -748,8 +871,7 @@ pub unsafe extern "C" fn syo_app_highlight_list(app: *const SyoApp) -> *mut SyoH
             })
             .collect();
         let count = items.len();
-        let items_ptr = items.as_mut_ptr();
-        std::mem::forget(items);
+        let items_ptr = Box::into_raw(items) as *mut SyoHighlightItem;
         Box::into_raw(Box::new(SyoHighlightList {
             items: items_ptr,
             count,
@@ -937,7 +1059,9 @@ pub unsafe extern "C" fn syo_app_text_annotation_list(
         if summaries.is_empty() {
             return empty_text_annotation_list(revision);
         }
-        let mut items: Vec<SyoTextAnnotationItem> = summaries
+        // Boxed slice for the same reason as `syo_app_highlight_list`: the
+        // free side reconstructs the allocation from `count` alone.
+        let items: Box<[SyoTextAnnotationItem]> = summaries
             .into_iter()
             .map(|s| SyoTextAnnotationItem {
                 id: s.id.0,
@@ -948,8 +1072,7 @@ pub unsafe extern "C" fn syo_app_text_annotation_list(
             })
             .collect();
         let count = items.len();
-        let items_ptr = items.as_mut_ptr();
-        std::mem::forget(items);
+        let items_ptr = Box::into_raw(items) as *mut SyoTextAnnotationItem;
         Box::into_raw(Box::new(SyoTextAnnotationList {
             items: items_ptr,
             count,
@@ -2034,6 +2157,159 @@ mod tests {
                 .unwrap()
                 .is_empty());
 
+            syo_app_free(app);
+        }
+    }
+
+    /// Regression test for the list allocation contract: the free functions
+    /// rebuild the items allocation from `count` alone, which is only sound
+    /// because the list builders hand out boxed slices (capacity == length).
+    /// A leaked `Vec` with spare capacity would deallocate with the wrong
+    /// layout here — undefined behavior that Miri or a checked allocator
+    /// flags on exactly this multi-item round trip.
+    #[test]
+    fn multi_item_lists_round_trip_through_free() {
+        let dir = tempfile::tempdir().unwrap();
+        let pdf_path = dir.path().join("doc.pdf");
+        std::fs::write(
+            &pdf_path,
+            syodep_pdf::test_support::pdf_with_pages(&["alpha beta gamma delta"]),
+        )
+        .unwrap();
+        let db_path = CString::new(dir.path().join("db.sqlite3").display().to_string()).unwrap();
+        let send = |app: *mut SyoApp, keys: &[&str]| unsafe {
+            for key in keys {
+                let c_key = CString::new(*key).unwrap();
+                syo_app_key_event(app, c_key.as_ptr());
+            }
+        };
+
+        unsafe {
+            let app = syo_app_new(std::ptr::null(), db_path.as_ptr());
+            syo_app_set_viewport(app, 595.0, 600.0);
+            let c_pdf = CString::new(pdf_path.display().to_string()).unwrap();
+            assert!(syo_app_open_document(app, c_pdf.as_ptr()));
+
+            // Three highlights: commit returns to focus mode on the moving
+            // end, so `w` walks to the next word between commits.
+            send(app, &["f", "w", "a", "a"]);
+            send(app, &["w", "a", "a"]);
+            send(app, &["w", "a", "a"]);
+
+            let list = syo_app_highlight_list(app);
+            assert_eq!((*list).count, 3);
+            let items = std::slice::from_raw_parts((*list).items, (*list).count);
+            let texts: Vec<String> = items
+                .iter()
+                .map(|i| CStr::from_ptr(i.text).to_str().unwrap().to_owned())
+                .collect();
+            assert_eq!(texts, ["alpha", "beta", "gamma"]);
+            syo_highlight_list_free(list);
+
+            // Two text annotations through the pending-anchor flow.
+            let body_one = CString::new("note one").unwrap();
+            let body_two = CString::new("note two").unwrap();
+            for body in [&body_one, &body_two] {
+                send(app, &["n"]);
+                let mut id = 0i64;
+                let mut effects = 0u32;
+                assert!(syo_app_create_text_annotation(
+                    app,
+                    body.as_ptr(),
+                    &mut id,
+                    &mut effects
+                ));
+                assert!(id > 0);
+            }
+
+            let list = syo_app_text_annotation_list(app);
+            assert_eq!((*list).count, 2);
+            let items = std::slice::from_raw_parts((*list).items, (*list).count);
+            let bodies: Vec<String> = items
+                .iter()
+                .map(|i| CStr::from_ptr(i.body_markdown).to_str().unwrap().to_owned())
+                .collect();
+            assert_eq!(bodies, ["note one", "note two"]);
+            syo_text_annotation_list_free(list);
+            syo_text_annotation_list_free(std::ptr::null_mut());
+
+            syo_app_free(app);
+        }
+    }
+
+    #[test]
+    fn highlight_overlays_round_trip_per_captured_color() {
+        let dir = tempfile::tempdir().unwrap();
+        let pdf_path = dir.path().join("doc.pdf");
+        std::fs::write(
+            &pdf_path,
+            syodep_pdf::test_support::pdf_with_pages(&["alpha beta"]),
+        )
+        .unwrap();
+        let db_file = dir.path().join("db.sqlite3");
+        {
+            let storage = Storage::open(&db_file).unwrap();
+            let fingerprint = Storage::fingerprint_file(&pdf_path).unwrap();
+            let document_id = storage
+                .upsert_document(&fingerprint, &pdf_path.display().to_string())
+                .unwrap();
+            storage
+                .insert_highlight(
+                    document_id,
+                    "#ff0000",
+                    "alpha",
+                    &[syodep_storage::HighlightRect {
+                        page: 0,
+                        x0: 72.0,
+                        y0: 100.0,
+                        x1: 120.0,
+                        y1: 112.0,
+                    }],
+                )
+                .unwrap();
+            storage
+                .insert_highlight(
+                    document_id,
+                    "#00aa00",
+                    "beta",
+                    &[syodep_storage::HighlightRect {
+                        page: 0,
+                        x0: 130.0,
+                        y0: 100.0,
+                        x1: 170.0,
+                        y1: 112.0,
+                    }],
+                )
+                .unwrap();
+        }
+        let db_path = CString::new(db_file.display().to_string()).unwrap();
+        unsafe {
+            let empty = syo_app_highlight_overlays(std::ptr::null());
+            assert_eq!((*empty).count, 0);
+            syo_highlight_overlay_list_free(empty);
+            syo_highlight_overlay_list_free(std::ptr::null_mut());
+
+            let app = syo_app_new(std::ptr::null(), db_path.as_ptr());
+            syo_app_set_viewport(app, 595.0, 600.0);
+            let c_pdf = CString::new(pdf_path.display().to_string()).unwrap();
+            assert!(syo_app_open_document(app, c_pdf.as_ptr()));
+
+            let list = syo_app_highlight_overlays(app);
+            assert_eq!((*list).count, 2);
+            let items = std::slice::from_raw_parts((*list).items, (*list).count);
+            assert_eq!(
+                (items[0].color.r, items[0].color.g, items[0].color.b),
+                (0xff, 0, 0)
+            );
+            assert_eq!(
+                (items[1].color.r, items[1].color.g, items[1].color.b),
+                (0x00, 0xaa, 0x00)
+            );
+            assert!(items[0].rect_count > 0);
+            assert!(items[1].rect_count > 0);
+            // Default highlight_opacity is 0.4 → alpha 102.
+            assert_eq!(items[0].color.a, 102);
+            syo_highlight_overlay_list_free(list);
             syo_app_free(app);
         }
     }

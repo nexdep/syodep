@@ -12,6 +12,9 @@ and the internals):
   `<PageUp>`, `<PageDown>`, `<Home>`, `<End>`.
 - Modifiers go inside the brackets: `<C-d>` (ctrl), `<A-x>` (alt),
   `<C-A-Left>` (both). Shift on letters is expressed by case: `<C-G>`.
+- A literal `<` is written bracketed — `<<>`, or `<C-<>` with ctrl — because
+  a bare `<` opens a bracket group. This is also how the shell encodes a
+  pressed `<`, so binding `<<>` works like any other key.
 - A *sequence* concatenates chords: `gg`, `zw`, `g<C-d>`.
 - `<leader>` stands for the leader key, `[input] leader` (`<Space>` by
   default). It is expanded when the config is read, so `<leader>w` is simply

@@ -123,13 +123,14 @@ input take plain data). Key pieces:
   maps (scope, direction) onto a motion, and one `span_screen_rects` turns a
   span into overlay rectangles. A scope therefore cannot mean one thing in one
   mode and something else in the other — enforced by construction rather than
-  by discipline. The FFI reflects this: a single `SyoOverlay` shape serves all
-  three, fetched with `syo_app_focus` / `syo_app_selection` /
-  `syo_app_highlights`. Overlays are drawn per *visible* page, so cost does not
-  grow with span length. Stored *and* pending highlights come back from one
-  getter in one colour, because the shell merges an overlay's rectangles into a
-  single fill — two overlays in the same colour would double-blend where they
-  overlap.
+  by discipline. The FFI reflects this: a single `SyoOverlay` shape serves
+  focus and visual (`syo_app_focus` / `syo_app_selection`), while pending
+  highlights come back from `syo_app_highlight_overlays` grouped by the
+  colour each one captured. Overlays are drawn per *visible* page, so cost
+  does not grow with span length. Same-colour rects share one group so the
+  shell can merge them into a single Multiply fill — two fills in the same
+  colour would double-blend where they overlap — while still previewing each
+  highlight in the colour it will save with after a config change.
   The two stay separate modes because their exit semantics differ, focus draws
   one end where visual draws two, and they want distinct colours — but they
   share the position itself.
@@ -467,15 +468,20 @@ recreate). A valid real-v4 database opens normally.
 Phase 2 adds marks/bookmarks tables as further migrations.
 
 **Consequence of saving:** writing highlights into the PDF changes its bytes and
-therefore its fingerprint, which is the document's identity. `rekey_document`
-moves the row to the new hash as part of the save, so the reading position
-survives; without it every save would silently orphan it. The exact Pending ids
-included in the write are then marked Embedded in one SQLite transaction. The
-PDF rewrite and the database update cannot commit atomically: if the DB update
-fails after a successful rename, the session treats those ids as Embedded so a
-later save will not double-write them, but the next launch may still see Pending
-rows that already exist in the PDF — a known integrity window for a future
-annotation-import reconciliation. See decision 16.
+therefore its fingerprint, which is the document's identity. The save moves the
+row to the new hash *and* marks the exact saved Pending ids Embedded in **one**
+SQLite transaction (`rekey_and_mark_embedded`; deleting an embedded highlight
+pairs its rekey with the row delete the same way, `rekey_and_delete_highlight`),
+so the database always describes either the old file entirely or the new file
+entirely, never half of each. The PDF rewrite and that transaction still cannot
+commit atomically with each other: if the transaction fails after a successful
+rename, the row keeps the old fingerprint, so the reopen would key the new bytes
+to a fresh empty row — the session therefore re-attaches to the original row
+(`reattach_document_row`), reloads its annotations, and treats the saved ids as
+Embedded in memory so a later save will not double-write them. The next launch
+still starts from the fresh row and may see Pending rows that already exist in
+the PDF — a known integrity window for a future annotation-import
+reconciliation. See decision 16.
 
 ### syodep-ffi
 
@@ -484,7 +490,9 @@ The C ABI. Owns nothing conceptually; it is a mechanical projection of
 panic must never unwind into C++). Strings/bitmaps returned to C++ are
 heap copies with explicit `syo_*_free` functions. The header is generated
 by cbindgen at build time into `crates/syodep-ffi/include/syodep_ffi.h`.
-Canvas overlays (`syo_app_highlights`) stay screen-space and Pending-only;
+Canvas overlays (`syo_app_highlight_overlays`, with a geometry-only
+`syo_app_highlights` flatten for smoke tests) stay screen-space and
+Pending-only;
 the annotation list API (`syo_app_highlight_list`, revision, reveal,
 Markdown, `syo_app_delete_highlight`) feeds the Qt sidebar through
 `CoreController`.
@@ -529,8 +537,9 @@ Six small components; intentionally boring:
   `CoreController`, asks for visible page rects + bitmaps + overlays via the
   controller, and paints them with `QPainter` on the GL-backed surface.
   Focus and visual go into one `QPainterPath` each so overlapping rects blend
-  once, then a single plain-alpha fill. Highlights are different: each
-  rectangle is composited with Multiply blending onto a copy
+  once, then a single plain-alpha fill. Highlights are different: they arrive
+  already grouped by captured colour (`highlightOverlays`), and each
+  rectangle is composited with Multiply blending in that colour onto a copy
   of the page pixels it covers (a `QImage`, so the always-correct raster paint
   engine does the blending) before being drawn, because `QOpenGLWidget`'s own
   GL paint engine cannot be trusted with that composition mode — confirmed by

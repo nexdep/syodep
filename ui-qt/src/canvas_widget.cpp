@@ -28,6 +28,7 @@ CanvasWidget::CanvasWidget(CoreController *core, QWidget *parent)
 void CanvasWidget::resizeGL(int w, int h)
 {
     const qreal dpr = devicePixelRatioF();
+    m_core->setDevicePixelRatio(float(dpr));
     m_core->setViewportSize(float(w * dpr), float(h * dpr));
     m_pageCache.clear();
 }
@@ -155,40 +156,43 @@ void CanvasWidget::paintGL()
     // correct, and the already-blended pixels are then just drawn like a page
     // image -- no blend mode needed for that part.
     {
-        const CoreOverlay highlights = m_core->highlightOverlay();
-        for (const QRectF &r : highlights.pixelRects) {
-            // The page whose image this rectangle was drawn over: overlay
-            // rects and visible-page rects share one coordinate space (canvas
-            // pixels), so containment is a direct comparison.
-            for (const CoreVisiblePage &vp : pages) {
-                if (r.x() < vp.pixelRect.x() || r.y() < vp.pixelRect.y()
-                    || r.x() + r.width() > vp.pixelRect.x() + vp.pixelRect.width()
-                    || r.y() + r.height() > vp.pixelRect.y() + vp.pixelRect.height()) {
-                    continue;
+        const QVector<CoreHighlightOverlay> groups = m_core->highlightOverlays();
+        for (const CoreHighlightOverlay &group : groups) {
+            for (const QRectF &r : group.pixelRects) {
+                // Overlay rects and visible-page rects share canvas-pixel space.
+                // Select by overlap (not strict containment): MuPDF line bounds
+                // routinely poke past the media box, and float rounding can push
+                // an edge-touching rect out by a fraction of a pixel — those used
+                // to paint nowhere. A rect straddling the page gap paints its
+                // part on each overlapping page; the per-page intersections are
+                // disjoint, so nothing double-blends.
+                for (const CoreVisiblePage &vp : pages) {
+                    const QRectF overlap = r.intersected(vp.pixelRect);
+                    if (overlap.isEmpty())
+                        continue;
+                    const QImage page = pageImage(vp.page);
+                    if (page.isNull())
+                        continue;
+                    QRect local(
+                        qRound(overlap.x() - vp.pixelRect.x()),
+                        qRound(overlap.y() - vp.pixelRect.y()),
+                        qMax(1, qRound(overlap.width())),
+                        qMax(1, qRound(overlap.height())));
+                    local = local.intersected(page.rect());
+                    if (local.isEmpty())
+                        continue;
+                    QImage patch = page.copy(local);
+                    QPainter patchPainter(&patch);
+                    patchPainter.setCompositionMode(QPainter::CompositionMode_Multiply);
+                    patchPainter.fillRect(patch.rect(), group.color);
+                    patchPainter.end();
+                    const QRectF target(
+                        (vp.pixelRect.x() + local.x()) / dpr,
+                        (vp.pixelRect.y() + local.y()) / dpr,
+                        local.width() / dpr,
+                        local.height() / dpr);
+                    painter.drawImage(target, patch);
                 }
-                const QImage page = pageImage(vp.page);
-                if (page.isNull())
-                    break;
-                QRect local(
-                    qRound(r.x() - vp.pixelRect.x()),
-                    qRound(r.y() - vp.pixelRect.y()),
-                    qMax(1, qRound(r.width())),
-                    qMax(1, qRound(r.height())));
-                local = local.intersected(page.rect());
-                if (local.isEmpty())
-                    break;
-                QImage patch = page.copy(local);
-                QPainter patchPainter(&patch);
-                patchPainter.setCompositionMode(QPainter::CompositionMode_Multiply);
-                patchPainter.fillRect(patch.rect(), m_highlightColor);
-                patchPainter.end();
-                const QRectF target(
-                    (vp.pixelRect.x() + local.x()) / dpr,
-                    (vp.pixelRect.y() + local.y()) / dpr,
-                    local.width() / dpr,
-                    local.height() / dpr);
-                painter.drawImage(target, patch);
-                break;
             }
         }
     }

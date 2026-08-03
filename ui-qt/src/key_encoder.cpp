@@ -57,6 +57,11 @@ QString encodeKeyEvent(const QKeyEvent *event)
         return {};
     }
 
+    // A bare "<" opens a bracket group to the chord parser and would be
+    // rejected as unclosed; the parser's escape for a literal one is "<<>".
+    if (name == QLatin1String("<"))
+        needsBrackets = true;
+
     if (!needsBrackets)
         return name;
 

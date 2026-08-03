@@ -40,6 +40,13 @@ struct CoreOverlay
     QVector<QRectF> pixelRects;
 };
 
+// One colour group of pending-highlight rectangles.
+struct CoreHighlightOverlay
+{
+    QColor color;
+    QVector<QRectF> pixelRects;
+};
+
 enum class HighlightState
 {
     Pending,
@@ -116,13 +123,19 @@ public:
     int keyTimeoutMs() const { return m_pendingInputTimer.interval(); }
     void scrollBy(float dx, float dy);
     void setViewportSize(float width, float height);
+    // Physical pixels per logical pixel (Qt devicePixelRatio). Configured
+    // scroll distances are logical; the core multiplies them by this.
+    void setDevicePixelRatio(float ratio);
 
     // Rendering queries (owned Qt values; no FFI pointers escape)
     QVector<CoreVisiblePage> visiblePages() const;
     QImage renderPage(size_t page);
     CoreOverlay focusOverlay() const;
     CoreOverlay selectionOverlay() const;
+    // Legacy single-colour flatten; prefer highlightOverlays().
     CoreOverlay highlightOverlay() const;
+    // Pending highlights grouped by the colour each one captured.
+    QVector<CoreHighlightOverlay> highlightOverlays() const;
 
     // Appearance and status
     QColor backgroundColor() const;

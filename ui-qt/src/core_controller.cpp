@@ -157,6 +157,14 @@ void CoreController::setViewportSize(float width, float height)
     emit statusChanged();
 }
 
+void CoreController::setDevicePixelRatio(float ratio)
+{
+    assertGuiThread();
+    if (!m_app)
+        return;
+    syo_app_set_device_pixel_ratio(m_app, ratio);
+}
+
 QVector<CoreVisiblePage> CoreController::visiblePages() const
 {
     assertGuiThread();
@@ -164,13 +172,29 @@ QVector<CoreVisiblePage> CoreController::visiblePages() const
     if (!m_app || !syo_app_has_document(m_app))
         return out;
 
-    SyoVisiblePage pages[64];
-    const size_t count = syo_app_visible_pages(m_app, pages, 64);
-    out.reserve(qsizetype(qMin<size_t>(count, 64)));
-    for (size_t i = 0; i < qMin<size_t>(count, 64); ++i) {
+    // The first call reports the true count even when it exceeds the stack
+    // buffer — at minimum zoom a tall viewport can show more than 64 pages.
+    SyoVisiblePage stack[64];
+    size_t count = syo_app_visible_pages(m_app, stack, 64);
+    if (count <= 64) {
+        out.reserve(qsizetype(count));
+        for (size_t i = 0; i < count; ++i) {
+            CoreVisiblePage page;
+            page.page = stack[i].page;
+            page.pixelRect = QRectF(stack[i].x, stack[i].y, stack[i].width, stack[i].height);
+            out.push_back(page);
+        }
+        return out;
+    }
+
+    QVector<SyoVisiblePage> heap{qsizetype(count)};
+    count = syo_app_visible_pages(m_app, heap.data(), size_t(heap.size()));
+    out.reserve(qsizetype(count));
+    for (size_t i = 0; i < count; ++i) {
         CoreVisiblePage page;
-        page.page = pages[i].page;
-        page.pixelRect = QRectF(pages[i].x, pages[i].y, pages[i].width, pages[i].height);
+        page.page = heap[qsizetype(i)].page;
+        page.pixelRect = QRectF(heap[qsizetype(i)].x, heap[qsizetype(i)].y,
+                                heap[qsizetype(i)].width, heap[qsizetype(i)].height);
         out.push_back(page);
     }
     return out;
@@ -215,6 +239,31 @@ CoreOverlay CoreController::highlightOverlay() const
     if (!m_app)
         return {};
     return takeOverlay(syo_app_highlights(m_app));
+}
+
+QVector<CoreHighlightOverlay> CoreController::highlightOverlays() const
+{
+    assertGuiThread();
+    QVector<CoreHighlightOverlay> out;
+    if (!m_app)
+        return out;
+    SyoHighlightOverlayList *list = syo_app_highlight_overlays(m_app);
+    if (!list)
+        return out;
+    out.reserve(qsizetype(list->count));
+    for (size_t i = 0; i < list->count; ++i) {
+        const SyoHighlightOverlay &item = list->items[i];
+        CoreHighlightOverlay group;
+        group.color = toQColor(item.color.r, item.color.g, item.color.b, item.color.a);
+        group.pixelRects.reserve(qsizetype(item.rect_count));
+        for (size_t j = 0; j < item.rect_count; ++j) {
+            const SyoRect &r = item.rects[j];
+            group.pixelRects.push_back(QRectF(r.x, r.y, r.width, r.height));
+        }
+        out.push_back(group);
+    }
+    syo_highlight_overlay_list_free(list);
+    return out;
 }
 
 QColor CoreController::backgroundColor() const

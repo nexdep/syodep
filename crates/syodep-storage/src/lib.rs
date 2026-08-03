@@ -257,11 +257,71 @@ impl Storage {
         fingerprint: &str,
         path: &str,
     ) -> Result<(), StorageError> {
+        self.rekey_document_inner(document_id, fingerprint, path)
+    }
+
+    fn rekey_document_inner(
+        &self,
+        document_id: i64,
+        fingerprint: &str,
+        path: &str,
+    ) -> Result<(), StorageError> {
         self.conn.execute(
             "UPDATE documents SET fingerprint = ?2, path = ?3 WHERE id = ?1",
             (document_id, fingerprint, path),
         )?;
         Ok(())
+    }
+
+    /// Re-key the document row to a rewritten file's fingerprint *and* mark
+    /// the saved highlight ids [`HighlightPdfState::Embedded`], in one
+    /// transaction.
+    ///
+    /// One transaction because the two must not be separable: a rekey without
+    /// the marks would double-write the highlights on the next save, and marks
+    /// without the rekey would leave the row on a fingerprint that no longer
+    /// matches the file, orphaning everything keyed to it. After a failure the
+    /// database still describes the *old* file entirely, which is the state
+    /// the caller's recovery path re-attaches to.
+    pub fn rekey_and_mark_embedded(
+        &self,
+        document_id: i64,
+        fingerprint: &str,
+        path: &str,
+        highlight_ids: &[HighlightId],
+    ) -> Result<(), StorageError> {
+        self.conn.execute("BEGIN", [])?;
+        let result = self
+            .rekey_document_inner(document_id, fingerprint, path)
+            .and_then(|()| self.mark_highlights_embedded_inner(document_id, highlight_ids));
+        match &result {
+            Ok(_) => self.conn.execute("COMMIT", [])?,
+            Err(_) => self.conn.execute("ROLLBACK", [])?,
+        };
+        result
+    }
+
+    /// Re-key the document row and delete one highlight row, in one
+    /// transaction — the delete-an-embedded-highlight twin of
+    /// [`Storage::rekey_and_mark_embedded`], with the same all-or-nothing
+    /// guarantee. Returns whether a highlight row was removed, as
+    /// [`Storage::delete_highlight`] does.
+    pub fn rekey_and_delete_highlight(
+        &self,
+        document_id: i64,
+        fingerprint: &str,
+        path: &str,
+        highlight_id: HighlightId,
+    ) -> Result<bool, StorageError> {
+        self.conn.execute("BEGIN", [])?;
+        let result = self
+            .rekey_document_inner(document_id, fingerprint, path)
+            .and_then(|()| self.delete_highlight(document_id, highlight_id));
+        match &result {
+            Ok(_) => self.conn.execute("COMMIT", [])?,
+            Err(_) => self.conn.execute("ROLLBACK", [])?,
+        };
+        result
     }
 
     /// Store a highlight and its rectangles as [`HighlightPdfState::Pending`],
@@ -950,6 +1010,62 @@ mod tests {
             )
             .unwrap();
         assert_eq!(stale, 0);
+    }
+
+    #[test]
+    fn rekey_and_mark_embedded_commit_together() {
+        let storage = Storage::in_memory().unwrap();
+        let id = storage.upsert_document("old-fp", "/a.pdf").unwrap();
+        let hid = storage
+            .insert_highlight(id, "#ffe066", "kept", &[rect(0, 72.0)])
+            .unwrap();
+
+        storage
+            .rekey_and_mark_embedded(id, "new-fp", "/a.pdf", &[hid])
+            .unwrap();
+
+        assert_eq!(storage.upsert_document("new-fp", "/a.pdf").unwrap(), id);
+        assert_eq!(
+            storage.load_highlights(id).unwrap()[0].pdf_state,
+            HighlightPdfState::Embedded
+        );
+    }
+
+    #[test]
+    fn rekey_and_mark_embedded_roll_back_together() {
+        // The mark step fails on a non-Pending id; the rekey must fail with
+        // it, or the row would point at a fingerprint whose highlights still
+        // read as Pending — half of each file's state.
+        let storage = Storage::in_memory().unwrap();
+        let id = storage.upsert_document("old-fp", "/a.pdf").unwrap();
+        let hid = storage
+            .insert_highlight(id, "#ffe066", "kept", &[rect(0, 72.0)])
+            .unwrap();
+        storage.mark_highlights_embedded(id, &[hid]).unwrap();
+
+        let err = storage
+            .rekey_and_mark_embedded(id, "new-fp", "/a.pdf", &[hid])
+            .unwrap_err();
+        assert!(matches!(err, StorageError::HighlightNotPending(_, _)));
+
+        // The row still carries the old fingerprint.
+        assert_eq!(storage.upsert_document("old-fp", "/a.pdf").unwrap(), id);
+    }
+
+    #[test]
+    fn rekey_and_delete_highlight_commit_together() {
+        let storage = Storage::in_memory().unwrap();
+        let id = storage.upsert_document("old-fp", "/a.pdf").unwrap();
+        let hid = storage
+            .insert_highlight(id, "#ffe066", "gone", &[rect(0, 72.0)])
+            .unwrap();
+
+        assert!(storage
+            .rekey_and_delete_highlight(id, "new-fp", "/a.pdf", hid)
+            .unwrap());
+
+        assert_eq!(storage.upsert_document("new-fp", "/a.pdf").unwrap(), id);
+        assert!(storage.load_highlights(id).unwrap().is_empty());
     }
 
     #[test]

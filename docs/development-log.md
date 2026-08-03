@@ -7,6 +7,140 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-08-03 — Deep-review fix batch 2: remaining List 1 bugs (items 4–11)
+
+Eight more defects from the same review.
+
+### Stale errors no longer stick on the status line
+
+`last_error` is cleared at the top of `App::execute` alongside
+`status_message`, so a transient failure lasts until the next command rather
+than for the whole session. Test: `a_subsequent_command_clears_a_stale_error`.
+
+### A no-op save no longer reloads the page cache
+
+`save_document` with nothing pending reports "nothing to save: no pending
+highlights" and returns `Effects::redraw()` only — no `reload`, no
+`annotations_changed`. Test: `save_with_nothing_pending_does_not_reload`.
+
+### Cancelled quit no longer replays leftover chords out of order
+
+`dispatch` clears the input replay queue when `quit` / `confirm_quit`
+interrupts a longest-prefix fallback, so leftovers cannot fire after the
+dialog. New `InputState::clear_replay`. Test:
+`a_quit_that_interrupts_a_replay_drops_the_leftover_chords`.
+
+### Wheel / sidebar actions no longer cancel the pause timer
+
+`pending_input` is stamped onto every non-key `Effects` entry point the shell
+calls (`scroll_by_px`, reveal/delete/create annotation helpers) via
+`stamp_pending_input`, so a prefix waiting for the pause still arms the
+timer. Test: `wheel_scroll_preserves_a_pending_key_sequence`.
+
+### Visible-page buffer grows past 64 at minimum zoom
+
+`CoreController::visiblePages` re-calls `syo_app_visible_pages` with a heap
+buffer when the count exceeds the 64-entry stack array.
+
+### Highlight patches paint by page overlap, not containment
+
+The Multiply path intersects each overlay rect with each visible page and
+paints the intersection; rects that poke past the media box (or lose a
+fraction to rounding) are no longer invisible, and a rect straddling the
+page gap paints its part on each page.
+
+### Keyboard scroll respects devicePixelRatio
+
+Configured `scroll_step` / `horizontal_scroll_step` / `scroll_off` are
+logical pixels. The shell reports `devicePixelRatio` through
+`syo_app_set_device_pixel_ratio`; the core multiplies those distances by it.
+Tests: `scroll_step_scales_with_device_pixel_ratio`,
+`scroll_off_scales_with_device_pixel_ratio`. Documented in `docs/config.md`.
+
+### Pending highlights preview in their captured colour
+
+`App::highlight_overlay_groups` groups pending rects by the colour stored on
+each highlight (and the in-progress placement); FFI
+`syo_app_highlight_overlays` returns per-group `SyoColor` + rects; the canvas
+Multiply loop paints each group in that colour. Same-colour overlaps still
+blend once. Tests: `pending_highlights_group_by_their_captured_color`,
+`highlight_overlays_round_trip_per_captured_color`. Architecture docs updated.
+
+### Checks
+
+`cargo test --workspace`, fmt, clippy `-D warnings`, `check-docs.sh`, Qt
+build + offscreen smoke test.
+
+---
+
+## 2026-08-03 — Deep-review fix batch: FFI free layout, save rekey recovery, `<` key, backward footnote skip, multi-line span text
+
+Five defects from a full-program review, each with a regression test.
+
+### FFI list free had an allocator-layout mismatch (UB)
+
+`syo_app_highlight_list` / `syo_app_text_annotation_list` leaked a `Vec` with
+`as_mut_ptr` + `mem::forget`, while the free side rebuilt the allocation from
+`count` alone — wrong layout whenever capacity ≠ length. Both builders now hand
+out boxed slices (`Box<[T]>`, capacity == length by construction), matching how
+overlays and bitmaps already did it. New multi-item round-trip test
+(`multi_item_lists_round_trip_through_free`) exercises the path Miri or a
+checked allocator would flag.
+
+### A failed database rekey no longer orphans highlights and position
+
+If the PDF rewrite succeeded but `rekey_document` failed, the blind reopen
+keyed the new bytes to a fresh empty row: every highlight, annotation and the
+reading position silently vanished from the session (and the "treat ids as
+Embedded" recovery iterated an empty list). The rekey and the embed-marking (or
+row delete, for embedded-highlight deletion) now commit in one transaction
+(`Storage::rekey_and_mark_embedded` / `rekey_and_delete_highlight`), and on
+failure the session re-attaches to its original row
+(`App::reattach_document_row`), reloads that row's annotations, and marks the
+saved ids Embedded in memory. The cross-launch integrity window remains
+documented in `architecture.md`. Tests: transactional commit/rollback pairs in
+`syodep-storage`, and
+`failed_rekey_transaction_keeps_the_session_attached_to_its_row` in the core
+(failure injected by flipping the row state behind the session's back).
+
+### The `<` key is no longer swallowed
+
+The shell encoded a pressed `<` as a bare `"<"`, which the chord parser rejects
+as an unclosed bracket — the key vanished and could never fire a binding. The
+encoder now emits the parser's escape `<<>` (and `<C-<>` etc. already worked);
+`Chord`'s `Display` renders `Char('<')` bracketed so the round-trip holds.
+Documented in `docs/keybindings.md`. Tests: `literal_less_than_is_written_bracketed`
+plus `<<>` in the display round-trip set.
+
+### Backward sentence motion no longer lands in a trailing footnote
+
+`sentence_step_prev`'s cross-page branch expanded from the previous page's raw
+last cell — inside the footnote block on any page that ends with one (the exact
+stop the footnote auto-skip exists to prevent, only backwards), and an invalid
+`cell 0` on a trailing empty line. New `last_body_cell_on_page` mirrors
+`first_sentence_start_on_page`: skips trailing whitespace, empty lines, and
+footnotes. Test: `sentence_prev_across_pages_skips_a_trailing_footnote`.
+
+### Multi-line span text joins lines instead of gluing words
+
+`span_text` emitted no separator at line or page boundaries, so a wrapped
+sentence was captured as `Alpha betagamma.` in every stored anchor, sidebar
+card, clipboard copy and Markdown export (all single-line tests, so unseen).
+Lines now join with a single space; a line-final hyphen between two word
+characters is dropped and the halves joined whole (`typeset-` / `ting` →
+`typesetting`), matching `is_hyphen_interior`'s view that a line-break hyphen
+belongs to the typesetting. A freestanding dash keeps itself. Tests:
+`span_text_joins_lines_with_a_space`, `span_text_joins_a_line_broken_word_whole`,
+`span_text_keeps_a_freestanding_line_final_dash`,
+`span_text_inserts_a_space_at_page_boundaries`.
+
+### Checks
+
+`cargo test --workspace` (18 ffi / 40 storage / 382 core / 32 config green),
+fmt, clippy `-D warnings`, `check-docs.sh`, Qt build + offscreen smoke test.
+
+---
+
 ## 2026-08-03 — Fix Windows smoke: Markdown export without Text mode
 
 Windows CI/release smoke soft-failed after `highlights committed`: export

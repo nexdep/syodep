@@ -29,9 +29,9 @@ bookmarks, highlights, notes, history. That lives in the SQLite database
 
 | Option | Type | Default | Meaning |
 |---|---|---|---|
-| `scroll_step` | float | `60.0` | vertical pixels per `scroll_down`/`scroll_up` step |
-| `horizontal_scroll_step` | float | `60.0` | horizontal pixels per `scroll_left`/`scroll_right` step |
-| `scroll_off` | float | `80.0` | pixels kept between the focused text and the top/bottom edge while the view follows it |
+| `scroll_step` | float | `60.0` | vertical **logical** pixels per `scroll_down`/`scroll_up` step |
+| `horizontal_scroll_step` | float | `60.0` | horizontal **logical** pixels per `scroll_left`/`scroll_right` step |
+| `scroll_off` | float | `80.0` | **logical** pixels kept between the focused text and the top/bottom edge while the view follows it |
 | `page_gap` | float | `12.0` | gap between pages, in PDF points (1/72 in at 100% zoom) |
 | `default_zoom` | float | `1.0` | zoom for documents without a saved position (used when `fit_width_on_open = false`) |
 | `fit_width_on_open` | bool | `true` | fit page width to window when opening a document without a saved position |
@@ -55,10 +55,13 @@ zoom instead of applying `default_zoom`/`fit_width_on_open`.
 **Scroll-off.** In focus, visual and highlight mode the view follows the
 highlight as it moves. `scroll_off` is how much canvas it keeps between the
 highlight and the top or bottom edge while doing so — Vim's `scrolloff`,
-measured in screen pixels rather than lines, since a PDF's line height varies
-within and between documents. At the default `80.0` the page starts scrolling
-under the highlight about three body lines before it would reach the border,
-so there is always text past it to read into. The buffer applies to the
+measured in logical screen pixels rather than lines, since a PDF's line height
+varies within and between documents. The shell reports the display's
+`devicePixelRatio`; the core multiplies `scroll_step`,
+`horizontal_scroll_step` and `scroll_off` by it so a 2× display scrolls the
+same visual distance as a 1× one. At the default `80.0` the page starts
+scrolling under the highlight about three body lines before it would reach the
+border, so there is always text past it to read into. The buffer applies to the
 moving end only: in visual mode the anchor may be arbitrarily far off screen.
 
 It is a lower bound on scrolling, never a push: at the very start and end of a

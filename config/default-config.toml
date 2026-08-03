@@ -10,12 +10,13 @@
 # See docs/config.md for the full reference.
 
 [view]
-# Pixels moved per scroll step (j / k).
+# Logical pixels moved per scroll step (j / k). Scaled by the display's
+# devicePixelRatio so a 2× screen scrolls the same visual distance as 1×.
 scroll_step = 60.0
-# Pixels moved per horizontal scroll step (h / l).
+# Logical pixels moved per horizontal scroll step (h / l).
 horizontal_scroll_step = 60.0
-# Pixels kept between the focused text and the top or bottom edge while
-# the view follows it, so there is always context past the highlight.
+# Logical pixels kept between the focused text and the top or bottom edge
+# while the view follows it, so there is always context past the highlight.
 # Not applied at the very start and end of the document, where there is
 # nothing to scroll to. 0.0 lets the highlight sit flush with the edge.
 scroll_off = 80.0

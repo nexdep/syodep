@@ -480,6 +480,11 @@ pub struct App {
     /// One-off feedback for the status line (what a save did). Cleared by the
     /// next command, so it reads as a reply to the key just pressed.
     status_message: Option<String>,
+    /// Physical pixels per logical pixel, from the shell's devicePixelRatio.
+    /// Configured scroll distances (`scroll_step`, `scroll_off`, …) are in
+    /// logical pixels; they are multiplied by this before use so a 2× display
+    /// scrolls the same visual distance as a 1× one.
+    device_pixel_ratio: f32,
 }
 
 impl App {
@@ -559,6 +564,7 @@ impl App {
             startup_warnings,
             last_error: None,
             status_message: None,
+            device_pixel_ratio: 1.0,
         }
     }
 
@@ -731,6 +737,12 @@ impl App {
             let _ = self.enter_focus(self.focus_scope);
         }
         match self.write_document() {
+            Ok(0) => {
+                // Nothing was written: do not tell the shell to drop its page
+                // cache, and do not claim a save happened.
+                self.status_message = Some("nothing to save: no pending highlights".to_owned());
+                Effects::redraw()
+            }
             Ok(count) => {
                 self.status_message = Some(match count {
                     1 => "saved 1 highlight".to_owned(),
@@ -793,30 +805,44 @@ impl App {
 
         // The rewritten file hashes differently, so move the document row to the
         // new fingerprint before reopening — otherwise every save orphans the
-        // reading position. Then mark the exact saved ids Embedded: they live in
-        // the PDF now, and drawing them as overlays as well would paint twice.
+        // reading position. Marking the exact saved ids Embedded happens in the
+        // same transaction: they live in the PDF now, and drawing them as
+        // overlays as well would paint twice.
         //
         // Integrity window: the PDF and SQLite cannot commit atomically. If the
-        // database update fails after the rename, the session still treats the
-        // saved ids as Embedded (so a later save in this session will not
-        // double-write them), but the next launch may still see Pending rows
-        // that already exist in the PDF. A future annotation-import pass can
-        // reconcile that; guessing from geometry here would be worse.
+        // transaction fails after the rename, the database still describes the
+        // old file, so the next launch (whose fingerprint lookup finds nothing)
+        // starts from a fresh row and may see Pending rows that already exist
+        // in the PDF. A future annotation-import pass can reconcile that;
+        // guessing from geometry here would be worse. Within this session the
+        // recovery below keeps everything reachable.
         let mut db_mark_error = None;
         if let (Some(storage), Some(id)) = (&self.storage, document_id) {
             let outcome = Storage::fingerprint_file(&path).and_then(|fingerprint| {
-                storage.rekey_document(id, &fingerprint, &path.display().to_string())?;
-                storage.mark_highlights_embedded(id, &pending_ids)
+                storage.rekey_and_mark_embedded(
+                    id,
+                    &fingerprint,
+                    &path.display().to_string(),
+                    &pending_ids,
+                )
             });
             if let Err(e) = outcome {
                 db_mark_error = Some(format!(
-                    "saved the PDF, but could not mark highlights embedded in the database: {e}"
+                    "saved the PDF, but could not update its database records: {e}"
                 ));
             }
         }
         self.open_document(&path)?;
         self.restore_selection_state(restore);
         if let Some(message) = db_mark_error {
+            // The transaction rolled back, so the document row still carries
+            // the old fingerprint — the reopen above therefore attached to a
+            // fresh, empty row, which would silently orphan every highlight,
+            // annotation and the reading position for the rest of the session.
+            // Re-attach to the real row, then mark the ids now living in the
+            // PDF as Embedded in memory so a later save cannot double-write
+            // them and the overlay does not paint them twice.
+            self.reattach_document_row(document_id);
             for highlight in &mut self.highlights {
                 if highlight.id.is_some_and(|id| pending_ids.contains(&id)) {
                     highlight.pdf_state = HighlightPdfState::Embedded;
@@ -825,6 +851,25 @@ impl App {
             self.last_error = Some(message);
         }
         Ok(count)
+    }
+
+    /// Point the freshly reopened session back at the document row it had
+    /// before a PDF rewrite, and reload the annotations that row owns.
+    ///
+    /// Needed when the rewrite succeeded but the database rekey did not: the
+    /// row then still carries the old fingerprint, so [`App::open_document`]
+    /// keyed the new bytes to a fresh, empty row and everything the user
+    /// stored would vanish from the session. The next launch still starts
+    /// from the fresh row — that is the documented integrity window — but
+    /// nothing is lost *now*, and position saves keep landing on the row that
+    /// actually holds the data.
+    fn reattach_document_row(&mut self, document_id: Option<i64>) {
+        let Some(session) = &mut self.session else {
+            return;
+        };
+        session.document_id = document_id;
+        self.load_highlights();
+        self.load_text_annotations();
     }
 
     /// The pending highlights as one annotation per (highlight, page).
@@ -914,15 +959,35 @@ impl App {
         }
     }
 
+    /// Physical pixels per logical pixel. Values below 1.0 are clamped to 1.0
+    /// so a misreported ratio cannot invert scroll directions or shrink steps.
+    pub fn set_device_pixel_ratio(&mut self, ratio: f32) {
+        self.device_pixel_ratio = ratio.max(1.0);
+    }
+
+    pub fn device_pixel_ratio(&self) -> f32 {
+        self.device_pixel_ratio
+    }
+
     /// Direct pixel scrolling (mouse wheel / trackpad).
     pub fn scroll_by_px(&mut self, dx: f32, dy: f32) -> Effects {
-        if let Some(session) = &mut self.session {
+        let effects = if let Some(session) = &mut self.session {
             session.view.scroll_by_px(dx, dy);
             self.save_position();
             Effects::redraw()
         } else {
             Effects::default()
-        }
+        };
+        self.stamp_pending_input(effects)
+    }
+
+    /// Carry the buffered-sequence bit onto effects returned outside the key
+    /// path. `pending_input` is state, not a one-shot: a wheel scroll or
+    /// sidebar action must not cancel the shell's pause timer while a prefix
+    /// is still waiting to resolve.
+    fn stamp_pending_input(&self, mut effects: Effects) -> Effects {
+        effects.pending_input = self.input.has_pending_sequence();
+        effects
     }
 
     /// Feed one key press; returns the side effects for the shell.
@@ -979,6 +1044,10 @@ impl App {
                 KeyOutcome::Command { command, count } => self.execute(command, count),
             });
             if effects.quit || effects.confirm_quit {
+                // A quit (or its confirmation) interrupts the replay: leftover
+                // chords must not run after the dialog is cancelled, or they
+                // would reorder behind the user's next keypress.
+                self.input.clear_replay();
                 break;
             }
             // Re-select the keymap each pass: the command just run may have
@@ -1005,12 +1074,14 @@ impl App {
     /// Execute a command. Public so a future command palette can reuse it.
     pub fn execute(&mut self, command: Command, count: Option<u32>) -> Effects {
         // Feedback belongs to the key that produced it, so the next command
-        // clears it rather than leaving a stale "saved" sitting on the status
-        // line.
+        // clears it rather than leaving a stale "saved" or ERROR sitting on
+        // the status line.
         self.status_message = None;
+        self.last_error = None;
         let n = count.unwrap_or(1).max(1);
-        let step = self.config.view.scroll_step * n as f32;
-        let hstep = self.config.view.horizontal_scroll_step * n as f32;
+        let dpr = self.device_pixel_ratio;
+        let step = self.config.view.scroll_step * n as f32 * dpr;
+        let hstep = self.config.view.horizontal_scroll_step * n as f32 * dpr;
         let zoom_step = self.config.view.zoom_step;
 
         match command {
@@ -2611,6 +2682,34 @@ impl App {
         }
     }
 
+    /// Last body cell of `page` — the backward mirror of
+    /// [`Self::first_sentence_start_on_page`]: trailing whitespace, empty
+    /// lines and footnote blocks are skipped, so the backward auto-search is
+    /// as blind to a footnote as the forward one. Footnotes sit at the bottom
+    /// of a page by construction, so without the skip *every* backward
+    /// sentence step across a page boundary would land inside one.
+    fn last_body_cell_on_page(&mut self, page: usize) -> Option<Caret> {
+        self.ensure_content(page);
+        // Seed on the last non-empty line; `prev_cell_same_page` walks the
+        // rest (it already skips empty lines).
+        let (line, cell) = self
+            .content(page)
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(i, l)| Some((i, l.cells.len().checked_sub(1)?)))?;
+        let mut cur = Caret { page, line, cell };
+        loop {
+            if self.in_footnote(cur)
+                || matches!(self.word_class_at(cur), Some(WordClass::Whitespace) | None)
+            {
+                cur = self.prev_cell_same_page(cur)?;
+                continue;
+            }
+            return Some(cur);
+        }
+    }
+
     /// Start cell of the next sentence on the same page, or `None` at the page
     /// edge (the caller then crosses to the next content page).
     fn step_next_sentence_start(&mut self, caret: Caret) -> Option<Caret> {
@@ -2676,16 +2775,14 @@ impl App {
             return true;
         }
         if let Some(page) = self.prev_content_page(mark.page) {
-            // Last sentence of the previous page: expand from its last cell.
-            let last_line = self.page_line_count(page).saturating_sub(1);
-            let last_cell = self.line_cell_count(page, last_line).saturating_sub(1);
-            let from = Caret {
-                page,
-                line: last_line,
-                cell: last_cell,
-            };
-            *mark = self.sentence_mark_from_caret(from);
-            return true;
+            // Last sentence of the previous page: expand from its last *body*
+            // cell. Expanding from the raw last cell landed inside the page's
+            // footnote block (or on an empty line) — the exact mid-flow stop
+            // the footnote auto-skip exists to prevent, only backwards.
+            if let Some(from) = self.last_body_cell_on_page(page) {
+                *mark = self.sentence_mark_from_caret(from);
+                return true;
+            }
         }
         false
     }
@@ -3156,7 +3253,7 @@ impl App {
     /// `page` into view, keeping `view.scroll_off` pixels of context above and
     /// below it.
     fn scroll_page_rect_into_view(&mut self, page: usize, rect: Rect) {
-        let scroll_off = self.config.view.scroll_off;
+        let scroll_off = self.config.view.scroll_off * self.device_pixel_ratio;
         let Some(session) = &mut self.session else {
             return;
         };
@@ -3184,7 +3281,8 @@ impl App {
     fn viewport_content_top(&self) -> Option<f32> {
         let session = self.session.as_ref()?;
         let scroll_y = session.view.scroll().1;
-        let scroll_off = self.config.view.scroll_off.max(0.0) / session.view.zoom();
+        let scroll_off =
+            self.config.view.scroll_off.max(0.0) * self.device_pixel_ratio / session.view.zoom();
         Some(scroll_y + scroll_off.min(scroll_y.max(0.0)))
     }
 
@@ -3250,7 +3348,31 @@ impl App {
     /// Images and table rules contribute nothing, so a highlight over a figure
     /// has empty text rather than a placeholder — the geometry is what makes it
     /// visible, and the text is only there for the sidebar and export.
+    ///
+    /// Extracted lines carry no trailing space, so at every line (and page)
+    /// boundary a single space is inserted — gluing them bare recorded
+    /// `Alpha beta` / `gamma.` as `Alpha betagamma.` in every stored anchor,
+    /// sidebar card and Markdown export. The one exception is a word broken by
+    /// the typesetter: a line-final hyphen between two word characters is
+    /// dropped and the halves joined whole (`typeset-` / `ting` →
+    /// `typesetting`), matching the view [`Self::is_hyphen_interior`] takes —
+    /// the hyphen belongs to the line break, not to the word.
     fn span_text(&mut self, start: Caret, end: Caret) -> String {
+        fn join_line_break(out: &mut String, next: char) {
+            let mut tail = out.chars().rev();
+            let Some(last) = tail.next() else { return };
+            if is_word_hyphen(last) {
+                let joinable = |c: char| c.is_alphanumeric() || c == '_';
+                if tail.next().is_some_and(joinable) && joinable(next) {
+                    out.pop();
+                    return;
+                }
+            }
+            if !last.is_whitespace() {
+                out.push(' ');
+            }
+        }
+
         let mut out = String::new();
         for page in start.page..=end.page {
             self.ensure_content(page);
@@ -3277,8 +3399,13 @@ impl App {
                 } else {
                     line.cells.len().saturating_sub(1)
                 };
+                let mut line_contributed = false;
                 for cell in line.cells.iter().take(last + 1).skip(first) {
                     if let CellKind::Char(c) = cell.kind {
+                        if !line_contributed {
+                            join_line_break(&mut out, c);
+                            line_contributed = true;
+                        }
                         out.push(c);
                     }
                 }
@@ -4090,10 +4217,10 @@ impl App {
         self.bump_annotation_revision();
         Ok((
             id,
-            Effects {
+            self.stamp_pending_input(Effects {
                 annotations_changed: true,
                 ..Effects::default()
-            },
+            }),
         ))
     }
 
@@ -4114,7 +4241,7 @@ impl App {
             return Err(AppError::UnknownTextAnnotation(id.0));
         };
         if self.text_annotations[index].body_markdown == body_markdown {
-            return Ok(Effects::default());
+            return Ok(self.stamp_pending_input(Effects::default()));
         }
         let document_id = self.session.as_ref().and_then(|s| s.document_id);
         if let (Some(storage), Some(document_id)) = (self.storage.as_ref(), document_id) {
@@ -4138,10 +4265,10 @@ impl App {
         }
         self.text_annotations[index].body_markdown = body_markdown;
         self.bump_annotation_revision();
-        Ok(Effects {
+        Ok(self.stamp_pending_input(Effects {
             annotations_changed: true,
             ..Effects::default()
-        })
+        }))
     }
 
     fn persist_text_annotation(
@@ -4255,10 +4382,10 @@ impl App {
     pub fn reveal_text_annotation(&mut self, id: TextAnnotationId) -> Effects {
         let Some(annotation) = self.text_annotations.iter().find(|a| a.id == Some(id)) else {
             self.last_error = Some(format!("unknown text annotation {}", id.0));
-            return Effects::default();
+            return self.stamp_pending_input(Effects::default());
         };
         let Some(first) = annotation.anchor.rects.first().copied() else {
-            return Effects::default();
+            return self.stamp_pending_input(Effects::default());
         };
         let page = first.page;
         let rect = Rect {
@@ -4269,7 +4396,7 @@ impl App {
         };
         self.scroll_page_rect_into_view(page, rect);
         self.save_position();
-        Effects::redraw()
+        self.stamp_pending_input(Effects::redraw())
     }
 
     pub fn delete_text_annotation(&mut self, id: TextAnnotationId) -> Result<Effects, AppError> {
@@ -4296,10 +4423,10 @@ impl App {
         }
         self.text_annotations.remove(index);
         self.bump_annotation_revision();
-        Ok(Effects {
+        Ok(self.stamp_pending_input(Effects {
             annotations_changed: true,
             ..Effects::default()
-        })
+        }))
     }
 
     /// Monotonic counter for the annotation snapshot. The sidebar compares
@@ -4394,10 +4521,10 @@ impl App {
         }
         self.highlights.remove(index);
         self.bump_annotation_revision();
-        Ok(Effects {
+        Ok(self.stamp_pending_input(Effects {
             annotations_changed: true,
             ..Effects::redraw()
-        })
+        }))
     }
 
     /// Delete a highlight that has been written into the PDF: rewrite the file
@@ -4448,12 +4575,17 @@ impl App {
         }
 
         // The rewritten file hashes differently, so the document row has to
-        // follow it before the reopen, exactly as saving does.
+        // follow it before the reopen, exactly as saving does — and in one
+        // transaction with the row delete, for the same reason.
         let mut db_error = None;
         if let (Some(storage), Some(document_id)) = (&self.storage, document_id) {
             let outcome = Storage::fingerprint_file(&path).and_then(|fingerprint| {
-                storage.rekey_document(document_id, &fingerprint, &path.display().to_string())?;
-                storage.delete_highlight(document_id, id)
+                storage.rekey_and_delete_highlight(
+                    document_id,
+                    &fingerprint,
+                    &path.display().to_string(),
+                    id,
+                )
             });
             if let Err(e) = outcome {
                 db_error = Some(format!(
@@ -4464,19 +4596,22 @@ impl App {
         }
         self.open_document(&path)?;
         self.restore_selection_state(restore);
-        // The reopen reloaded the highlights from SQLite; when the row survived
-        // a failed delete it is back, and the session copy must go so the list
-        // matches the PDF the user is now looking at.
+        // A failed transaction left the row on the old fingerprint, so the
+        // reopen attached to a fresh, empty row (see write_document). Re-attach
+        // to the real one; its copy of the deleted highlight came back with the
+        // rollback, and must go from the session so the list matches the PDF
+        // the user is now looking at.
         if let Some(message) = db_error {
+            self.reattach_document_row(document_id);
             self.highlights.retain(|h| h.id != Some(id));
             self.bump_annotation_revision();
             self.last_error = Some(message);
         }
-        Ok(Effects {
+        Ok(self.stamp_pending_input(Effects {
             reload: true,
             annotations_changed: true,
             ..Effects::redraw()
-        })
+        }))
     }
 
     /// Scroll so the highlight's first stored rectangle is centered in the
@@ -4485,21 +4620,21 @@ impl App {
     pub fn reveal_highlight(&mut self, id: HighlightId) -> Effects {
         let Some(highlight) = self.highlights.iter().find(|h| h.id == Some(id)) else {
             self.last_error = Some(format!("unknown highlight {}", id.0));
-            return Effects {
+            return self.stamp_pending_input(Effects {
                 redraw: true,
                 ..Effects::default()
-            };
+            });
         };
         let Some(rect) = highlight.anchor.rects.first().copied() else {
             self.last_error = Some(format!("highlight {} has no geometry", id.0));
-            return Effects {
+            return self.stamp_pending_input(Effects {
                 redraw: true,
                 ..Effects::default()
-            };
+            });
         };
         if self.session.is_none() {
             self.last_error = Some("no document is open".to_owned());
-            return Effects::default();
+            return self.stamp_pending_input(Effects::default());
         }
         self.center_page_rect(
             rect.page,
@@ -4511,7 +4646,7 @@ impl App {
             },
         );
         self.save_position();
-        Effects::redraw()
+        self.stamp_pending_input(Effects::redraw())
     }
 
     /// Deterministic Markdown for one highlight. Uses the captured source text.
@@ -4539,15 +4674,24 @@ impl App {
         format!("# Highlights\n\n{}", items.join("\n\n"))
     }
 
-    /// Pending highlights to paint, plus the one being placed while highlight
-    /// mode is active. Embedded records are omitted: MuPDF already renders them
-    /// from the PDF, and painting both would double-blend.
+    /// Pending highlights to paint, grouped by their captured colour, plus the
+    /// one being placed while highlight mode is active (under
+    /// [`PendingHighlight::color`]). Embedded records are omitted: MuPDF
+    /// already renders them from the PDF, and painting both would double-blend.
     ///
-    /// One overlay and one colour for both, so the shell's single merged fill
-    /// cannot double-blend a pending highlight over the stored one it overlaps.
-    pub fn highlight_screen_rects(&self) -> Option<Vec<ScreenRect>> {
+    /// Grouping by colour lets the shell merge same-colour rects into one fill
+    /// (so overlaps blend once) while still previewing each highlight in the
+    /// colour it will save with, even after a config reload.
+    pub fn highlight_overlay_groups(&self) -> Option<Vec<(String, Vec<ScreenRect>)>> {
         let session = self.session.as_ref()?;
-        let mut rects = Vec::new();
+        let mut groups: Vec<(String, Vec<ScreenRect>)> = Vec::new();
+        let mut push = |color: &str, rect: ScreenRect| {
+            if let Some((_, rects)) = groups.iter_mut().find(|(c, _)| c == color) {
+                rects.push(rect);
+            } else {
+                groups.push((color.to_owned(), vec![rect]));
+            }
+        };
         for (page, _) in session.view.visible_pages() {
             for highlight in self.highlights.iter().filter(|h| h.is_pending()) {
                 for rect in highlight.anchor.rects.iter().filter(|r| r.page == page) {
@@ -4555,16 +4699,35 @@ impl App {
                         .view
                         .page_rect_to_screen(page, rect.x0, rect.y0, rect.x1, rect.y1)
                     {
-                        rects.push(rect);
+                        push(&highlight.color, rect);
                     }
                 }
             }
         }
         if self.mode == Mode::Highlight {
             if let Some((start, end)) = self.visual_span {
-                rects.extend(self.span_screen_rects(start, end).unwrap_or_default());
+                let color = self
+                    .pending
+                    .as_ref()
+                    .map(|p| p.color.as_str())
+                    .unwrap_or(self.config.view.highlight_color.as_str());
+                for rect in self.span_screen_rects(start, end).unwrap_or_default() {
+                    push(color, rect);
+                }
             }
         }
+        if groups.is_empty() {
+            None
+        } else {
+            Some(groups)
+        }
+    }
+
+    /// Flattened form of [`Self::highlight_overlay_groups`] for callers that
+    /// only need geometry (tests, the legacy single-colour FFI).
+    pub fn highlight_screen_rects(&self) -> Option<Vec<ScreenRect>> {
+        let groups = self.highlight_overlay_groups()?;
+        let rects: Vec<ScreenRect> = groups.into_iter().flat_map(|(_, r)| r).collect();
         if rects.is_empty() {
             None
         } else {
@@ -4922,6 +5085,63 @@ mod tests {
     }
 
     #[test]
+    fn scroll_step_scales_with_device_pixel_ratio() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_doc(dir.path(), 3);
+        let step = app.config.view.scroll_step;
+        // Document-space scroll is physical_pixels / zoom; zoom is 1.0 here.
+        press(&mut app, "j");
+        let at_1x = app.session.as_ref().unwrap().view.scroll().1;
+        assert!(
+            (at_1x - step).abs() < 1e-3,
+            "1× scroll was {at_1x}, want {step}"
+        );
+
+        press(&mut app, "k");
+        app.set_device_pixel_ratio(2.0);
+        press(&mut app, "j");
+        let at_2x = app.session.as_ref().unwrap().view.scroll().1;
+        assert!(
+            (at_2x - 2.0 * step).abs() < 1e-3,
+            "2× scroll was {at_2x}, want {}",
+            2.0 * step
+        );
+    }
+
+    #[test]
+    fn scroll_off_scales_with_device_pixel_ratio() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_stacked_lines(dir.path(), 80.0);
+        // Walk far enough that the view has scrolled past the scroll_off
+        // buffer, so the content-top offset equals the configured clearance
+        // rather than being capped by how far we can still scroll up.
+        press(&mut app, "fe");
+        press(&mut app, "40j");
+        let scroll_1x = app.session.as_ref().unwrap().view.scroll().1;
+        let offset_1x = app.viewport_content_top().unwrap() - scroll_1x;
+        assert!(
+            scroll_1x > 80.0,
+            "precondition: view must have scrolled past the buffer, got {scroll_1x}"
+        );
+        assert!((offset_1x - 80.0).abs() < 1e-3, "1× offset was {offset_1x}");
+
+        let mut app = app_with_stacked_lines(dir.path(), 80.0);
+        app.set_device_pixel_ratio(2.0);
+        press(&mut app, "fe");
+        press(&mut app, "40j");
+        let scroll_2x = app.session.as_ref().unwrap().view.scroll().1;
+        let offset_2x = app.viewport_content_top().unwrap() - scroll_2x;
+        assert!(
+            scroll_2x > 160.0,
+            "precondition: 2× view must have scrolled past the buffer, got {scroll_2x}"
+        );
+        assert!(
+            (offset_2x - 160.0).abs() < 1e-3,
+            "2× content-top offset should be 160 logical×dpr px, got {offset_2x}"
+        );
+    }
+
+    #[test]
     fn zoom_commands() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_doc(dir.path(), 2);
@@ -4965,6 +5185,82 @@ mod tests {
         assert!(app.status_text().contains("100%"));
         press(&mut app, "2");
         assert!(app.status_text().contains('2'));
+    }
+
+    #[test]
+    fn a_subsequent_command_clears_a_stale_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_doc(dir.path(), 2);
+        app.report_error("could not save: disk full".to_owned());
+        assert!(app
+            .status_text()
+            .contains("ERROR: could not save: disk full"));
+        press(&mut app, "j");
+        assert!(
+            !app.status_text().contains("ERROR:"),
+            "stale error survived a later command: {}",
+            app.status_text()
+        );
+        assert!(app.last_error().is_none());
+    }
+
+    #[test]
+    fn save_with_nothing_pending_does_not_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta"]);
+        let effects = press(&mut app, "<Space>w");
+        assert!(!effects.reload, "no-op save must not drop the page cache");
+        assert!(!effects.annotations_changed);
+        assert!(
+            app.status_text()
+                .contains("nothing to save: no pending highlights"),
+            "{}",
+            app.status_text()
+        );
+    }
+
+    #[test]
+    fn wheel_scroll_preserves_a_pending_key_sequence() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_doc(dir.path(), 2);
+        // `f` is a prefix of `fw`/`fc`/…, so it waits for the next key (or the
+        // pause). A wheel scroll must not tell the shell to cancel that wait.
+        let effects = press(&mut app, "f");
+        assert!(effects.pending_input);
+        let effects = app.scroll_by_px(0.0, 40.0);
+        assert!(
+            effects.pending_input,
+            "scroll_by_px cleared pending_input while a prefix was buffered"
+        );
+    }
+
+    #[test]
+    fn a_quit_that_interrupts_a_replay_drops_the_leftover_chords() {
+        // `x` = quit and `xy` = zoom_in: pressing `xz` fires quit via the
+        // longest-prefix fallback and would queue `z` for replay. Cancelling
+        // the confirm dialog and then pressing `j` must not also run `z`.
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.keys.insert("x".to_owned(), "quit".to_owned());
+        config.keys.insert("xy".to_owned(), "zoom_in".to_owned());
+        config.keys.insert("z".to_owned(), "zoom_in".to_owned());
+        let mut app = App::new(config, Some(Storage::in_memory().unwrap()));
+        app.set_viewport_size(595.0, 600.0);
+        let path = write_pdf_bytes(dir.path(), "text.pdf", pdf_with_pages(&["alpha beta"]));
+        app.open_document(&path).unwrap();
+
+        press(&mut app, "fw");
+        press(&mut app, "aa"); // pending highlight so quit asks
+        let zoom_before = app.zoom();
+        let effects = press(&mut app, "xz");
+        assert!(effects.confirm_quit);
+        // Simulate cancel: do nothing. The next key must be only itself.
+        press(&mut app, "j");
+        assert_eq!(
+            app.zoom(),
+            zoom_before,
+            "replayed `z` ran zoom_in after the quit was cancelled"
+        );
     }
 
     #[test]
@@ -7924,6 +8220,59 @@ mod tests {
         assert_eq!(start.cell, 0);
     }
 
+    /// Regression: the backward cross-page branch of sentence motion expanded
+    /// from the previous page's raw last cell — which is inside the trailing
+    /// footnote block on any page that ends in one, the exact mid-flow stop
+    /// the footnote auto-skip exists to prevent, only backwards. A trailing
+    /// empty line produced an invalid `cell 0` landing the same way.
+    #[test]
+    fn sentence_prev_across_pages_skips_a_trailing_footnote() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["placeholder page", "Eta theta iota."]);
+        // Page 0 ends in a footnote and then an empty line.
+        let mut content = PageContent {
+            lines: vec![
+                text_line(100.0, "Alpha beta gamma."),
+                text_line(112.0, "Delta epsilon zeta."),
+                text_line(900.0, "1 A footnote sentence here."),
+            ],
+            objects: vec![ContentObject {
+                kind: syodep_pdf::ObjectKind::Footnote,
+                bbox: Rect {
+                    x0: 96.0,
+                    y0: 892.0,
+                    x1: 280.0,
+                    y1: 914.0,
+                },
+                start_line: 2,
+                end_line: 2,
+            }],
+            ..Default::default()
+        };
+        content.lines.push(ContentLine {
+            bbox: Rect {
+                x0: 100.0,
+                y0: 930.0,
+                x1: 100.0,
+                y1: 940.0,
+            },
+            cells: vec![],
+        });
+        app.set_page_content(0, content);
+
+        // Read forward onto page 1: the second `s` skips the footnote and
+        // crosses to page 1's first sentence.
+        press(&mut app, "fs");
+        press(&mut app, "s");
+        assert_caret(&app, 0, 1, 0);
+        press(&mut app, "s");
+        assert_caret(&app, 1, 0, 0);
+        // Stepping back must land on "Delta epsilon zeta." — not inside the
+        // footnote (line 2) and not on the empty line (line 3).
+        press(&mut app, "k");
+        assert_caret(&app, 0, 1, 0);
+    }
+
     // ---- Sentence focus ------------------------------------------------
 
     #[test]
@@ -8080,6 +8429,55 @@ mod tests {
         // A multi-line sentence yields one rect per spanned line.
         let rects = app.focus_screen_rects().unwrap();
         assert!(rects.len() >= 2);
+    }
+
+    // Regression suite for the captured text of a multi-line span: extracted
+    // lines carry no trailing space, and gluing them bare recorded
+    // "Alpha betagamma." into every stored anchor and export.
+
+    #[test]
+    fn span_text_joins_lines_with_a_space() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_two_lines(dir.path(), "Alpha beta", "gamma one.");
+        press(&mut app, "fs");
+        assert_eq!(span_text(&mut app), "Alpha beta gamma one.");
+    }
+
+    #[test]
+    fn span_text_joins_a_line_broken_word_whole() {
+        // The hyphen belongs to the line break, not the word — the same view
+        // word motion takes (`is_hyphen_interior` is same-line only).
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_two_lines(dir.path(), "Fine typeset-", "ting is hard.");
+        press(&mut app, "fs");
+        assert_eq!(span_text(&mut app), "Fine typesetting is hard.");
+    }
+
+    #[test]
+    fn span_text_keeps_a_freestanding_line_final_dash() {
+        // Only a hyphen between two word characters is a broken word; a dash
+        // used as punctuation keeps itself and gets the ordinary space.
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_two_lines(dir.path(), "Values rose -", "then fell again.");
+        press(&mut app, "fs");
+        assert_eq!(span_text(&mut app), "Values rose - then fell again.");
+    }
+
+    #[test]
+    fn span_text_inserts_a_space_at_page_boundaries() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["Alpha beta", "gamma one."]);
+        let start = Caret {
+            page: 0,
+            line: 0,
+            cell: 0,
+        };
+        let end = Caret {
+            page: 1,
+            line: 0,
+            cell: 4,
+        };
+        assert_eq!(app.span_text(start, end), "Alpha beta gamma");
     }
 
     #[test]
@@ -8719,6 +9117,64 @@ mod tests {
     }
 
     #[test]
+    fn pending_highlights_group_by_their_captured_color() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_pdf_bytes(dir.path(), "text.pdf", pdf_with_pages(&["alpha beta"]));
+        let db = dir.path().join("syodep.sqlite3");
+        {
+            let storage = Storage::open(&db).unwrap();
+            let fingerprint = Storage::fingerprint_file(&path).unwrap();
+            let document_id = storage
+                .upsert_document(&fingerprint, &path.display().to_string())
+                .unwrap();
+            storage
+                .insert_highlight(
+                    document_id,
+                    "#ff0000",
+                    "alpha",
+                    &[HighlightRect {
+                        page: 0,
+                        x0: 72.0,
+                        y0: 100.0,
+                        x1: 120.0,
+                        y1: 112.0,
+                    }],
+                )
+                .unwrap();
+            storage
+                .insert_highlight(
+                    document_id,
+                    "#00ff00",
+                    "beta",
+                    &[HighlightRect {
+                        page: 0,
+                        x0: 130.0,
+                        y0: 100.0,
+                        x1: 170.0,
+                        y1: 112.0,
+                    }],
+                )
+                .unwrap();
+        }
+        let mut app = App::new(Config::default(), Some(Storage::open(&db).unwrap()));
+        app.set_viewport_size(595.0, 600.0);
+        app.open_document(&path).unwrap();
+        // Change the live config colour so a bug that used it would disagree.
+        app.config.view.highlight_color = "#0000ff".to_owned();
+
+        let groups = app
+            .highlight_overlay_groups()
+            .expect("two pending highlights");
+        let colors: Vec<&str> = groups.iter().map(|(c, _)| c.as_str()).collect();
+        assert_eq!(colors, ["#ff0000", "#00ff00"]);
+        assert!(groups.iter().all(|(_, rects)| !rects.is_empty()));
+        assert_eq!(
+            app.highlight_screen_rects().unwrap().len(),
+            groups.iter().map(|(_, r)| r.len()).sum::<usize>()
+        );
+    }
+
+    #[test]
     fn a_from_focus_mode_starts_a_highlight_over_the_focused_word() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma"]);
@@ -9292,6 +9748,64 @@ mod tests {
         assert_eq!(app.highlights()[0].pdf_state, HighlightPdfState::Embedded);
         assert!(app.highlight_screen_rects().is_none());
         assert!(!app.has_unsaved_highlights());
+    }
+
+    /// Regression: a successful PDF rewrite whose database transaction fails
+    /// used to reopen blind — the row still carried the old fingerprint, so
+    /// the reopen keyed the new bytes to a fresh, empty row and every
+    /// highlight (and the reading position) vanished from the session. The
+    /// recovery must re-attach to the real row instead.
+    #[test]
+    fn failed_rekey_transaction_keeps_the_session_attached_to_its_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma"]);
+        press(&mut app, "fw");
+        press(&mut app, "aa");
+        let document_id = app.session.as_ref().unwrap().document_id.unwrap();
+        let id = app.highlights()[0].id.unwrap();
+
+        // Sabotage: flip the row to Embedded behind the session's back. The
+        // save then fails its mark step (the row is no longer Pending), which
+        // rolls the whole transaction — the rekey included — back.
+        app.storage
+            .as_ref()
+            .unwrap()
+            .mark_highlights_embedded(document_id, &[id])
+            .unwrap();
+
+        let effects = press(&mut app, "<Space>w");
+        // The PDF write itself succeeded and the failure was reported...
+        assert!(effects.reload);
+        assert_eq!(
+            syodep_pdf::page_highlights(app.document_path().unwrap(), 0)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            app.last_error
+                .as_deref()
+                .is_some_and(|e| e.contains("could not update its database records")),
+            "{:?}",
+            app.last_error
+        );
+        // ...and the session is still attached to its document row, with the
+        // highlight visible and treated as Embedded (no double-write later).
+        assert_eq!(app.session.as_ref().unwrap().document_id, Some(document_id));
+        assert_eq!(app.highlights().len(), 1);
+        assert_eq!(app.highlights()[0].id, Some(id));
+        assert_eq!(app.highlights()[0].pdf_state, HighlightPdfState::Embedded);
+        assert_eq!(app.highlight_summaries().len(), 1);
+        assert!(!app.has_unsaved_highlights());
+        // Position saves keep landing on the row that holds the data.
+        press(&mut app, "j");
+        assert!(app
+            .storage
+            .as_ref()
+            .unwrap()
+            .load_position(document_id)
+            .unwrap()
+            .is_some());
     }
 
     #[test]

@@ -218,6 +218,13 @@ impl InputState {
         self.replay.pop_front()
     }
 
+    /// Drop any leftover chords waiting to be replayed, without touching a
+    /// pending count or sequence. Used when a command interrupts the drain
+    /// (quit / confirm-quit) so the leftovers cannot fire after the dialog.
+    pub fn clear_replay(&mut self) {
+        self.replay.clear();
+    }
+
     /// Human-readable pending input for the status line, e.g. `12g`.
     pub fn pending_display(&self) -> String {
         let mut out = String::new();
