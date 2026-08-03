@@ -7,6 +7,17 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-08-03 — Fix Windows smoke: Markdown export without Text mode
+
+Windows CI/release smoke soft-failed after `highlights committed`: export
+round-trip compared LF core Markdown to a file written with
+`QIODevice::Text`, which on Windows turns `\n` into `\r\n`. Highlights and
+Annotations Markdown writers now open binary (`WriteOnly` only) so exports
+keep LF. Smoke writes fail reasons into `smoke-progress.txt`; Windows CI
+starts the exe with an absolute PDF path and an explicit working directory.
+
+---
+
 ## 2026-08-03 — Fix Linux smoke: lazy Annotations panel + xvfb
 
 CI still segfaulted on `MainWindow::show` with the Annotations widgets in the

@@ -93,7 +93,9 @@ bool writeTextAnnotationsMarkdown(const QString &path, const QString &markdown,
                                   QString *error)
 {
     QSaveFile file(path);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+    // Binary (no QIODevice::Text): keep LF newlines on Windows so Markdown
+    // export matches the core's `\n` and smoke round-trips byte-for-byte.
+    if (!file.open(QIODevice::WriteOnly)) {
         if (error)
             *error = describeSaveFileError(file, QObject::tr("cannot open for writing"));
         return false;

@@ -154,8 +154,11 @@ jobs:
           cargo run -p syodep-pdf --features test-support `
             --example make_fixture -- fixture.pdf 5
           $env:QT_QPA_PLATFORM = "offscreen"
-          $proc = Start-Process -FilePath "build/ui-qt/syodep.exe" `
-            -ArgumentList "--smoke-test", "fixture.pdf" -PassThru -Wait
+          $exe = (Resolve-Path "build/ui-qt/syodep.exe").Path
+          $pdf = (Resolve-Path "fixture.pdf").Path
+          $proc = Start-Process -FilePath $exe `
+            -ArgumentList "--smoke-test", $pdf `
+            -WorkingDirectory (Get-Location).Path -PassThru -Wait
           if ($proc.ExitCode -ne 0) {
             if (Test-Path smoke-progress.txt) {
               Write-Host "--- smoke-progress.txt ---"
