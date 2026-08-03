@@ -7,6 +7,197 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-08-03 — Stabilize highlights and Markdown annotations (Step 8)
+
+Reliability pass over Steps 6–7. No search, chat, tags, colors, combined export,
+or new sidebar types.
+
+### Focus and sidebar state
+
+`MainWindow::visibleSidebarPage()` is the single read model for which page is
+showing (nullopt when the dock is hidden). Menu checks and toggles use it.
+Local `gg`/`dd` pending state clears on page switch, hide, canvas focus, and
+document change. Opening a document focuses the canvas unless the dock was
+already visible. Editor Escape: clean → annotation list; dirty → stay and
+reinforce the unsaved cue.
+
+### Dirty drafts and create ids
+
+Dirty prompts are Save / Discard / Cancel; a failed Save aborts the transition.
+`create_text_annotation` returns a stable `TextAnnotationId`; the shell selects
+by id after create/save/delete (nearest-row rule after delete). Shared list
+keys live in `sidebar_list_keys.h`.
+
+### Export and persistence
+
+Canonical Markdown is `# Highlights` / `# Annotations` with `## Page` sections.
+Core strings have no trailing newline; QSaveFile writers append `\n`. When
+SQLite is unavailable, annotation create/edit/delete are refused with a clear
+status message (no invented session-only ids).
+
+### Checks
+
+Core immutability-after-save and persistence-off tests; Markdown format tests;
+expanded offscreen smoke (Highlights↔Annotations matrix, create/export/delete);
+`cargo test` / fmt / clippy / `check-docs.sh` / Qt build.
+
+---
+
+## 2026-08-03 — Independent Markdown annotations (Step 7)
+
+Annotations are first-class objects, separate from highlights: immutable
+captured source (`DocumentAnchor`) plus one editable Markdown body, never
+embedded in the PDF.
+
+### Storage
+
+Migration v4 adds `text_annotations` / `text_annotation_rects`. The withdrawn
+Step 5 `highlight_notes` schema also used version 4; open-time schema
+inspection refuses a DB that has `highlight_notes` without `text_annotations`
+(delete and recreate). A valid real-v4 database opens normally.
+
+### Creation and commands
+
+`n` (`create_annotation`) captures a frozen pending anchor from Focus (focused
+unit), Visual, or Highlight (current selection) without changing mode,
+selection, viewport, or the pending highlight. Normal mode reports a status
+message and creates nothing. `<leader>n` toggles the Annotations sidebar page;
+`<leader>a` still toggles Highlights. Empty Save is rejected; delete is
+explicit only; bodies are stored exactly as entered after validation.
+
+### Sidebar
+
+One fixed-right dock, `AnnotationSidebar` with `HighlightsPanel` /
+`AnnotationsPanel` pages. Self-toggle hides; cross-toggle substitutes; `n`
+always opens Annotations in creation mode. Dirty drafts survive hide/substitute.
+Shared `annotation_revision` / `annotations_changed` refreshes both lists.
+
+### Checks
+
+Storage schema/API tests; core create/capture/empty-body/order/persist tests;
+FFI list/create; docs check; Qt build and smoke.
+
+---
+
+## 2026-08-03 — Keyboard-driven highlight management; comments withdrawn
+
+Step 6. The sidebar becomes a list you can actually work from — move, jump,
+delete, copy, export — and the comment feature from step 5 is gone.
+
+### Comments removed before they shipped
+
+The 2026-07-31 entry below describes a feature that no longer exists. One
+editable Markdown body per highlight is not how a paper gets annotated, and
+keeping it would have frozen a published schema in front of the threads and
+agent chat that are actually wanted.
+
+The unreleased **v4 `highlight_notes` migration was deleted** rather than
+undone by a drop migration: nothing in a release ever ran it, and a second
+migration would make every future database run both. The schema ends at v3.
+
+**A development database that already ran v4 has to be deleted.** It reports
+`user_version = 4`, and `Storage::open` refuses a database from a newer build
+rather than downgrading it (`StorageError::SchemaTooNew`). Delete
+`syodep.sqlite3` (see `docs/config.md` for the path) and syodep recreates it;
+the reading position and highlights in it are lost. Test:
+`a_database_from_the_withdrawn_v4_is_refused`.
+
+Gone with it: `StoredHighlightNote`, `HighlightNote`,
+`HighlightSummary::note_markdown`, `App::set_highlight_note`,
+`syo_app_set_highlight_note`, the `has_note`/`note_markdown` FFI fields,
+`HighlightCommentEditor`, `SafeMarkdownView`, the note roles on the list
+model, the comment preview in the delegate, and the dirty-draft prompts on
+selection change / open / close.
+
+### Document order is the core's, and only the core's
+
+`highlight_summaries()` and `all_highlights_markdown()` now return highlights
+in reading order: rectangles are normalized to `(page, y0 ascending, x0)` when
+they enter the app — on load from SQLite and on commit — and a highlight sorts
+by its first rectangle, ties broken by row id. Page space has its origin at
+the top left with `y` growing downward, which is why smaller `y0` is earlier.
+
+Qt sorts nothing (no `QSortFilterProxyModel`, decision 20): the list, the
+clipboard and the file export have to agree, and a second definition in C++
+would agree only by coincidence. Tests:
+`summaries_are_in_document_order_not_creation_order`,
+`a_highlights_rectangles_are_normalized_into_document_order`,
+`a_highlight_committed_out_of_order_still_lists_in_document_order`, and the
+smoke test, which commits the second word first and checks that the list is
+not in id order.
+
+### Deleting a highlight
+
+`App::delete_highlight` is two operations behind one name.
+
+* **Pending** — one document-scoped row goes
+  (`Storage::delete_highlight(document_id, highlight_id)`; an id from another
+  document cannot delete across documents). Rectangles cascade.
+* **Embedded** — the PDF copy is what the user sees, so it goes first.
+  `syodep_pdf::remove_highlight_annotation` rewrites the file without the
+  annotations named `syodep-highlight-{id}`, following the same
+  temp-file/rename/re-key/reopen path as saving, and only then is the row
+  deleted. A record whose annotation carries no matching `/NM` is refused with
+  "This embedded highlight cannot be identified safely in the PDF."
+  (`AppError::EmbeddedHighlightUnidentifiable`) — the alternative is guessing
+  from geometry, and a wrong guess deletes an annotation somebody else made
+  (decision 21).
+
+`HighlightAnnotation` grew an optional `name`, written as `/NM` when embedding.
+A highlight spanning pages produces one annotation per page and they all share
+the name, so deleting takes every page of it and nothing else. Tests:
+`a_named_highlight_is_written_with_its_name_on_every_page`,
+`removing_a_named_highlight_takes_every_page_of_it_and_nothing_else`,
+`removing_an_unknown_name_writes_nothing`,
+`deleting_a_pending_highlight_removes_it_everywhere`,
+`deleting_an_embedded_highlight_removes_its_pdf_annotation`,
+`an_embedded_highlight_with_no_matching_name_is_refused`, plus the storage
+scoping tests.
+
+### `<leader>a`, and one place that toggles the sidebar
+
+New command `toggle_highlights_sidebar`, bound to `<leader>a` (a bare `a` is
+`highlight_enter`, and one letter must not mean two things). It carries no idea
+of the sidebar's state: the core asks, `Effects::toggle_highlights_sidebar` →
+`SYO_EFFECT_TOGGLE_HIGHLIGHTS_SIDEBAR` (128) →
+`CoreController::toggleHighlightsSidebarRequested` →
+`MainWindow::toggleHighlightsSidebar()`, which is also what `View → Highlights`
+runs. `CanvasWidget` never sees the bit.
+
+Toggling moves the keyboard, which is the point: opening focuses the list and
+selects the first row if nothing is selected, closing focuses the canvas, and
+`<Esc>` in the list focuses the canvas *without* closing. The dock is now
+`RightDockWidgetArea` + `DockWidgetClosable` only — no floating, no moving —
+and a `sanitizeDockState()` on startup undoes any restored layout that says
+otherwise. There is no `Ctrl+Shift+H`.
+
+### Sidebar keys, delete confirmation, Markdown export
+
+`j`/`k`/arrows, `gg`/`Home`, `G`/`End`, `Enter` to jump, `dd`/`Delete`,
+`y` (text), `Y` (Markdown), `Ctrl+Shift+E` (export), `Esc`. One event filter
+handles them and consumes them, so nothing leaks through to the canvas and
+moves the caret; `gg` and `dd` use a local two-key state machine on the core's
+configured key timeout, so a stray `g` expires instead of staying armed.
+
+Deleting asks first, and says which kind it is about to remove, because only
+one of the two rewrites the PDF. Afterwards the selection lands on whatever
+moved up into the deleted row (position, not id), so `dd dd` works.
+
+Export writes every highlight to a `.md` file through `QSaveFile`, defaulting
+to `<document-name>-highlights.md` beside the document, from the File menu, the
+context menu or `Ctrl+Shift+E`. An empty list gets a message, not an empty file.
+`syo_app_document_path` was added so the shell can name the file after the
+document without knowing which one is open.
+
+### Checks
+
+`cargo test --workspace` (602 tests), `cargo fmt`, `cargo clippy --workspace
+--all-targets -D warnings`, docs check, Qt build, offscreen smoke (now covering
+document order, the export write, a delete, the dock's fixed features, and the
+toggle).
+
+---
+
 ## 2026-08-02 — Word stops across synthetic gaps; centred table columns
 
 ### Word motion: synthetic gap after `.` is not a dotted token
@@ -88,6 +279,9 @@ page-wide spans. Tests:
 ---
 
 ## 2026-07-31 — Markdown comments on highlights
+
+**Withdrawn on 2026-08-03 before any release — see the entry at the top. This
+entry is kept as the record of what was tried and why it went.**
 
 Step 5 after the read-only sidebar. Each stable highlight may carry one
 optional Markdown comment.

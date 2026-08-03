@@ -24,7 +24,10 @@ for what to build next.
   `crates/syodep-ffi` (every entry point wrapped in `catch_unwind`).
 - **Persistence**: dynamic user state goes in SQLite, never TOML.
   `MIGRATIONS` in `crates/syodep-storage/src/migrations.rs` is append-only;
-  never edit a published entry.
+  never edit a published entry. An entry that has not been in a release is not
+  published: if the feature it belongs to is abandoned, delete the entry rather
+  than adding a second one to undo it, and say in the dev log that development
+  databases have to be recreated (this happened once, to v4).
 - **Config errors never abort the app**: degrade to defaults + status-bar
   warning.
 

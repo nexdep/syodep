@@ -24,7 +24,7 @@ use std::path::PathBuf;
 
 use syodep_config::keys::parse_sequence;
 use syodep_config::Config;
-use syodep_core::{App, Effects, HighlightId, HighlightPdfState};
+use syodep_core::{App, Effects, HighlightId, HighlightPdfState, TextAnnotationId};
 use syodep_storage::Storage;
 
 /// Opaque application handle.
@@ -152,6 +152,16 @@ pub const SYO_EFFECT_CONFIRM_QUIT: u32 = 32;
 /// The annotation collection changed. Distinct from [`SYO_EFFECT_REDRAW`]: a
 /// canvas refresh and a sidebar list refresh are different requests.
 pub const SYO_EFFECT_ANNOTATIONS_CHANGED: u32 = 64;
+/// Show or hide the highlights sidebar and move keyboard focus with it (see
+/// `Effects::toggle_highlights_sidebar`). Sidebar visibility is shell state, so
+/// this is a toggle request rather than a desired state.
+pub const SYO_EFFECT_TOGGLE_HIGHLIGHTS_SIDEBAR: u32 = 128;
+/// Show or hide the annotations sidebar page (see
+/// `Effects::toggle_annotations_sidebar`).
+pub const SYO_EFFECT_TOGGLE_ANNOTATIONS_SIDEBAR: u32 = 256;
+/// A pending annotation anchor was captured; open the Annotations page in
+/// creation mode (see `Effects::create_annotation_requested`). Never a hide.
+pub const SYO_EFFECT_CREATE_ANNOTATION_REQUESTED: u32 = 512;
 
 fn effects_to_bits(effects: Effects) -> u32 {
     let mut bits = 0;
@@ -175,6 +185,15 @@ fn effects_to_bits(effects: Effects) -> u32 {
     }
     if effects.annotations_changed {
         bits |= SYO_EFFECT_ANNOTATIONS_CHANGED;
+    }
+    if effects.toggle_highlights_sidebar {
+        bits |= SYO_EFFECT_TOGGLE_HIGHLIGHTS_SIDEBAR;
+    }
+    if effects.toggle_annotations_sidebar {
+        bits |= SYO_EFFECT_TOGGLE_ANNOTATIONS_SIDEBAR;
+    }
+    if effects.create_annotation_requested {
+        bits |= SYO_EFFECT_CREATE_ANNOTATION_REQUESTED;
     }
     bits
 }
@@ -669,12 +688,9 @@ fn syo_highlight_state(state: HighlightPdfState) -> SyoHighlightState {
     }
 }
 
-/// One highlight for the annotations sidebar. `text`, `color`, and
-/// `note_markdown` are owned heap copies; free the whole list with
-/// [`syo_highlight_list_free`]. Pages are zero-based (the shell displays them
-/// one-based). `has_note` is 1 when a comment exists; `note_markdown` is then a
-/// non-null UTF-8 string (possibly empty only if the stored body was empty —
-/// whitespace-only comments are cleared before they reach this snapshot).
+/// One highlight for the annotations sidebar. `text` and `color` are owned heap
+/// copies; free the whole list with [`syo_highlight_list_free`]. Pages are
+/// zero-based (the shell displays them one-based).
 #[repr(C)]
 pub struct SyoHighlightItem {
     pub id: i64,
@@ -682,8 +698,6 @@ pub struct SyoHighlightItem {
     pub last_page: usize,
     pub text: *mut c_char,
     pub color: *mut c_char,
-    pub has_note: u8,
-    pub note_markdown: *mut c_char,
     pub state: SyoHighlightState,
 }
 
@@ -704,7 +718,7 @@ fn empty_highlight_list(revision: u64) -> *mut SyoHighlightList {
     }))
 }
 
-/// Every highlight of the open document (Pending and Embedded), in stable id
+/// Every highlight of the open document (Pending and Embedded), in document
 /// order. Distinct from [`syo_app_highlights`], which returns screen-space
 /// overlay geometry for Pending records only. Free with
 /// [`syo_highlight_list_free`].
@@ -724,21 +738,13 @@ pub unsafe extern "C" fn syo_app_highlight_list(app: *const SyoApp) -> *mut SyoH
         }
         let mut items: Vec<SyoHighlightItem> = summaries
             .into_iter()
-            .map(|s| {
-                let (has_note, note_markdown) = match s.note_markdown {
-                    Some(body) => (1u8, to_c_string(body)),
-                    None => (0u8, std::ptr::null_mut()),
-                };
-                SyoHighlightItem {
-                    id: s.id.0,
-                    first_page: s.first_page,
-                    last_page: s.last_page,
-                    text: to_c_string(s.text),
-                    color: to_c_string(s.color),
-                    has_note,
-                    note_markdown,
-                    state: syo_highlight_state(s.pdf_state),
-                }
+            .map(|s| SyoHighlightItem {
+                id: s.id.0,
+                first_page: s.first_page,
+                last_page: s.last_page,
+                text: to_c_string(s.text),
+                color: to_c_string(s.color),
+                state: syo_highlight_state(s.pdf_state),
             })
             .collect();
         let count = items.len();
@@ -770,7 +776,6 @@ pub unsafe extern "C" fn syo_highlight_list_free(list: *mut SyoHighlightList) {
             for item in items.iter() {
                 syo_string_free(item.text);
                 syo_string_free(item.color);
-                syo_string_free(item.note_markdown);
             }
         }
     }));
@@ -841,22 +846,250 @@ pub unsafe extern "C" fn syo_app_all_highlights_markdown(app: *const SyoApp) -> 
     .unwrap_or_else(|_| to_c_string(String::new()))
 }
 
-/// Set or clear the Markdown comment for a highlight of the open document.
+/// Delete a highlight of the open document.
 ///
-/// `body_markdown` is borrowed UTF-8. Empty or whitespace-only clears the
-/// comment. On success, writes effect bits to `effects_out` (may be zero for a
-/// no-op equal body) and returns true. On failure (invalid UTF-8, unknown id,
-/// missing document, persistence unavailable/failure, panic), returns false and
-/// sets `effects_out` to zero when non-null. Errors are also reported through
-/// the core status path.
+/// A Pending highlight is removed from the database. An Embedded one is first
+/// removed from the PDF by the `/NM` syodep wrote when embedding it, which
+/// rewrites the file; on success `effects_out` therefore also carries
+/// [`SYO_EFFECT_RELOAD`].
+///
+/// Returns true when the highlight is gone, writing effect bits to
+/// `effects_out`. On failure (unknown id, no document, an embedded annotation
+/// that cannot be identified in the PDF, a failed write, panic) returns false
+/// and sets `effects_out` to zero when non-null; the reason is reported through
+/// the core status path (`syo_app_status_text`).
 ///
 /// # Safety
-/// `app` must be NULL or valid. `body_markdown` must be NULL or a valid C string.
-/// `effects_out` may be NULL.
+/// `app` must be NULL or valid. `effects_out` may be NULL.
 #[no_mangle]
-pub unsafe extern "C" fn syo_app_set_highlight_note(
+pub unsafe extern "C" fn syo_app_delete_highlight(
     app: *mut SyoApp,
     highlight_id: i64,
+    effects_out: *mut u32,
+) -> bool {
+    let set_effects = |bits: u32| {
+        if !effects_out.is_null() {
+            unsafe {
+                *effects_out = bits;
+            }
+        }
+    };
+    let Some(app) = (unsafe { app.as_mut() }) else {
+        set_effects(0);
+        return false;
+    };
+    match catch_unwind(AssertUnwindSafe(|| {
+        app.app.delete_highlight(HighlightId(highlight_id))
+    })) {
+        Ok(Ok(effects)) => {
+            set_effects(effects_to_bits(effects));
+            true
+        }
+        Ok(Err(_)) | Err(_) => {
+            set_effects(0);
+            false
+        }
+    }
+}
+
+/// One text annotation for the sidebar. `text` and `body_markdown` are owned
+/// heap copies of the complete source and complete Markdown body; free the
+/// whole list with [`syo_text_annotation_list_free`].
+#[repr(C)]
+pub struct SyoTextAnnotationItem {
+    pub id: i64,
+    pub first_page: usize,
+    pub last_page: usize,
+    pub text: *mut c_char,
+    pub body_markdown: *mut c_char,
+}
+
+#[repr(C)]
+pub struct SyoTextAnnotationList {
+    pub items: *mut SyoTextAnnotationItem,
+    pub count: usize,
+    pub revision: u64,
+}
+
+fn empty_text_annotation_list(revision: u64) -> *mut SyoTextAnnotationList {
+    Box::into_raw(Box::new(SyoTextAnnotationList {
+        items: std::ptr::null_mut(),
+        count: 0,
+        revision,
+    }))
+}
+
+/// Every text annotation of the open document, in document order. Free with
+/// [`syo_text_annotation_list_free`].
+///
+/// # Safety
+/// `app` must be NULL or valid.
+#[no_mangle]
+pub unsafe extern "C" fn syo_app_text_annotation_list(
+    app: *const SyoApp,
+) -> *mut SyoTextAnnotationList {
+    let Some(app) = (unsafe { app.as_ref() }) else {
+        return empty_text_annotation_list(0);
+    };
+    catch_unwind(AssertUnwindSafe(|| {
+        let revision = app.app.annotation_revision();
+        let summaries = app.app.text_annotation_summaries();
+        if summaries.is_empty() {
+            return empty_text_annotation_list(revision);
+        }
+        let mut items: Vec<SyoTextAnnotationItem> = summaries
+            .into_iter()
+            .map(|s| SyoTextAnnotationItem {
+                id: s.id.0,
+                first_page: s.first_page,
+                last_page: s.last_page,
+                text: to_c_string(s.text),
+                body_markdown: to_c_string(s.body_markdown),
+            })
+            .collect();
+        let count = items.len();
+        let items_ptr = items.as_mut_ptr();
+        std::mem::forget(items);
+        Box::into_raw(Box::new(SyoTextAnnotationList {
+            items: items_ptr,
+            count,
+            revision,
+        }))
+    }))
+    .unwrap_or_else(|_| empty_text_annotation_list(0))
+}
+
+/// Free a list returned by [`syo_app_text_annotation_list`].
+///
+/// # Safety
+/// `list` must be NULL or a pointer from [`syo_app_text_annotation_list`].
+#[no_mangle]
+pub unsafe extern "C" fn syo_text_annotation_list_free(list: *mut SyoTextAnnotationList) {
+    if list.is_null() {
+        return;
+    }
+    let _ = catch_unwind(AssertUnwindSafe(|| unsafe {
+        let list = Box::from_raw(list);
+        if !list.items.is_null() && list.count > 0 {
+            let items = Box::from_raw(std::ptr::slice_from_raw_parts_mut(list.items, list.count));
+            for item in items.iter() {
+                syo_string_free(item.text);
+                syo_string_free(item.body_markdown);
+            }
+        }
+    }));
+}
+
+/// Captured source text of the pending annotation, or NULL when none.
+/// Free with [`syo_string_free`].
+///
+/// # Safety
+/// `app` must be NULL or valid.
+#[no_mangle]
+pub unsafe extern "C" fn syo_app_pending_annotation_text(app: *const SyoApp) -> *mut c_char {
+    let Some(app) = (unsafe { app.as_ref() }) else {
+        return std::ptr::null_mut();
+    };
+    catch_unwind(AssertUnwindSafe(|| {
+        match app.app.pending_annotation_anchor() {
+            Some(anchor) => to_c_string(anchor.text.clone()),
+            None => std::ptr::null_mut(),
+        }
+    }))
+    .unwrap_or(std::ptr::null_mut())
+}
+
+/// Drop a pending annotation create without writing a row.
+///
+/// # Safety
+/// `app` must be NULL or valid.
+#[no_mangle]
+pub unsafe extern "C" fn syo_app_cancel_pending_annotation(app: *mut SyoApp) {
+    let Some(app) = (unsafe { app.as_mut() }) else {
+        return;
+    };
+    let _ = catch_unwind(AssertUnwindSafe(|| app.app.cancel_pending_annotation()));
+}
+
+/// Whether SQLite persistence is available for annotations.
+///
+/// # Safety
+/// `app` must be NULL or valid.
+#[no_mangle]
+pub unsafe extern "C" fn syo_app_has_persistence(app: *const SyoApp) -> bool {
+    let Some(app) = (unsafe { app.as_ref() }) else {
+        return false;
+    };
+    catch_unwind(AssertUnwindSafe(|| app.app.has_persistence())).unwrap_or(false)
+}
+
+/// Persist a new text annotation from the pending anchor. Returns true and
+/// writes the new id plus effect bits on success. Trimmed-empty bodies fail.
+///
+/// # Safety
+/// `app` must be NULL or valid. `body_markdown` must be a valid C string.
+/// `out_id` and `effects_out` may be NULL.
+#[no_mangle]
+pub unsafe extern "C" fn syo_app_create_text_annotation(
+    app: *mut SyoApp,
+    body_markdown: *const c_char,
+    out_id: *mut i64,
+    effects_out: *mut u32,
+) -> bool {
+    let set_effects = |bits: u32| {
+        if !effects_out.is_null() {
+            unsafe {
+                *effects_out = bits;
+            }
+        }
+    };
+    let set_id = |id: i64| {
+        if !out_id.is_null() {
+            unsafe {
+                *out_id = id;
+            }
+        }
+    };
+    let Some(app) = (unsafe { app.as_mut() }) else {
+        set_id(0);
+        set_effects(0);
+        return false;
+    };
+    if body_markdown.is_null() {
+        set_id(0);
+        set_effects(0);
+        return false;
+    }
+    let Ok(body) = (unsafe { CStr::from_ptr(body_markdown) }).to_str() else {
+        set_id(0);
+        set_effects(0);
+        return false;
+    };
+    match catch_unwind(AssertUnwindSafe(|| {
+        app.app.create_text_annotation(body.to_owned())
+    })) {
+        Ok(Ok((id, effects))) => {
+            set_id(id.0);
+            set_effects(effects_to_bits(effects));
+            true
+        }
+        Ok(Err(_)) | Err(_) => {
+            set_id(0);
+            set_effects(0);
+            false
+        }
+    }
+}
+
+/// Replace the Markdown body of an existing text annotation.
+///
+/// # Safety
+/// `app` must be NULL or valid. `body_markdown` must be a valid C string.
+/// `effects_out` may be NULL.
+#[no_mangle]
+pub unsafe extern "C" fn syo_app_set_text_annotation_body(
+    app: *mut SyoApp,
+    annotation_id: i64,
     body_markdown: *const c_char,
     effects_out: *mut u32,
 ) -> bool {
@@ -871,19 +1104,17 @@ pub unsafe extern "C" fn syo_app_set_highlight_note(
         set_effects(0);
         return false;
     };
-    let Some(body) = (unsafe {
-        if body_markdown.is_null() {
-            Some("")
-        } else {
-            CStr::from_ptr(body_markdown).to_str().ok()
-        }
-    }) else {
+    if body_markdown.is_null() {
+        set_effects(0);
+        return false;
+    }
+    let Ok(body) = (unsafe { CStr::from_ptr(body_markdown) }).to_str() else {
         set_effects(0);
         return false;
     };
     match catch_unwind(AssertUnwindSafe(|| {
         app.app
-            .set_highlight_note(HighlightId(highlight_id), body.to_owned())
+            .set_text_annotation_body(TextAnnotationId(annotation_id), body.to_owned())
     })) {
         Ok(Ok(effects)) => {
             set_effects(effects_to_bits(effects));
@@ -894,6 +1125,100 @@ pub unsafe extern "C" fn syo_app_set_highlight_note(
             false
         }
     }
+}
+
+/// # Safety
+/// `app` must be NULL or valid.
+#[no_mangle]
+pub unsafe extern "C" fn syo_app_reveal_text_annotation(
+    app: *mut SyoApp,
+    annotation_id: i64,
+) -> u32 {
+    let Some(app) = (unsafe { app.as_mut() }) else {
+        return 0;
+    };
+    catch_unwind(AssertUnwindSafe(|| {
+        effects_to_bits(
+            app.app
+                .reveal_text_annotation(TextAnnotationId(annotation_id)),
+        )
+    }))
+    .unwrap_or(0)
+}
+
+/// # Safety
+/// `app` must be NULL or valid. `effects_out` may be NULL.
+#[no_mangle]
+pub unsafe extern "C" fn syo_app_delete_text_annotation(
+    app: *mut SyoApp,
+    annotation_id: i64,
+    effects_out: *mut u32,
+) -> bool {
+    let set_effects = |bits: u32| {
+        if !effects_out.is_null() {
+            unsafe {
+                *effects_out = bits;
+            }
+        }
+    };
+    let Some(app) = (unsafe { app.as_mut() }) else {
+        set_effects(0);
+        return false;
+    };
+    match catch_unwind(AssertUnwindSafe(|| {
+        app.app
+            .delete_text_annotation(TextAnnotationId(annotation_id))
+    })) {
+        Ok(Ok(effects)) => {
+            set_effects(effects_to_bits(effects));
+            true
+        }
+        Ok(Err(_)) | Err(_) => {
+            set_effects(0);
+            false
+        }
+    }
+}
+
+/// Deterministic Markdown for one text annotation. NULL when unknown.
+/// Free with [`syo_string_free`].
+///
+/// # Safety
+/// `app` must be NULL or valid.
+#[no_mangle]
+pub unsafe extern "C" fn syo_app_text_annotation_markdown(
+    app: *const SyoApp,
+    annotation_id: i64,
+) -> *mut c_char {
+    let Some(app) = (unsafe { app.as_ref() }) else {
+        return std::ptr::null_mut();
+    };
+    catch_unwind(AssertUnwindSafe(|| {
+        match app
+            .app
+            .text_annotation_markdown(TextAnnotationId(annotation_id))
+        {
+            Ok(md) => to_c_string(md),
+            Err(_) => std::ptr::null_mut(),
+        }
+    }))
+    .unwrap_or(std::ptr::null_mut())
+}
+
+/// Deterministic Markdown for every text annotation. Free with
+/// [`syo_string_free`].
+///
+/// # Safety
+/// `app` must be NULL or valid.
+#[no_mangle]
+pub unsafe extern "C" fn syo_app_all_text_annotations_markdown(app: *const SyoApp) -> *mut c_char {
+    let Some(app) = (unsafe { app.as_ref() }) else {
+        return to_c_string(String::new());
+    };
+    catch_unwind(AssertUnwindSafe(|| {
+        to_c_string(app.app.all_text_annotations_markdown())
+    }))
+    .unwrap_or_else(|_| to_c_string(String::new()))
 }
 
 /// Render a page at the current zoom. Returns NULL on failure. The result
@@ -1063,6 +1388,28 @@ pub unsafe extern "C" fn syo_app_open_dir(app: *const SyoApp) -> *mut c_char {
         return to_c_string(String::new());
     };
     to_c_string(app.open_dir.clone())
+}
+
+/// Path of the open document, or an empty string when none is open. Free with
+/// `syo_string_free`.
+///
+/// The shell needs it to name things after the document — the export file, a
+/// window title — and asking here keeps the core the only place that knows
+/// which file is open.
+///
+/// # Safety
+/// `app` must be NULL or valid.
+#[no_mangle]
+pub unsafe extern "C" fn syo_app_document_path(app: *const SyoApp) -> *mut c_char {
+    let Some(app) = (unsafe { app.as_ref() }) else {
+        return to_c_string(String::new());
+    };
+    to_c_string(
+        app.app
+            .document_path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default(),
+    )
 }
 
 /// Human-readable provenance of the Open-dialog directory (e.g. "launch
@@ -1631,89 +1978,26 @@ mod tests {
             assert_eq!(item.state, SYO_HIGHLIGHT_PENDING);
             assert_eq!(CStr::from_ptr(item.text).to_str().unwrap(), "alpha");
             assert!(!CStr::from_ptr(item.color).to_str().unwrap().is_empty());
-            assert_eq!(item.has_note, 0);
-            assert!(item.note_markdown.is_null());
             let id = item.id;
             syo_highlight_list_free(list);
 
-            let mut effects = 0u32;
-            let note = CString::new("Important note").unwrap();
-            assert!(syo_app_set_highlight_note(
-                app,
-                id,
-                note.as_ptr(),
-                &mut effects
-            ));
-            assert_eq!(
-                effects & SYO_EFFECT_ANNOTATIONS_CHANGED,
-                SYO_EFFECT_ANNOTATIONS_CHANGED
-            );
-            assert_eq!(effects & SYO_EFFECT_REDRAW, 0);
-
-            // No-op equal body.
-            effects = 99;
-            assert!(syo_app_set_highlight_note(
-                app,
-                id,
-                note.as_ptr(),
-                &mut effects
-            ));
-            assert_eq!(effects, 0);
-
+            let mut effects = 1u32;
+            assert!(!syo_app_delete_highlight(app, 999_999, &mut effects));
+            assert_eq!(effects, 0, "an unknown id changes nothing");
             let list = syo_app_highlight_list(app);
             assert_eq!((*list).count, 1);
-            let item = &*(*list).items;
-            assert_eq!(item.has_note, 1);
-            assert_eq!(
-                CStr::from_ptr(item.note_markdown).to_str().unwrap(),
-                "Important note"
-            );
             syo_highlight_list_free(list);
 
             let md = syo_app_highlight_markdown(app, id);
             assert!(!md.is_null());
             let md_s = CStr::from_ptr(md).to_str().unwrap().to_owned();
             syo_string_free(md);
-            assert_eq!(md_s, "### Page 1\n\n> alpha\n\nImportant note");
-
-            // Clear via whitespace.
-            let blank = CString::new("  \n ").unwrap();
-            effects = 0;
-            assert!(syo_app_set_highlight_note(
-                app,
-                id,
-                blank.as_ptr(),
-                &mut effects
-            ));
-            assert_eq!(
-                effects & SYO_EFFECT_ANNOTATIONS_CHANGED,
-                SYO_EFFECT_ANNOTATIONS_CHANGED
-            );
-
-            let list = syo_app_highlight_list(app);
-            assert_eq!((*(*list).items).has_note, 0);
-            assert!((*(*list).items).note_markdown.is_null());
-            syo_highlight_list_free(list);
-
-            effects = 1;
-            assert!(!syo_app_set_highlight_note(
-                app,
-                999_999,
-                note.as_ptr(),
-                &mut effects
-            ));
-            assert_eq!(effects, 0);
-
-            let md = syo_app_highlight_markdown(app, id);
-            assert!(!md.is_null());
-            let md_s = CStr::from_ptr(md).to_str().unwrap().to_owned();
-            syo_string_free(md);
-            assert_eq!(md_s, "### Page 1\n\n> alpha");
+            assert_eq!(md_s, "## Page 1\n\n> alpha");
 
             let all = syo_app_all_highlights_markdown(app);
             let all_s = CStr::from_ptr(all).to_str().unwrap().to_owned();
             syo_string_free(all);
-            assert_eq!(all_s, md_s);
+            assert_eq!(all_s, format!("# Highlights\n\n{md_s}"));
             assert!(syo_app_highlight_markdown(app, 999_999).is_null());
 
             let reveal_bits = syo_app_reveal_highlight(app, id);
@@ -1734,27 +2018,21 @@ mod tests {
             assert_eq!((*(*list).items).state, SYO_HIGHLIGHT_EMBEDDED);
             syo_highlight_list_free(list);
 
-            // Notes still work on Embedded highlights.
-            let unicode = CString::new("标题 with 文字").unwrap();
+            // Deleting the Embedded highlight takes the PDF annotation with
+            // it, so the file is rewritten and the shell must drop its bitmaps.
             effects = 0;
-            assert!(syo_app_set_highlight_note(
-                app,
-                id,
-                unicode.as_ptr(),
-                &mut effects
-            ));
+            assert!(syo_app_delete_highlight(app, id, &mut effects));
             assert_eq!(
                 effects & SYO_EFFECT_ANNOTATIONS_CHANGED,
                 SYO_EFFECT_ANNOTATIONS_CHANGED
             );
+            assert_eq!(effects & SYO_EFFECT_RELOAD, SYO_EFFECT_RELOAD);
             let list = syo_app_highlight_list(app);
-            assert_eq!(
-                CStr::from_ptr((*(*list).items).note_markdown)
-                    .to_str()
-                    .unwrap(),
-                "标题 with 文字"
-            );
+            assert_eq!((*list).count, 0);
             syo_highlight_list_free(list);
+            assert!(syodep_pdf::page_highlight_names(&pdf_path, 0)
+                .unwrap()
+                .is_empty());
 
             syo_app_free(app);
         }
@@ -1770,17 +2048,38 @@ mod tests {
             assert_eq!(CStr::from_ptr(all).to_str().unwrap(), "");
             syo_string_free(all);
             let mut effects = 99u32;
-            let body = CString::new("x").unwrap();
-            assert!(!syo_app_set_highlight_note(
+            assert!(!syo_app_delete_highlight(
                 std::ptr::null_mut(),
                 1,
-                body.as_ptr(),
                 &mut effects
             ));
             assert_eq!(effects, 0);
             let list = syo_app_highlight_list(std::ptr::null());
             assert_eq!((*list).count, 0);
             syo_highlight_list_free(list);
+            let path = syo_app_document_path(std::ptr::null());
+            assert_eq!(CStr::from_ptr(path).to_str().unwrap(), "");
+            syo_string_free(path);
+        }
+    }
+
+    #[test]
+    fn the_sidebar_toggle_reaches_the_shell_as_its_own_bit() {
+        // The bit is the whole contract: the core has no idea whether the
+        // sidebar is open, so a wrong or missing bit is a silently dead
+        // keybinding rather than a visible failure.
+        unsafe {
+            let app = syo_app_new(std::ptr::null(), std::ptr::null());
+            let leader = CString::new("<Space>").unwrap();
+            let a = CString::new("a").unwrap();
+            syo_app_key_event(app, leader.as_ptr());
+            let bits = syo_app_key_event(app, a.as_ptr());
+            assert_eq!(
+                bits & SYO_EFFECT_TOGGLE_HIGHLIGHTS_SIDEBAR,
+                SYO_EFFECT_TOGGLE_HIGHLIGHTS_SIDEBAR
+            );
+            assert_eq!(bits & SYO_EFFECT_QUIT, 0);
+            syo_app_free(app);
         }
     }
 }

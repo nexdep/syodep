@@ -17,11 +17,15 @@
 
 #include <cstdio>
 
+#include <QAction>
+#include <QDockWidget>
+#include <QListView>
+
 #include "core_controller.h"
 #include "diagnostics.h"
 #include "main_window.h"
 #include "sidebar/annotation_sidebar.h"
-#include "sidebar/highlight_comment_editor.h"
+#include "sidebar/annotations_panel.h"
 #include "sidebar/highlight_list_model.h"
 #include "syodep_ffi.h"
 
@@ -60,72 +64,138 @@ int runSmokeTest(const QString &pdfPath)
     (void)core.selectionOverlay();
     (void)core.highlightOverlay();
 
-    // Comment path needs a real database. Use a temp DB so CI never writes the
-    // user profile store.
+    // The annotation paths need a real database. Use a temp DB so CI never
+    // writes the user profile store.
     QTemporaryDir tmp;
     if (!tmp.isValid()) {
         std::fprintf(stderr, "SMOKE FAIL: temp dir\n");
         return 1;
     }
     const QString dbPath = tmp.filePath(QStringLiteral("smoke.sqlite3"));
-    syodep::CoreController noteCore(dbPath);
-    if (!noteCore.isValid()) {
-        std::fprintf(stderr, "SMOKE FAIL: note core construction\n");
+    syodep::CoreController annotationCore(dbPath);
+    if (!annotationCore.isValid()) {
+        std::fprintf(stderr, "SMOKE FAIL: annotation core construction\n");
         return 1;
     }
-    noteCore.setViewportSize(800.0f, 600.0f);
-    if (!noteCore.openDocument(pdfPath)) {
-        std::fprintf(stderr, "SMOKE FAIL: note core open\n");
+    annotationCore.setViewportSize(800.0f, 600.0f);
+    if (!annotationCore.openDocument(pdfPath)) {
+        std::fprintf(stderr, "SMOKE FAIL: annotation core open\n");
         return 1;
     }
-    // Commit one highlight via the same keys the UI would send.
-    for (const char *key : {"f", "w", "a", "a"})
-        noteCore.sendKey(QString::fromUtf8(key));
+    // Commit two highlights via the same keys the UI would send: the second
+    // word first, so the list can only be right if it is sorted by position.
+    for (const char *key : {"f", "w", "w", "a", "a", "b", "a", "a"})
+        annotationCore.sendKey(QString::fromUtf8(key));
 
-    syodep::AnnotationSidebar sidebar(&noteCore);
+    syodep::AnnotationSidebar sidebar(&annotationCore);
     sidebar.refreshAnnotations(true);
     if (sidebar.contentState() != syodep::AnnotationSidebar::ContentState::HighlightList) {
         std::fprintf(stderr, "SMOKE FAIL: expected highlight list after commit\n");
         return 1;
     }
-    if (!sidebar.commentEditor()) {
-        std::fprintf(stderr, "SMOKE FAIL: comment editor missing\n");
+    if (sidebar.model()->rowCount() != 2) {
+        std::fprintf(stderr, "SMOKE FAIL: expected 2 highlights, got %d\n",
+                     sidebar.model()->rowCount());
         return 1;
     }
-    const auto *item = sidebar.model()->itemAt(0);
-    if (!item) {
+    const auto *first = sidebar.model()->itemAt(0);
+    const auto *second = sidebar.model()->itemAt(1);
+    if (!first || !second) {
         std::fprintf(stderr, "SMOKE FAIL: missing highlight item\n");
         return 1;
     }
-    sidebar.commentEditor()->loadHighlight(*item);
-    if (sidebar.commentEditor()->isDirty() || sidebar.commentEditor()->hasHighlight() == false) {
-        std::fprintf(stderr, "SMOKE FAIL: editor load\n");
-        return 1;
-    }
-    if (!sidebar.commentEditor()->markdown().isEmpty()) {
-        std::fprintf(stderr, "SMOKE FAIL: expected empty note\n");
+    if (first->id <= second->id) {
+        std::fprintf(stderr, "SMOKE FAIL: expected document order, not id order\n");
         return 1;
     }
 
-    const quint64 revBefore = noteCore.annotationRevision();
-    const QString note = QStringLiteral("Smoke comment");
-    if (!noteCore.setHighlightNote(item->id, note)) {
-        std::fprintf(stderr, "SMOKE FAIL: setHighlightNote\n");
+    // The list and the export must agree on order, or "the next highlight"
+    // means two different things in two places.
+    const QString expectedExport =
+        QStringLiteral("# Highlights\n\n")
+        + annotationCore.highlightMarkdown(first->id) + QStringLiteral("\n\n")
+        + annotationCore.highlightMarkdown(second->id);
+    const QString allMarkdown = annotationCore.allHighlightsMarkdown();
+    if (allMarkdown != expectedExport) {
+        std::fprintf(stderr, "SMOKE FAIL: export order disagrees with the list\n");
         return 1;
     }
-    if (noteCore.annotationRevision() <= revBefore) {
-        std::fprintf(stderr, "SMOKE FAIL: revision did not advance\n");
+
+    const QString exportPath = tmp.filePath(QStringLiteral("highlights.md"));
+    QString exportError;
+    if (!syodep::writeHighlightsMarkdown(exportPath, allMarkdown, &exportError)) {
+        std::fprintf(stderr, "SMOKE FAIL: export write: %s\n", qPrintable(exportError));
+        return 1;
+    }
+    QFile exported(exportPath);
+    if (!exported.open(QIODevice::ReadOnly)
+        || QString::fromUtf8(exported.readAll()) != allMarkdown + QStringLiteral("\n")) {
+        std::fprintf(stderr, "SMOKE FAIL: exported file content\n");
+        return 1;
+    }
+    exported.close();
+
+    // Deleting a Pending highlight: the row goes, the other stays, and the
+    // selection lands on what took its place.
+    sidebar.listView()->setCurrentIndex(sidebar.model()->index(0, 0));
+    const qint64 survivor = second->id;
+    if (!annotationCore.deleteHighlight(first->id)) {
+        std::fprintf(stderr, "SMOKE FAIL: deleteHighlight\n");
         return 1;
     }
     sidebar.refreshAnnotations(true);
-    const auto *updated = sidebar.model()->itemAt(0);
-    if (!updated || !updated->hasNote || updated->noteMarkdown != note) {
-        std::fprintf(stderr, "SMOKE FAIL: note missing after refresh\n");
+    if (sidebar.model()->rowCount() != 1
+        || !sidebar.model()->itemAt(0)
+        || sidebar.model()->itemAt(0)->id != survivor) {
+        std::fprintf(stderr, "SMOKE FAIL: wrong highlight survived the delete\n");
         return 1;
     }
-    const QString exported = noteCore.highlightMarkdown(item->id);
-    if (!exported.contains(note)) {
-        std::fprintf(stderr, "SMOKE FAIL: export missing note\n");
+
+    // Markdown annotation create → save → export → delete, via the same core
+    // the Highlights path used (temp DB; never the user profile store).
+    if (!annotationCore.hasPersistence()) {
+        std::fprintf(stderr, "SMOKE FAIL: expected annotation persistence\n");
+        return 1;
+    }
+    annotationCore.sendKey(QStringLiteral("f"));
+    annotationCore.sendKey(QStringLiteral("w"));
+    annotationCore.sendKey(QStringLiteral("n"));
+    if (annotationCore.pendingAnnotationText().isEmpty()) {
+        std::fprintf(stderr, "SMOKE FAIL: n did not capture a pending annotation\n");
+        return 1;
+    }
+    qint64 annotationId = 0;
+    if (!annotationCore.createTextAnnotation(QStringLiteral("smoke note"), &annotationId)
+        || annotationId == 0) {
+        std::fprintf(stderr, "SMOKE FAIL: createTextAnnotation\n");
+        return 1;
+    }
+    const QString annotationsMd = annotationCore.allTextAnnotationsMarkdown();
+    if (!annotationsMd.startsWith(QStringLiteral("# Annotations\n\n"))
+        || !annotationsMd.contains(QStringLiteral("smoke note"))) {
+        std::fprintf(stderr, "SMOKE FAIL: annotations markdown format\n");
+        return 1;
+    }
+    const QString annotationsPath = tmp.filePath(QStringLiteral("annotations.md"));
+    if (!syodep::writeTextAnnotationsMarkdown(annotationsPath, annotationsMd, &exportError)) {
+        std::fprintf(stderr, "SMOKE FAIL: annotations export write: %s\n",
+                     qPrintable(exportError));
+        return 1;
+    }
+    QFile annotationsFile(annotationsPath);
+    if (!annotationsFile.open(QIODevice::ReadOnly)
+        || QString::fromUtf8(annotationsFile.readAll())
+            != annotationsMd + QStringLiteral("\n")) {
+        std::fprintf(stderr, "SMOKE FAIL: annotations exported file content\n");
+        return 1;
+    }
+    annotationsFile.close();
+    if (!annotationCore.deleteTextAnnotation(annotationId)) {
+        std::fprintf(stderr, "SMOKE FAIL: deleteTextAnnotation\n");
+        return 1;
+    }
+    if (!annotationCore.allTextAnnotationsMarkdown().isEmpty()) {
+        std::fprintf(stderr, "SMOKE FAIL: annotation survived delete\n");
         return 1;
     }
 
@@ -133,6 +203,11 @@ int runSmokeTest(const QString &pdfPath)
     syodep::MainWindow window;
     if (!window.annotationSidebar() || !window.annotationsDock()) {
         std::fprintf(stderr, "SMOKE FAIL: annotation sidebar not constructed\n");
+        return 1;
+    }
+    if (window.annotationsDock()->allowedAreas() != Qt::RightDockWidgetArea
+        || window.annotationsDock()->features() != QDockWidget::DockWidgetClosable) {
+        std::fprintf(stderr, "SMOKE FAIL: highlights dock is movable or floatable\n");
         return 1;
     }
     if (window.annotationSidebar()->contentState()
@@ -153,6 +228,42 @@ int runSmokeTest(const QString &pdfPath)
     }
 
     window.show();
+    QApplication::processEvents();
+
+    // Highlights ↔ Annotations page matrix: self-toggle hides; cross-toggle
+    // substitutes; hide leaves the canvas focused.
+    window.showSidebarPage(syodep::SidebarPage::Highlights);
+    if (window.visibleSidebarPage() != syodep::SidebarPage::Highlights
+        || !window.highlightsToggleAction()->isChecked()
+        || window.annotationsToggleAction()->isChecked()) {
+        std::fprintf(stderr, "SMOKE FAIL: Highlights page not visible\n");
+        return 1;
+    }
+    window.toggleAnnotationsSidebar();
+    if (window.visibleSidebarPage() != syodep::SidebarPage::Annotations
+        || !window.annotationsToggleAction()->isChecked()
+        || window.highlightsToggleAction()->isChecked()) {
+        std::fprintf(stderr, "SMOKE FAIL: Leader n substitute did not show Annotations\n");
+        return 1;
+    }
+    window.toggleAnnotationsSidebar();
+    if (window.visibleSidebarPage().has_value()
+        || window.annotationsToggleAction()->isChecked()
+        || window.highlightsToggleAction()->isChecked()) {
+        std::fprintf(stderr, "SMOKE FAIL: Annotations self-toggle did not hide\n");
+        return 1;
+    }
+    window.toggleHighlightsSidebar();
+    if (window.visibleSidebarPage() != syodep::SidebarPage::Highlights) {
+        std::fprintf(stderr, "SMOKE FAIL: toggle did not restore Highlights\n");
+        return 1;
+    }
+    window.hideSidebar();
+    if (window.visibleSidebarPage().has_value()) {
+        std::fprintf(stderr, "SMOKE FAIL: hideSidebar left a visible page\n");
+        return 1;
+    }
+
     QTimer::singleShot(0, &window, &QWidget::close);
     QApplication::processEvents();
 

@@ -1,8 +1,6 @@
 #include "sidebar/highlight_list_model.h"
 
 #include <QColor>
-#include <QRegularExpression>
-#include <QTextDocument>
 
 namespace syodep {
 
@@ -29,20 +27,6 @@ QString highlightStateLabel(HighlightState state)
     return QObject::tr("Pending PDF save");
 }
 
-QString markdownToPlainPreview(const QString &markdown)
-{
-    if (markdown.isEmpty())
-        return {};
-    QTextDocument document;
-    document.setMarkdown(
-        markdown,
-        QTextDocument::MarkdownFeatures(
-            QTextDocument::MarkdownDialectGitHub | QTextDocument::MarkdownNoHTML));
-    QString preview = document.toPlainText().trimmed();
-    preview.replace(QRegularExpression(QStringLiteral("\n{3,}")), QStringLiteral("\n\n"));
-    return preview;
-}
-
 HighlightListModel::HighlightListModel(QObject *parent)
     : QAbstractListModel(parent)
 {
@@ -65,21 +49,13 @@ QVariant HighlightListModel::data(const QModelIndex &index, int role) const
     case Qt::DisplayRole:
     case TextRole:
         return item.text;
-    case Qt::ToolTipRole: {
-        if (!item.hasNote || item.noteMarkdown.isEmpty())
-            return item.text;
-        return QStringLiteral("%1\n\n%2").arg(item.text, item.noteMarkdown);
-    }
-    case Qt::AccessibleTextRole: {
-        QString accessible = QStringLiteral("%1, %2. %3")
-                                 .arg(highlightPageLabel(item.firstPage, item.lastPage),
-                                      highlightStateLabel(item.state),
-                                      item.text);
-        if (item.hasNote && !item.noteMarkdown.isEmpty())
-            accessible += QStringLiteral(". Comment: %1")
-                              .arg(markdownToPlainPreview(item.noteMarkdown));
-        return accessible;
-    }
+    case Qt::ToolTipRole:
+        return item.text;
+    case Qt::AccessibleTextRole:
+        return QStringLiteral("%1, %2. %3")
+            .arg(highlightPageLabel(item.firstPage, item.lastPage),
+                 highlightStateLabel(item.state),
+                 item.text);
     case IdRole:
         return item.id;
     case ColorRole: {
@@ -98,12 +74,6 @@ QVariant HighlightListModel::data(const QModelIndex &index, int role) const
         return QVariant::fromValue(static_cast<int>(item.state));
     case StateLabelRole:
         return highlightStateLabel(item.state);
-    case HasNoteRole:
-        return item.hasNote;
-    case NoteMarkdownRole:
-        return item.hasNote ? item.noteMarkdown : QString();
-    case NotePlainPreviewRole:
-        return item.hasNote ? markdownToPlainPreview(item.noteMarkdown) : QString();
     default:
         return {};
     }
@@ -120,9 +90,6 @@ QHash<int, QByteArray> HighlightListModel::roleNames() const
         {PageLabelRole, "pageLabel"},
         {StateRole, "state"},
         {StateLabelRole, "stateLabel"},
-        {HasNoteRole, "hasNote"},
-        {NoteMarkdownRole, "noteMarkdown"},
-        {NotePlainPreviewRole, "notePlainPreview"},
     };
 }
 

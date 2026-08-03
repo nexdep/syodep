@@ -1,5 +1,10 @@
 // Qt projection of a disposable HighlightSnapshot from CoreController.
 // Not the source of truth — full resets on revision change are intentional.
+//
+// Row order is the core's document order and is never re-sorted here (no
+// QSortFilterProxyModel): the list, the Markdown export and any future command
+// palette must agree on what "the next highlight" is, and a Qt-side sort would
+// only agree with the core by coincidence.
 #pragma once
 
 #include <QAbstractListModel>
@@ -19,9 +24,6 @@ QString highlightPageLabel(qsizetype firstPage, qsizetype lastPage);
 // User-facing persistence label for a highlight state.
 QString highlightStateLabel(HighlightState state);
 
-// Plain-text preview derived from Markdown for card display only.
-QString markdownToPlainPreview(const QString &markdown);
-
 class HighlightListModel final : public QAbstractListModel
 {
     Q_OBJECT
@@ -35,10 +37,7 @@ public:
         LastPageRole,
         PageLabelRole,
         StateRole,
-        StateLabelRole,
-        HasNoteRole,
-        NoteMarkdownRole,
-        NotePlainPreviewRole
+        StateLabelRole
     };
 
     explicit HighlightListModel(QObject *parent = nullptr);

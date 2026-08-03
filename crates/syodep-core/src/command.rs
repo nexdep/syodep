@@ -141,6 +141,13 @@ pub enum Command {
     /// were in effect when it was started.
     HighlightDiscard,
     // Application.
+    /// Show or hide the highlights sidebar, moving keyboard focus with it.
+    ToggleHighlightsSidebar,
+    /// Show or hide the annotations sidebar, moving keyboard focus with it.
+    ToggleAnnotationsSidebar,
+    /// Capture the current focus or selection as a pending Markdown annotation
+    /// and ask the shell to open the annotation editor.
+    CreateAnnotation,
     OpenFile,
     /// Overwrite the open PDF with the highlights embedded in it.
     SaveDocument,
@@ -215,6 +222,15 @@ pub const ALL_COMMANDS: &[(&str, Command)] = &[
     ("highlight_enter", Command::HighlightEnter),
     ("highlight_commit", Command::HighlightCommit),
     ("highlight_discard", Command::HighlightDiscard),
+    (
+        "toggle_highlights_sidebar",
+        Command::ToggleHighlightsSidebar,
+    ),
+    (
+        "toggle_annotations_sidebar",
+        Command::ToggleAnnotationsSidebar,
+    ),
+    ("create_annotation", Command::CreateAnnotation),
     ("open_file", Command::OpenFile),
     ("save_document", Command::SaveDocument),
     ("quit", Command::Quit),

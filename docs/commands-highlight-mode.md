@@ -68,8 +68,8 @@ time the document is opened. Stored highlights are drawn from their geometry
 alone, which means they appear immediately on open without any page content
 having to be extracted first.
 
-Storing records the covered text as well as the geometry, for the notes and
-export features on the roadmap.
+Storing records the covered text as well as the geometry: that is what the
+sidebar lists and what the Markdown export quotes.
 
 If the database cannot be written the highlight still exists for the session and
 can still be saved into the PDF; the failure is reported in the status bar rather

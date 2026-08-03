@@ -4,6 +4,13 @@
 //! - `MIGRATIONS[i]` upgrades the schema from version `i` to `i + 1`.
 //! - Published entries are immutable; schema changes append new entries.
 //! - `PRAGMA user_version` records the number of applied migrations.
+//!
+//! The schema ends at v4 (`text_annotations`). A `highlight_notes` table
+//! briefly existed as an unreleased v4 while highlight comments were being
+//! built; that feature was withdrawn before it shipped. A development database
+//! that still has `highlight_notes` without `text_annotations` is refused by
+//! [`crate::Storage::from_connection`] after migrations — delete it so syodep
+//! can recreate it (see `docs/development-log.md`).
 
 use rusqlite::Connection;
 
@@ -81,18 +88,34 @@ pub const MIGRATIONS: &[&str] = &[
     CREATE INDEX highlights_document_state
     ON highlights(document_id, pdf_state);
     ",
-    // v4: one optional Markdown comment per highlight. Separate from
-    // `highlights` so the immutable PDF source anchor stays distinct from
-    // user-authored notes, and so comment timestamps/metadata can evolve
-    // without widening the core annotation row. Chat/threads are a different
-    // feature and must not reuse this table.
+    // v4: independent Markdown annotations. Separate from highlights — an
+    // annotation has its own immutable source anchor and editable body, and is
+    // never embedded in the PDF. Rectangles live in a child table for the same
+    // reason highlight rectangles do: one annotation covers a rectangle per
+    // line and may span pages.
     "
-    CREATE TABLE highlight_notes (
-        highlight_id INTEGER PRIMARY KEY
-                     REFERENCES highlights(id) ON DELETE CASCADE,
+    CREATE TABLE text_annotations (
+        id            INTEGER PRIMARY KEY,
+        document_id   INTEGER NOT NULL
+                      REFERENCES documents(id) ON DELETE CASCADE,
+        text          TEXT NOT NULL,
         body_markdown TEXT NOT NULL,
-        created_at TEXT NOT NULL DEFAULT (datetime('now')),
-        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX text_annotations_document ON text_annotations(document_id);
+
+    CREATE TABLE text_annotation_rects (
+        annotation_id INTEGER NOT NULL
+                      REFERENCES text_annotations(id) ON DELETE CASCADE,
+        ordinal       INTEGER NOT NULL,
+        page          INTEGER NOT NULL,
+        x0            REAL NOT NULL,
+        y0            REAL NOT NULL,
+        x1            REAL NOT NULL,
+        y1            REAL NOT NULL,
+        PRIMARY KEY (annotation_id, ordinal)
     );
     ",
 ];
@@ -136,7 +159,8 @@ mod tests {
             "positions",
             "highlights",
             "highlight_rects",
-            "highlight_notes",
+            "text_annotations",
+            "text_annotation_rects",
         ] {
             let count: i64 = conn
                 .query_row(
@@ -264,7 +288,7 @@ mod tests {
     }
 
     #[test]
-    fn a_v3_database_upgrades_with_notes_table() {
+    fn a_v3_database_is_already_current_and_keeps_its_rows() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(&format!(
             "BEGIN;\n{}\n{}\n{}\nPRAGMA user_version = 3;\nCOMMIT;",
@@ -296,15 +320,6 @@ mod tests {
                 .unwrap(),
             MIGRATIONS.len() as u32
         );
-        let notes_table: i64 = conn
-            .query_row(
-                "SELECT count(*) FROM sqlite_master
-                 WHERE type = 'table' AND name = 'highlight_notes'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(notes_table, 1);
         let (text, state): (String, i64) = conn
             .query_row(
                 "SELECT text, pdf_state FROM highlights WHERE id = 1",
@@ -323,5 +338,32 @@ mod tests {
             .unwrap();
         assert_eq!(rect_count, 1);
         run(&conn).unwrap();
+    }
+
+    #[test]
+    fn a_v3_database_gains_text_annotations() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(&format!(
+            "BEGIN;\n{}\n{}\n{}\nPRAGMA user_version = 3;\nCOMMIT;",
+            MIGRATIONS[0], MIGRATIONS[1], MIGRATIONS[2]
+        ))
+        .unwrap();
+
+        run(&conn).unwrap();
+
+        assert_eq!(
+            conn.query_row::<u32, _, _>("PRAGMA user_version", [], |row| row.get(0))
+                .unwrap(),
+            MIGRATIONS.len() as u32
+        );
+        let has_table: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master
+                 WHERE type = 'table' AND name = 'text_annotations'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_table, 1);
     }
 }

@@ -2,8 +2,8 @@
 //!
 //! Design decisions (see `docs/architecture.md`):
 //!
-//! - All dynamic user state (positions, and later marks/bookmarks/highlights/
-//!   notes) lives in SQLite, never in TOML.
+//! - All dynamic user state (positions, and later marks/bookmarks/highlights)
+//!   lives in SQLite, never in TOML.
 //! - Documents are identified by a SHA-256 content fingerprint, not by path,
 //!   so state survives moves/renames of the file.
 //! - Migrations are versioned through `PRAGMA user_version` and run
@@ -12,7 +12,6 @@
 
 mod migrations;
 
-use std::collections::HashMap;
 use std::path::Path;
 
 use rusqlite::{Connection, OptionalExtension};
@@ -39,6 +38,16 @@ pub enum StorageError {
     InvalidHighlightState(i64),
     #[error("highlight {0} was not pending for document {1}")]
     HighlightNotPending(i64, i64),
+    #[error(
+        "database has the withdrawn highlight_notes schema from an unreleased build; \
+         delete it so syodep can recreate it"
+    )]
+    WithdrawnHighlightNotesSchema,
+    #[error(
+        "database schema version {version} is missing both text_annotations and \
+         highlight_notes; refusing to open"
+    )]
+    UnrecognizedSchema { version: u32 },
 }
 
 /// A saved reading position for a document.
@@ -114,14 +123,20 @@ pub struct StoredHighlight {
     pub pdf_state: HighlightPdfState,
 }
 
-/// Optional user-authored Markdown comment for one highlight.
-///
-/// Distinct from [`StoredHighlight::text`], which is the immutable PDF source
-/// quote. Absence of a row means no comment.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StoredHighlightNote {
-    pub highlight_id: HighlightId,
+/// Stable identity of a persisted text-annotation row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TextAnnotationId(pub i64);
+
+/// A stored Markdown annotation: immutable source geometry/text plus body.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredTextAnnotation {
+    pub id: TextAnnotationId,
+    /// Immutable captured PDF source text.
+    pub text: String,
+    /// Editable Markdown body (non-empty when validated by the core).
     pub body_markdown: String,
+    /// In document order, one per covered line.
+    pub rects: Vec<HighlightRect>,
 }
 
 /// Handle to the syodep database.
@@ -149,6 +164,7 @@ impl Storage {
     fn from_connection(conn: Connection) -> Result<Self, StorageError> {
         conn.pragma_update(None, "foreign_keys", "ON")?;
         migrations::run(&conn)?;
+        validate_schema(&conn)?;
         Ok(Self { conn })
     }
 
@@ -401,12 +417,11 @@ impl Storage {
         Ok(())
     }
 
-    /// Forget every highlight of a document. Kept for cascade tests and a
-    /// future delete command; the save path no longer uses this.
+    /// Forget every highlight of a document. Kept for cascade tests; the save
+    /// path no longer uses this.
     pub fn delete_highlights(&self, document_id: i64) -> Result<(), StorageError> {
-        // `highlight_rects` and `highlight_notes` go with them: the foreign
-        // keys cascade, and `foreign_keys` is ON for every connection this
-        // type hands out.
+        // `highlight_rects` goes with them: the foreign key cascades, and
+        // `foreign_keys` is ON for every connection this type hands out.
         self.conn.execute(
             "DELETE FROM highlights WHERE document_id = ?1",
             (document_id,),
@@ -414,92 +429,182 @@ impl Storage {
         Ok(())
     }
 
-    /// Load every Markdown note belonging to highlights of `document_id`.
+    /// Forget one highlight, but only if it belongs to `document_id`.
     ///
-    /// Joined through `highlights` so a note cannot leak from another document.
-    pub fn load_highlight_notes(
-        &self,
-        document_id: i64,
-    ) -> Result<HashMap<HighlightId, StoredHighlightNote>, StorageError> {
-        let mut statement = self.conn.prepare(
-            "SELECT n.highlight_id, n.body_markdown
-             FROM highlight_notes n
-             JOIN highlights h ON h.id = n.highlight_id
-             WHERE h.document_id = ?1
-             ORDER BY h.id",
-        )?;
-        let rows = statement.query_map((document_id,), |row| {
-            Ok(StoredHighlightNote {
-                highlight_id: HighlightId(row.get(0)?),
-                body_markdown: row.get(1)?,
-            })
-        })?;
-        let mut notes = HashMap::new();
-        for note in rows {
-            let note = note?;
-            notes.insert(note.highlight_id, note);
-        }
-        Ok(notes)
-    }
-
-    /// Upsert or clear a note for a highlight that belongs to `document_id`.
-    ///
-    /// Whitespace-only bodies (`trim().is_empty()`) delete the row. Returns
-    /// `Ok(true)` when the highlight belonged to the document (even if the
-    /// body was a no-op), `Ok(false)` when the id is missing or belongs to
-    /// another document. Equal non-empty bodies skip the write.
-    pub fn set_highlight_note_for_document(
+    /// Document-scoped rather than keyed by id alone: an id from another
+    /// document (a stale sidebar row, a future command palette) must not be
+    /// able to delete across documents. Returns `Ok(true)` when a row was
+    /// removed, `Ok(false)` when the id is unknown or belongs elsewhere, so the
+    /// caller can distinguish "gone" from "not yours" without a second query.
+    /// Rectangles cascade.
+    pub fn delete_highlight(
         &self,
         document_id: i64,
         highlight_id: HighlightId,
+    ) -> Result<bool, StorageError> {
+        let removed = self.conn.execute(
+            "DELETE FROM highlights WHERE id = ?1 AND document_id = ?2",
+            (highlight_id.0, document_id),
+        )?;
+        Ok(removed == 1)
+    }
+
+    /// Store a text annotation and its rectangles, returning the new row id.
+    pub fn insert_text_annotation(
+        &self,
+        document_id: i64,
+        text: &str,
+        body_markdown: &str,
+        rects: &[HighlightRect],
+    ) -> Result<TextAnnotationId, StorageError> {
+        self.conn.execute("BEGIN", [])?;
+        let result = self.insert_text_annotation_inner(document_id, text, body_markdown, rects);
+        match &result {
+            Ok(_) => self.conn.execute("COMMIT", [])?,
+            Err(_) => self.conn.execute("ROLLBACK", [])?,
+        };
+        result
+    }
+
+    fn insert_text_annotation_inner(
+        &self,
+        document_id: i64,
+        text: &str,
+        body_markdown: &str,
+        rects: &[HighlightRect],
+    ) -> Result<TextAnnotationId, StorageError> {
+        self.conn.execute(
+            "INSERT INTO text_annotations (document_id, text, body_markdown)
+             VALUES (?1, ?2, ?3)",
+            (document_id, text, body_markdown),
+        )?;
+        let id = TextAnnotationId(self.conn.last_insert_rowid());
+        let mut statement = self.conn.prepare(
+            "INSERT INTO text_annotation_rects
+             (annotation_id, ordinal, page, x0, y0, x1, y1)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        )?;
+        for (ordinal, rect) in rects.iter().enumerate() {
+            statement.execute((
+                id.0,
+                ordinal as i64,
+                rect.page as i64,
+                rect.x0 as f64,
+                rect.y0 as f64,
+                rect.x1 as f64,
+                rect.y1 as f64,
+            ))?;
+        }
+        Ok(id)
+    }
+
+    /// Every text annotation of a document, oldest first (stable id order).
+    pub fn load_text_annotations(
+        &self,
+        document_id: i64,
+    ) -> Result<Vec<StoredTextAnnotation>, StorageError> {
+        let mut statement = self.conn.prepare(
+            "SELECT id, text, body_markdown FROM text_annotations
+             WHERE document_id = ?1 ORDER BY id",
+        )?;
+        let rows = statement
+            .query_map((document_id,), |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut annotations = Vec::with_capacity(rows.len());
+        for (id, text, body_markdown) in rows {
+            annotations.push(StoredTextAnnotation {
+                id: TextAnnotationId(id),
+                text,
+                body_markdown,
+                rects: Vec::new(),
+            });
+        }
+
+        let mut statement = self.conn.prepare(
+            "SELECT page, x0, y0, x1, y1 FROM text_annotation_rects
+             WHERE annotation_id = ?1 ORDER BY ordinal",
+        )?;
+        for annotation in &mut annotations {
+            annotation.rects = statement
+                .query_map((annotation.id.0,), |row| {
+                    Ok(HighlightRect {
+                        page: row.get::<_, i64>(0)? as usize,
+                        x0: row.get::<_, f64>(1)? as f32,
+                        y0: row.get::<_, f64>(2)? as f32,
+                        x1: row.get::<_, f64>(3)? as f32,
+                        y1: row.get::<_, f64>(4)? as f32,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        Ok(annotations)
+    }
+
+    /// Replace the Markdown body of a text annotation owned by `document_id`.
+    ///
+    /// Returns `Ok(true)` when a row was updated, `Ok(false)` when the id is
+    /// unknown or belongs to another document.
+    pub fn set_text_annotation_body(
+        &self,
+        document_id: i64,
+        annotation_id: TextAnnotationId,
         body_markdown: &str,
     ) -> Result<bool, StorageError> {
-        let owned: Option<i64> = self
-            .conn
-            .query_row(
-                "SELECT document_id FROM highlights WHERE id = ?1",
-                (highlight_id.0,),
-                |row| row.get(0),
-            )
-            .optional()?;
-        match owned {
-            Some(id) if id == document_id => {}
-            _ => return Ok(false),
-        }
-
-        if body_markdown.trim().is_empty() {
-            self.conn.execute(
-                "DELETE FROM highlight_notes WHERE highlight_id = ?1",
-                (highlight_id.0,),
-            )?;
-            return Ok(true);
-        }
-
-        let existing: Option<String> = self
-            .conn
-            .query_row(
-                "SELECT body_markdown FROM highlight_notes WHERE highlight_id = ?1",
-                (highlight_id.0,),
-                |row| row.get(0),
-            )
-            .optional()?;
-        if existing.as_deref() == Some(body_markdown) {
-            return Ok(true);
-        }
-
-        self.conn.execute(
-            "INSERT INTO highlight_notes (
-                highlight_id, body_markdown, created_at, updated_at
-             )
-             VALUES (?1, ?2, datetime('now'), datetime('now'))
-             ON CONFLICT(highlight_id)
-             DO UPDATE SET
-                body_markdown = excluded.body_markdown,
-                updated_at = datetime('now')",
-            (highlight_id.0, body_markdown),
+        let updated = self.conn.execute(
+            "UPDATE text_annotations
+             SET body_markdown = ?1, updated_at = datetime('now')
+             WHERE id = ?2 AND document_id = ?3",
+            (body_markdown, annotation_id.0, document_id),
         )?;
-        Ok(true)
+        Ok(updated == 1)
     }
+
+    /// Forget one text annotation owned by `document_id`. Rectangles cascade.
+    pub fn delete_text_annotation(
+        &self,
+        document_id: i64,
+        annotation_id: TextAnnotationId,
+    ) -> Result<bool, StorageError> {
+        let removed = self.conn.execute(
+            "DELETE FROM text_annotations WHERE id = ?1 AND document_id = ?2",
+            (annotation_id.0, document_id),
+        )?;
+        Ok(removed == 1)
+    }
+}
+
+fn table_exists(conn: &Connection, name: &str) -> Result<bool, StorageError> {
+    let count: i64 = conn.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+        (name,),
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
+}
+
+/// After migrations, refuse withdrawn Step 5 databases and unrecognized v4
+/// shapes. A valid real-v4 database has `text_annotations`.
+fn validate_schema(conn: &Connection) -> Result<(), StorageError> {
+    let version: u32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if version < 4 {
+        return Ok(());
+    }
+    let has_text = table_exists(conn, "text_annotations")?;
+    let has_notes = table_exists(conn, "highlight_notes")?;
+    if has_text {
+        return Ok(());
+    }
+    if has_notes {
+        return Err(StorageError::WithdrawnHighlightNotesSchema);
+    }
+    Err(StorageError::UnrecognizedSchema { version })
 }
 
 #[cfg(test)]
@@ -848,101 +953,188 @@ mod tests {
     }
 
     #[test]
-    fn highlight_notes_upsert_clear_and_scope() {
+    fn deleting_one_highlight_leaves_the_others_and_takes_its_rects() {
+        let storage = Storage::in_memory().unwrap();
+        let doc = storage.upsert_document("fp", "/a.pdf").unwrap();
+        let first = storage
+            .insert_highlight(doc, "#ffe066", "gone", &[rect(0, 72.0), rect(0, 120.0)])
+            .unwrap();
+        let second = storage
+            .insert_highlight(doc, "#88ccff", "kept", &[rect(1, 72.0)])
+            .unwrap();
+
+        assert!(storage.delete_highlight(doc, first).unwrap());
+
+        let loaded = storage.load_highlights(doc).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, second);
+        let orphans: i64 = storage
+            .conn
+            .query_row(
+                "SELECT count(*) FROM highlight_rects WHERE highlight_id = ?1",
+                (first.0,),
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(orphans, 0);
+
+        // Deleting again reports "nothing removed" rather than erroring.
+        assert!(!storage.delete_highlight(doc, first).unwrap());
+    }
+
+    #[test]
+    fn deleting_a_highlight_is_scoped_to_its_document() {
         let storage = Storage::in_memory().unwrap();
         let doc_a = storage.upsert_document("fp-a", "/a.pdf").unwrap();
         let doc_b = storage.upsert_document("fp-b", "/b.pdf").unwrap();
-        let hid_a = storage
-            .insert_highlight(doc_a, "#ffe066", "alpha", &[rect(0, 72.0)])
-            .unwrap();
-        let hid_b = storage
-            .insert_highlight(doc_b, "#88ccff", "beta", &[rect(0, 90.0)])
+        let in_b = storage
+            .insert_highlight(doc_b, "#ffe066", "safe", &[rect(0, 72.0)])
             .unwrap();
 
-        assert!(storage
-            .set_highlight_note_for_document(doc_a, hid_a, "first note")
-            .unwrap());
-        assert!(storage
-            .set_highlight_note_for_document(doc_a, hid_a, "updated note")
-            .unwrap());
-        // Equal body is a no-op write.
-        assert!(storage
-            .set_highlight_note_for_document(doc_a, hid_a, "updated note")
-            .unwrap());
-
-        let notes_a = storage.load_highlight_notes(doc_a).unwrap();
-        assert_eq!(notes_a.len(), 1);
-        assert_eq!(notes_a[&hid_a].body_markdown, "updated note");
-        assert!(storage.load_highlight_notes(doc_b).unwrap().is_empty());
-
-        // Cross-document id is rejected.
+        assert!(!storage.delete_highlight(doc_a, in_b).unwrap());
+        assert_eq!(storage.load_highlights(doc_b).unwrap().len(), 1);
         assert!(!storage
-            .set_highlight_note_for_document(doc_a, hid_b, "nope")
+            .delete_highlight(doc_a, HighlightId(999_999))
             .unwrap());
-        assert!(storage.load_highlight_notes(doc_b).unwrap().is_empty());
+    }
 
-        // Whitespace-only clears.
-        assert!(storage
-            .set_highlight_note_for_document(doc_a, hid_a, "  \n\t  ")
-            .unwrap());
-        assert!(storage.load_highlight_notes(doc_a).unwrap().is_empty());
+    #[test]
+    fn an_embedded_highlight_can_be_deleted_too() {
+        let storage = Storage::in_memory().unwrap();
+        let doc = storage.upsert_document("fp", "/a.pdf").unwrap();
+        let id = storage
+            .insert_highlight(doc, "#ffe066", "embedded", &[rect(0, 72.0)])
+            .unwrap();
+        storage.mark_highlights_embedded(doc, &[id]).unwrap();
+        assert!(storage.delete_highlight(doc, id).unwrap());
+        assert!(storage.load_highlights(doc).unwrap().is_empty());
+    }
 
-        // Unicode / multiline.
-        assert!(storage
-            .set_highlight_note_for_document(doc_a, hid_a, "# 标题\n\n- one\n- two")
-            .unwrap());
+    #[test]
+    fn a_text_annotation_round_trips_with_rects() {
+        let storage = Storage::in_memory().unwrap();
+        let doc = storage.upsert_document("fp", "/a.pdf").unwrap();
+        let rects = vec![rect(0, 72.0), rect(1, 10.0)];
+        let id = storage
+            .insert_text_annotation(doc, "source quote", "# note body", &rects)
+            .unwrap();
+
+        let loaded = storage.load_text_annotations(doc).unwrap();
+        assert_eq!(loaded.len(), 1);
         assert_eq!(
-            storage.load_highlight_notes(doc_a).unwrap()[&hid_a].body_markdown,
-            "# 标题\n\n- one\n- two"
+            loaded[0],
+            StoredTextAnnotation {
+                id,
+                text: "source quote".to_owned(),
+                body_markdown: "# note body".to_owned(),
+                rects,
+            }
         );
     }
 
     #[test]
-    fn highlight_notes_cascade_on_highlight_delete() {
+    fn set_text_annotation_body_is_document_scoped_and_preserves_source() {
         let storage = Storage::in_memory().unwrap();
-        let doc = storage.upsert_document("fp", "/a.pdf").unwrap();
-        let hid = storage
-            .insert_highlight(doc, "#ffe066", "gone", &[rect(0, 72.0)])
+        let doc_a = storage.upsert_document("fp-a", "/a.pdf").unwrap();
+        let doc_b = storage.upsert_document("fp-b", "/b.pdf").unwrap();
+        let id = storage
+            .insert_text_annotation(doc_a, "source", "first", &[rect(0, 72.0)])
             .unwrap();
-        storage
-            .set_highlight_note_for_document(doc, hid, "orphan me")
+
+        assert!(storage
+            .set_text_annotation_body(doc_a, id, "updated\nexactly")
+            .unwrap());
+        assert!(!storage
+            .set_text_annotation_body(doc_b, id, "stolen")
+            .unwrap());
+
+        let loaded = storage.load_text_annotations(doc_a).unwrap();
+        assert_eq!(loaded[0].text, "source");
+        assert_eq!(loaded[0].body_markdown, "updated\nexactly");
+        assert!(storage.load_text_annotations(doc_b).unwrap().is_empty());
+    }
+
+    #[test]
+    fn deleting_a_text_annotation_cascades_rects_and_is_document_scoped() {
+        let storage = Storage::in_memory().unwrap();
+        let doc_a = storage.upsert_document("fp-a", "/a.pdf").unwrap();
+        let doc_b = storage.upsert_document("fp-b", "/b.pdf").unwrap();
+        let id = storage
+            .insert_text_annotation(doc_a, "source", "body", &[rect(0, 72.0), rect(0, 120.0)])
             .unwrap();
-        storage.delete_highlights(doc).unwrap();
-        let notes: i64 = storage
+
+        assert!(!storage.delete_text_annotation(doc_b, id).unwrap());
+        assert_eq!(storage.load_text_annotations(doc_a).unwrap().len(), 1);
+        assert!(storage.delete_text_annotation(doc_a, id).unwrap());
+        assert!(storage.load_text_annotations(doc_a).unwrap().is_empty());
+        let orphans: i64 = storage
             .conn
-            .query_row("SELECT count(*) FROM highlight_notes", [], |row| row.get(0))
+            .query_row("SELECT count(*) FROM text_annotation_rects", [], |row| {
+                row.get(0)
+            })
             .unwrap();
-        assert_eq!(notes, 0);
+        assert_eq!(orphans, 0);
     }
 
     #[test]
-    fn highlight_notes_survive_pending_to_embedded_and_rekey() {
-        let storage = Storage::in_memory().unwrap();
-        let doc = storage.upsert_document("old-fp", "/a.pdf").unwrap();
-        let hid = storage
-            .insert_highlight(doc, "#ffe066", "quoted", &[rect(0, 72.0)])
-            .unwrap();
-        storage
-            .set_highlight_note_for_document(doc, hid, "keeps going")
-            .unwrap();
-        storage.mark_highlights_embedded(doc, &[hid]).unwrap();
-        assert_eq!(
-            storage.load_highlight_notes(doc).unwrap()[&hid].body_markdown,
-            "keeps going"
-        );
-        storage.rekey_document(doc, "new-fp", "/a.pdf").unwrap();
-        assert_eq!(
-            storage.load_highlight_notes(doc).unwrap()[&hid].body_markdown,
-            "keeps going"
-        );
-    }
-
-    #[test]
-    fn unknown_highlight_note_target_is_rejected() {
+    fn deleting_a_document_cascades_to_text_annotations() {
         let storage = Storage::in_memory().unwrap();
         let doc = storage.upsert_document("fp", "/a.pdf").unwrap();
-        assert!(!storage
-            .set_highlight_note_for_document(doc, HighlightId(999), "x")
-            .unwrap());
+        storage
+            .insert_text_annotation(doc, "source", "body", &[rect(0, 72.0)])
+            .unwrap();
+        storage
+            .conn
+            .execute("DELETE FROM documents WHERE id = ?1", (doc,))
+            .unwrap();
+        let orphans: i64 = storage
+            .conn
+            .query_row("SELECT count(*) FROM text_annotation_rects", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(orphans, 0);
+    }
+
+    #[test]
+    fn a_valid_v4_database_with_text_annotations_opens() {
+        let storage = Storage::in_memory().unwrap();
+        assert_eq!(storage.schema_version().unwrap(), 4);
+        assert!(table_exists(&storage.conn, "text_annotations").unwrap());
+    }
+
+    #[test]
+    fn a_withdrawn_highlight_notes_v4_is_refused() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(&format!(
+            "BEGIN;\n{}\n{}\n{}\n\
+             CREATE TABLE highlight_notes (
+                 highlight_id INTEGER PRIMARY KEY,
+                 body_markdown TEXT NOT NULL
+             );\n\
+             PRAGMA user_version = 4;\nCOMMIT;",
+            MIGRATIONS[0], MIGRATIONS[1], MIGRATIONS[2]
+        ))
+        .unwrap();
+        let err = Storage::from_connection(conn).unwrap_err();
+        assert!(
+            matches!(err, StorageError::WithdrawnHighlightNotesSchema),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn an_unrecognized_v4_schema_is_refused() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(&format!(
+            "BEGIN;\n{}\n{}\n{}\nPRAGMA user_version = 4;\nCOMMIT;",
+            MIGRATIONS[0], MIGRATIONS[1], MIGRATIONS[2]
+        ))
+        .unwrap();
+        let err = Storage::from_connection(conn).unwrap_err();
+        assert!(
+            matches!(err, StorageError::UnrecognizedSchema { version: 4 }),
+            "{err}"
+        );
     }
 }

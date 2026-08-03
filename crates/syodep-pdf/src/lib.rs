@@ -2857,6 +2857,16 @@ pub struct HighlightAnnotation {
     pub color: (u8, u8, u8),
     /// Constant alpha (`/CA`), 0.0 (invisible) to 1.0 (opaque).
     pub opacity: f32,
+    /// Optional annotation name, written as `/NM`.
+    ///
+    /// This is the only durable handle on an annotation once it is in the
+    /// file: page indices shift and geometry repeats, so removing exactly one
+    /// highlight later ([`remove_highlight_annotation`]) means matching this
+    /// string. A multi-page highlight gives every one of its annotations the
+    /// same name deliberately — they are one highlight, and they are deleted
+    /// together. `None` writes no `/NM`, leaving the annotation anonymous and
+    /// therefore not individually removable.
+    pub name: Option<String>,
 }
 
 /// Copy the PDF at `src` to `out`, adding `highlights` as PDF `Highlight`
@@ -2980,6 +2990,12 @@ fn add_highlight_annotation(
     }
     dict.dict_put("QuadPoints", quads)?;
 
+    // `/NM` is a PDF text string, and the only stable way to find this exact
+    // annotation again after the file has been closed and reopened.
+    if let Some(name) = &highlight.name {
+        dict.dict_put("NM", mupdf::pdf::PdfObject::new_string(name)?)?;
+    }
+
     // `mupdf` 0.7 exposes no opacity setter either (`pdf_set_annot_opacity`
     // exists only in C), and the default `/CA` — fully opaque — is exactly
     // what would make a saved highlight look stronger than the same colour
@@ -3041,6 +3057,120 @@ fn annot_dict(page: &mupdf::pdf::PdfPage, index: usize) -> Result<mupdf::pdf::Pd
         )));
     }
     Ok(dict)
+}
+
+/// The `/NM` of the annotation at `index`, when it has one that is a text
+/// string.
+fn annot_name(page: &mupdf::pdf::PdfPage, index: usize) -> Result<Option<String>, PdfError> {
+    let dict = annot_dict(page, index)?;
+    let Some(name) = dict.get_dict("NM")? else {
+        return Ok(None);
+    };
+    Ok(name.as_string().ok().map(|s| s.to_owned()))
+}
+
+/// Copy the PDF at `src` to `out` without the annotations named
+/// `annotation_name` (their `/NM`), returning how many were removed. `src` is
+/// never modified.
+///
+/// Every page is searched, and every match is removed: one syodep highlight
+/// that runs across a page break is several annotations sharing one name, and
+/// they are one thing to the user. Matching is on `/NM` alone — an exact
+/// string the caller wrote — rather than on geometry or subtype, because
+/// "which annotation is this row?" must never be a guess: the wrong guess
+/// deletes an annotation somebody else made.
+///
+/// When nothing matches, `out` is **not** written and `Ok(0)` is returned; the
+/// caller decides whether that is an error, and there is no point copying a
+/// file that would be identical to its source.
+pub fn remove_highlight_annotation(
+    src: &Path,
+    out: &Path,
+    annotation_name: &str,
+) -> Result<usize, PdfError> {
+    let src_str = src.to_string_lossy();
+    let doc = mupdf::Document::open(src_str.as_ref()).map_err(|e| PdfError::Open {
+        path: src.display().to_string(),
+        message: e.to_string(),
+    })?;
+    let pdf = mupdf::pdf::PdfDocument::try_from(doc).map_err(|e| PdfError::Open {
+        path: src.display().to_string(),
+        message: format!("not a PDF that can be annotated: {e}"),
+    })?;
+    let page_count = pdf.page_count()? as usize;
+
+    let mut removed = 0usize;
+    for page_number in 0..page_count {
+        let page = pdf.load_page(page_number as i32)?;
+        let page = mupdf::pdf::PdfPage::try_from(page)?;
+        let Some(mut annots) = resolved_annots(&page)? else {
+            continue;
+        };
+        let len = annots.len().unwrap_or(0);
+        let mut matches = Vec::new();
+        for index in 0..len {
+            if annot_name(&page, index)?.as_deref() == Some(annotation_name) {
+                matches.push(index);
+            }
+        }
+        // Highest index first: deleting shifts everything after it down.
+        for index in matches.into_iter().rev() {
+            annots.array_delete(index as i32)?;
+            removed += 1;
+        }
+    }
+    if removed == 0 {
+        return Ok(0);
+    }
+
+    // Garbage collection so the annotation's own object leaves with it, rather
+    // than staying in the file as unreferenced data that still carries the
+    // highlighted region.
+    let mut options = mupdf::pdf::PdfWriteOptions::default();
+    options.set_garbage(true);
+    let out_str = out.to_string_lossy();
+    pdf.save_with_options(out_str.as_ref(), options)
+        .map_err(|e| PdfError::Backend(format!("cannot write {}: {e}", out.display())))?;
+    Ok(removed)
+}
+
+/// The names (`/NM`) of the `Highlight` annotations on `page`, in `/Annots`
+/// order. `None` for an annotation that carries no name.
+///
+/// Reads back what [`write_highlights`] wrote, so a test can assert against the
+/// file rather than the code that produced it.
+pub fn page_highlight_names(path: &Path, page: usize) -> Result<Vec<Option<String>>, PdfError> {
+    let path_str = path.to_string_lossy();
+    let doc = mupdf::Document::open(path_str.as_ref()).map_err(|e| PdfError::Open {
+        path: path.display().to_string(),
+        message: e.to_string(),
+    })?;
+    let pdf = mupdf::pdf::PdfDocument::try_from(doc).map_err(|e| PdfError::Open {
+        path: path.display().to_string(),
+        message: e.to_string(),
+    })?;
+    let count = pdf.page_count()? as usize;
+    if page >= count {
+        return Err(PdfError::PageOutOfRange { page, count });
+    }
+    let loaded = pdf.load_page(page as i32)?;
+    let pdf_page = mupdf::pdf::PdfPage::try_from(loaded)?;
+    let Some(annots) = resolved_annots(&pdf_page)? else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    for index in 0..annots.len().unwrap_or(0) {
+        let dict = annot_dict(&pdf_page, index)?;
+        let is_highlight = dict
+            .get_dict("Subtype")?
+            .and_then(|s| s.as_name().ok().map(|n| n == b"Highlight"))
+            .unwrap_or(false);
+        if !is_highlight {
+            continue;
+        }
+        out.push(annot_name(&pdf_page, index)?);
+    }
+    Ok(out)
 }
 
 /// The `Highlight` annotations on `page`, as the page-space rectangles each one
@@ -6051,6 +6181,7 @@ mod tests {
                 rects: vec![bbox],
                 color: YELLOW,
                 opacity: 1.0,
+                name: None,
             }],
         )
         .unwrap();
@@ -6078,12 +6209,14 @@ mod tests {
                     rects: vec![bbox, second],
                     color: YELLOW,
                     opacity: 1.0,
+                    name: None,
                 },
                 HighlightAnnotation {
                     page: 1,
                     rects: vec![bbox],
                     color: YELLOW,
                     opacity: 1.0,
+                    name: None,
                 },
             ],
         )
@@ -6106,6 +6239,149 @@ mod tests {
             }
         }
         assert_eq!(page_highlights(&out, 1).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_named_highlight_is_written_with_its_name_on_every_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let (src, bbox) = highlight_fixture(dir.path());
+        let out = dir.path().join("out.pdf");
+        // One highlight running across a page break: two annotations, one name.
+        write_highlights(
+            &src,
+            &out,
+            &[
+                HighlightAnnotation {
+                    page: 0,
+                    rects: vec![bbox],
+                    color: YELLOW,
+                    opacity: 1.0,
+                    name: Some("syodep-highlight-7".to_owned()),
+                },
+                HighlightAnnotation {
+                    page: 1,
+                    rects: vec![bbox],
+                    color: YELLOW,
+                    opacity: 1.0,
+                    name: Some("syodep-highlight-7".to_owned()),
+                },
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            page_highlight_names(&out, 0).unwrap(),
+            vec![Some("syodep-highlight-7".to_owned())]
+        );
+        assert_eq!(
+            page_highlight_names(&out, 1).unwrap(),
+            vec![Some("syodep-highlight-7".to_owned())]
+        );
+    }
+
+    #[test]
+    fn an_unnamed_highlight_stays_anonymous() {
+        let dir = tempfile::tempdir().unwrap();
+        let (src, bbox) = highlight_fixture(dir.path());
+        let out = dir.path().join("out.pdf");
+        write_highlights(
+            &src,
+            &out,
+            &[HighlightAnnotation {
+                page: 0,
+                rects: vec![bbox],
+                color: YELLOW,
+                opacity: 1.0,
+                name: None,
+            }],
+        )
+        .unwrap();
+        assert_eq!(page_highlight_names(&out, 0).unwrap(), vec![None]);
+    }
+
+    #[test]
+    fn removing_a_named_highlight_takes_every_page_of_it_and_nothing_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let (src, bbox) = highlight_fixture(dir.path());
+        let annotated = dir.path().join("annotated.pdf");
+        let neighbour = Rect {
+            x0: bbox.x0,
+            y0: bbox.y1 + 4.0,
+            x1: bbox.x1,
+            y1: bbox.y1 + 16.0,
+        };
+        write_highlights(
+            &src,
+            &annotated,
+            &[
+                HighlightAnnotation {
+                    page: 0,
+                    rects: vec![bbox],
+                    color: YELLOW,
+                    opacity: 1.0,
+                    name: Some("syodep-highlight-1".to_owned()),
+                },
+                HighlightAnnotation {
+                    page: 0,
+                    rects: vec![neighbour],
+                    color: YELLOW,
+                    opacity: 1.0,
+                    name: Some("syodep-highlight-2".to_owned()),
+                },
+                HighlightAnnotation {
+                    page: 1,
+                    rects: vec![bbox],
+                    color: YELLOW,
+                    opacity: 1.0,
+                    name: Some("syodep-highlight-1".to_owned()),
+                },
+            ],
+        )
+        .unwrap();
+
+        let out = dir.path().join("out.pdf");
+        let before = std::fs::read(&annotated).unwrap();
+        let removed = remove_highlight_annotation(&annotated, &out, "syodep-highlight-1").unwrap();
+
+        assert_eq!(removed, 2, "both pages of the one highlight");
+        assert_eq!(
+            std::fs::read(&annotated).unwrap(),
+            before,
+            "the source is never modified"
+        );
+        assert_eq!(
+            page_highlight_names(&out, 0).unwrap(),
+            vec![Some("syodep-highlight-2".to_owned())],
+            "the other highlight on the same page survives"
+        );
+        assert!(page_highlight_names(&out, 1).unwrap().is_empty());
+    }
+
+    #[test]
+    fn removing_an_unknown_name_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (src, bbox) = highlight_fixture(dir.path());
+        let annotated = dir.path().join("annotated.pdf");
+        write_highlights(
+            &src,
+            &annotated,
+            &[HighlightAnnotation {
+                page: 0,
+                rects: vec![bbox],
+                color: YELLOW,
+                opacity: 1.0,
+                name: None,
+            }],
+        )
+        .unwrap();
+
+        let out = dir.path().join("out.pdf");
+        assert_eq!(
+            remove_highlight_annotation(&annotated, &out, "syodep-highlight-1").unwrap(),
+            0
+        );
+        assert!(!out.exists(), "no match means no output file");
+        assert_eq!(page_highlight_names(&annotated, 0).unwrap(), vec![None]);
     }
 
     /// The `/CA` (constant alpha) of the first `Highlight` annotation on
@@ -6151,6 +6427,7 @@ mod tests {
                 rects: vec![bbox],
                 color: YELLOW,
                 opacity: 0.55,
+                name: None,
             }],
         )
         .unwrap();
@@ -6184,6 +6461,7 @@ mod tests {
                 rects: vec![bbox],
                 color: YELLOW,
                 opacity: 1.0,
+                name: None,
             }],
         )
         .unwrap();
@@ -6218,6 +6496,7 @@ mod tests {
                 rects: vec![bbox],
                 color: YELLOW,
                 opacity: 1.0,
+                name: None,
             }],
         )
         .unwrap();
@@ -6269,6 +6548,7 @@ mod tests {
                 rects: vec![bbox],
                 color: YELLOW,
                 opacity: 1.0,
+                name: None,
             }],
         )
         .unwrap_err();

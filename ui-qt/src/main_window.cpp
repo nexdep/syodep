@@ -1,5 +1,6 @@
 #include "main_window.h"
 
+#include <QAction>
 #include <QCloseEvent>
 #include <QDockWidget>
 #include <QDragEnterEvent>
@@ -17,17 +18,12 @@
 #include "canvas_widget.h"
 #include "core_controller.h"
 #include "sidebar/annotation_sidebar.h"
+#include "sidebar/annotations_panel.h"
 
 namespace syodep {
 
 namespace {
 
-// Local .pdf paths carried by a drag, in the order they were dragged.
-//
-// Shared by dragEnterEvent and dropEvent so the two cannot disagree about
-// what is acceptable -- otherwise a drag could show the "copy" cursor and
-// then do nothing on release. toLocalFile() yields an empty string for
-// remote URLs (http:, ftp:), which filters them out here.
 QStringList droppablePdfs(const QMimeData *mime)
 {
     QStringList paths;
@@ -49,30 +45,62 @@ MainWindow::MainWindow(QWidget *parent)
     setWindowTitle(QStringLiteral("syodep"));
     resize(960, 1000);
 
-    // Controller first so its lifetime covers the canvas.
     m_core = new CoreController(this);
     m_canvas = new CanvasWidget(m_core, this);
-    // Overlay colours come from [view] in the config, resolved by the core.
     m_canvas->setBackgroundColor(m_core->backgroundColor());
     m_canvas->setFocusColor(m_core->focusColor());
     m_canvas->setVisualColor(m_core->visualColor());
     m_canvas->setHighlightColor(m_core->highlightColor());
     setCentralWidget(m_canvas);
 
-    m_annotationsDock = new QDockWidget(tr("Highlights"), this);
-    m_annotationsDock->setObjectName(QStringLiteral("highlightsDock"));
-    m_annotationsDock->setAllowedAreas(Qt::LeftDockWidgetArea | Qt::RightDockWidgetArea);
-    m_annotationSidebar = new AnnotationSidebar(m_core, m_annotationsDock);
-    m_annotationsDock->setWidget(m_annotationSidebar);
-    addDockWidget(Qt::RightDockWidgetArea, m_annotationsDock);
-    // Reasonable initial width; user can still resize freely.
-    resizeDocks({m_annotationsDock}, {340}, Qt::Horizontal);
+    m_sidebarDock = new QDockWidget(tr("Highlights"), this);
+    m_sidebarDock->setObjectName(QStringLiteral("annotationDock"));
+    m_sidebarDock->setAllowedAreas(Qt::RightDockWidgetArea);
+    m_sidebarDock->setFeatures(QDockWidget::DockWidgetClosable);
+    m_annotationSidebar = new AnnotationSidebar(m_core, m_sidebarDock);
+    m_sidebarDock->setWidget(m_annotationSidebar);
+    addDockWidget(Qt::RightDockWidgetArea, m_sidebarDock);
+    resizeDocks({m_sidebarDock}, {340}, Qt::Horizontal);
+    sanitizeDockState();
+    m_activeSidebarPage = SidebarPage::Highlights;
+
+    m_highlightsAction = new QAction(tr("&Highlights"), this);
+    m_highlightsAction->setCheckable(true);
+    m_annotationsAction = new QAction(tr("&Annotations"), this);
+    m_annotationsAction->setCheckable(true);
+    connect(m_highlightsAction, &QAction::triggered, this, [this]() {
+        toggleSidebarPage(SidebarPage::Highlights);
+    });
+    connect(m_annotationsAction, &QAction::triggered, this, [this]() {
+        toggleSidebarPage(SidebarPage::Annotations);
+    });
+
+    QMenu *fileMenu = menuBar()->addMenu(tr("&File"));
+    fileMenu->addAction(m_annotationSidebar->exportAction());
+    if (m_annotationSidebar->annotationsPanel())
+        fileMenu->addAction(m_annotationSidebar->annotationsPanel()->exportAction());
 
     QMenu *viewMenu = menuBar()->addMenu(tr("&View"));
-    viewMenu->addAction(m_annotationsDock->toggleViewAction());
+    viewMenu->addAction(m_highlightsAction);
+    viewMenu->addAction(m_annotationsAction);
 
-    // The canvas covers the window but leaves acceptDrops() false, so Qt walks
-    // up to the window for drag events. Only the window needs the flag.
+    connect(m_sidebarDock, &QDockWidget::visibilityChanged, this, [this](bool visible) {
+        if (!visible && isVisible())
+            focusCanvas();
+        updateSidebarActions();
+    });
+    connect(m_annotationSidebar, &AnnotationSidebar::focusCanvasRequested,
+            this, [this]() {
+                m_annotationSidebar->clearPendingKeys();
+                focusCanvas();
+            });
+    connect(m_core, &CoreController::toggleHighlightsSidebarRequested,
+            this, &MainWindow::toggleHighlightsSidebar);
+    connect(m_core, &CoreController::toggleAnnotationsSidebarRequested,
+            this, &MainWindow::toggleAnnotationsSidebar);
+    connect(m_core, &CoreController::createTextAnnotationRequested,
+            this, &MainWindow::openAnnotationCreation);
+
     setAcceptDrops(true);
 
     m_status = new QLabel(this);
@@ -89,23 +117,128 @@ MainWindow::MainWindow(QWidget *parent)
     if (!warnings.isEmpty())
         statusBar()->showMessage(warnings.section(QLatin1Char('\n'), 0, 0), 10000);
 
+    updateSidebarActions();
     refreshStatus();
+}
+
+void MainWindow::sanitizeDockState()
+{
+    if (!m_sidebarDock)
+        return;
+    if (m_sidebarDock->isFloating())
+        m_sidebarDock->setFloating(false);
+    if (dockWidgetArea(m_sidebarDock) != Qt::RightDockWidgetArea)
+        addDockWidget(Qt::RightDockWidgetArea, m_sidebarDock);
+}
+
+void MainWindow::toggleSidebarPage(SidebarPage requested)
+{
+    if (!m_sidebarDock)
+        return;
+    if (!m_sidebarDock->isVisible()) {
+        showSidebarPage(requested);
+        return;
+    }
+    if (visibleSidebarPage() == requested) {
+        hideSidebar();
+        return;
+    }
+    showSidebarPage(requested);
+}
+
+void MainWindow::showSidebarPage(SidebarPage page)
+{
+    if (!m_sidebarDock || !m_annotationSidebar)
+        return;
+    m_activeSidebarPage = page;
+    m_annotationSidebar->showPage(page);
+    m_sidebarDock->setWindowTitle(page == SidebarPage::Highlights
+                                      ? tr("Highlights")
+                                      : tr("Annotations"));
+    m_sidebarDock->setVisible(true);
+    sanitizeDockState();
+    m_annotationSidebar->focusActivePage();
+    updateSidebarActions();
+}
+
+void MainWindow::hideSidebar()
+{
+    if (!m_sidebarDock)
+        return;
+    if (m_annotationSidebar)
+        m_annotationSidebar->clearPendingKeys();
+    m_sidebarDock->setVisible(false);
+    focusCanvas();
+    updateSidebarActions();
+}
+
+void MainWindow::openAnnotationCreation()
+{
+    if (!m_sidebarDock || !m_annotationSidebar)
+        return;
+    m_activeSidebarPage = SidebarPage::Annotations;
+    m_annotationSidebar->showPage(SidebarPage::Annotations);
+    m_sidebarDock->setWindowTitle(tr("Annotations"));
+    m_sidebarDock->setVisible(true);
+    sanitizeDockState();
+    m_annotationSidebar->beginAnnotationCreation();
+    updateSidebarActions();
+}
+
+void MainWindow::toggleHighlightsSidebar()
+{
+    toggleSidebarPage(SidebarPage::Highlights);
+}
+
+void MainWindow::toggleAnnotationsSidebar()
+{
+    toggleSidebarPage(SidebarPage::Annotations);
+}
+
+std::optional<SidebarPage> MainWindow::visibleSidebarPage() const
+{
+    if (!m_sidebarDock || !m_sidebarDock->isVisible())
+        return std::nullopt;
+    return m_activeSidebarPage;
+}
+
+void MainWindow::updateSidebarActions()
+{
+    const auto visible = visibleSidebarPage();
+    if (m_highlightsAction)
+        m_highlightsAction->setChecked(visible == SidebarPage::Highlights);
+    if (m_annotationsAction)
+        m_annotationsAction->setChecked(visible == SidebarPage::Annotations);
+}
+
+void MainWindow::focusCanvas()
+{
+    if (m_annotationSidebar)
+        m_annotationSidebar->clearPendingKeys();
+    if (m_canvas)
+        m_canvas->setFocus(Qt::OtherFocusReason);
 }
 
 bool MainWindow::openDocument(const QString &path)
 {
-    // Resolve unsaved comment drafts before the core replaces the document.
-    if (m_annotationSidebar && !m_annotationSidebar->prepareForDocumentChange())
+    if (m_annotationSidebar
+        && !m_annotationSidebar->confirmDiscardDirty(tr("opening another document"))) {
         return false;
-    // Cache invalidation, redraw, and status refresh are emitted by the
-    // controller — do not duplicate them here.
-    return m_core->openDocument(path);
+    }
+    const bool sidebarWasVisible = visibleSidebarPage().has_value();
+    if (!m_core->openDocument(path))
+        return false;
+    if (m_annotationSidebar)
+        m_annotationSidebar->clearPendingKeys();
+    if (sidebarWasVisible)
+        m_annotationSidebar->focusActivePage();
+    else
+        focusCanvas();
+    return true;
 }
 
 void MainWindow::dragEnterEvent(QDragEnterEvent *event)
 {
-    // Accepting only here is what makes the cursor show "no entry" for
-    // anything else -- the user finds out before releasing.
     if (!droppablePdfs(event->mimeData()).isEmpty())
         event->acceptProposedAction();
 }
@@ -117,13 +250,8 @@ void MainWindow::dropEvent(QDropEvent *event)
         return;
     event->acceptProposedAction();
 
-    // One document at a time: open the first and say so, rather than
-    // discarding the drop or silently ignoring the rest.
     openDocument(paths.first());
     if (paths.size() > 1) {
-        // Spelled out rather than via tr()'s %n plural form: with no
-        // translation catalogue loaded, tr() returns the source string
-        // unchanged, so "file(s)" would reach the user literally.
         const int ignored = paths.size() - 1;
         const QString name = QFileInfo(paths.first()).fileName();
         const QString message = ignored == 1
@@ -143,13 +271,12 @@ bool MainWindow::confirmQuit()
     if (m_closeConfirmed)
         return true;
 
-    // 1. Resolve unsaved comment drafts before Pending-highlight confirmation.
-    if (m_annotationSidebar && !m_annotationSidebar->prepareForClose())
+    if (m_annotationSidebar
+        && !m_annotationSidebar->confirmDiscardDirty(tr("closing the application"))) {
         return false;
+    }
 
     if (!m_core->hasUnsavedHighlights()) {
-        // Nothing to discard, but this still saves the reading position
-        // eagerly rather than relying on an implicit save elsewhere.
         m_core->quitDiscarding();
         m_closeConfirmed = true;
         return true;
@@ -172,11 +299,9 @@ bool MainWindow::confirmQuit()
     else if (box.clickedButton() == discardBtn)
         quit = m_core->quitDiscarding();
     else
-        return false; // Cancel
+        return false;
 
     if (!quit) {
-        // Save failed: surface it. ReturnOnly avoided a re-entrant
-        // quitRequested while closeEvent is deciding.
         m_canvas->update();
         refreshStatus();
         return false;
@@ -196,11 +321,15 @@ void MainWindow::closeEvent(QCloseEvent *event)
 void MainWindow::onConfirmQuitRequested()
 {
     if (confirmQuit())
-        close(); // re-enters closeEvent, short-circuited by m_closeConfirmed
+        close();
 }
 
 void MainWindow::showOpenDialog()
 {
+    if (m_annotationSidebar
+        && !m_annotationSidebar->confirmDiscardDirty(tr("opening another document"))) {
+        return;
+    }
     const QString start = m_core->openDirectory();
     const QString path = QFileDialog::getOpenFileName(
         this, tr("Open PDF"), start, tr("PDF documents (*.pdf);;All files (*)"));

@@ -7,12 +7,12 @@ joined by a small C ABI:
 
 ```
  ┌────────────────────────── ui-qt (C++, Qt 6) ──────────────────────────┐
- │ MainWindow ── status line, file dialog, View menu, Highlights dock    │
- │ CanvasWidget (QOpenGLWidget) ── paints bitmaps, forwards input        │
- │ AnnotationSidebar ── read-only highlight list (model/view/delegate)   │
- │ CoreController ── owns SyoApp*, owned Qt values, effect → signals     │
- │ key_encoder ── QKeyEvent → "j" / "G" / "<C-d>" strings                │
- └──────────────────────────────┬────────────────────────────────────────┘
+ │ MainWindow ── status line, file dialog, View menu, annotation dock          │
+ │ CanvasWidget (QOpenGLWidget) ── paints bitmaps, forwards input              │
+ │ AnnotationSidebar ── HighlightsPanel + AnnotationsPanel (stacked pages)     │
+ │ CoreController ── owns SyoApp*, owned Qt values, effect → signals           │
+ │ key_encoder ── QKeyEvent → "j" / "G" / "<C-d>" strings                      │
+ └──────────────────────────────┬──────────────────────────────────────────────┘
                                 │ C ABI (crates/syodep-ffi, cbindgen header)
  ┌──────────────────────────────┴────────────────────────────────────────┐
  │ syodep-core: App                                                      │
@@ -153,24 +153,46 @@ input take plain data). Key pieces:
   15. Committing writes them to SQLite as `Pending` so they survive a reopen;
   `save_document` embeds only Pending rows into the PDF as real `Highlight`
   annotations, then marks those exact ids `Embedded`. Rows are **kept** after a
-  save (stable ids for the sidebar, Markdown export, and comments).
+  save (stable ids for the sidebar and the Markdown export).
   Pending records are drawn by the syodep overlay; Embedded records are drawn by
   MuPDF from the PDF and must not be painted again. Listing, reveal-by-id, and
   Markdown export use the stored geometry and captured text — no content
-  extraction or caret traversal. Each highlight may carry one optional Markdown
-  comment in `highlight_notes` (migration v4), keyed by stable id and independent
-  of PDF state:
+  extraction or caret traversal:
 
   ```
   Highlight
   ├── DocumentAnchor (immutable PDF source text + page-space rects)
-  ├── PDF state (Pending / Embedded / External)
-  └── optional HighlightNote (mutable raw Markdown)
+  └── PDF state (Pending / Embedded / External)
   ```
 
-  Empty/whitespace-only saves delete the note row. Comment changes bump
-  `annotation_revision` and emit `annotations_changed` without a canvas redraw.
-  Chat/threads will use separate tables — notes are not chat history.
+  **Document order** is one convention, defined here and nowhere else. Rectangles
+  are normalized on load and on commit into `(page, y0 ascending, x0 ascending)`
+  — page space has its origin at the top left and `y` grows downward, so a
+  smaller `y0` is higher on the page and therefore earlier — and a highlight
+  sorts by its first rectangle, ties broken by its stable row id. Both
+  `highlight_summaries()` and `all_highlights_markdown()` use it, so the sidebar
+  list and every export agree on what "the next highlight" is; the Qt side sorts
+  nothing (decision 20).
+
+  **Deleting** (`App::delete_highlight`) is two different operations behind one
+  name. A Pending highlight exists only in SQLite, so its row goes. An Embedded
+  one also exists in the PDF, and that copy is what the user sees: the annotation
+  is removed from the file first — by the `/NM` name `syodep-highlight-{id}` that
+  every annotation of that highlight was written with — and only a successful
+  rewrite is followed by the database delete, so a failure can never leave an
+  annotation in the PDF that syodep no longer knows about. An Embedded record
+  with no matching `/NM` is refused rather than matched by geometry (decision 21).
+
+- **Text annotations** (`app.rs` + `syodep-storage`): independent of highlights.
+  Same `DocumentAnchor` shape; editable Markdown body; SQLite only (never
+  embedded). Created with `n` from Focus/Visual/Highlight after freezing
+  `pending_annotation_anchor`. Share `annotation_revision` with highlights.
+  Create returns a stable `TextAnnotationId`. When persistence is unavailable,
+  create/edit/delete are refused with a status message (no session-only ids).
+  Canonical Markdown export is `# Highlights` / `# Annotations` with `## Page`
+  sections (core string without a trailing newline; QSaveFile writers append
+  one).
+
   Traversal refactors (`ContentSession` / `MotionEngine`) remain deferred; see
   [`docs/traversal-audit.md`](traversal-audit.md).
 
@@ -430,14 +452,19 @@ covers a rectangle per line and may run across pages — and because PDF
 annotations are per-page, so the writer groups by `page` anyway.
 
 Schema v3: `highlights.pdf_state` (`0` Pending / `1` Embedded / `2` External)
-and `highlights.updated_at`. Schema v4: `highlight_notes` (one optional Markdown
-comment per highlight). SQLite remains the canonical annotation-metadata
+and `highlights.updated_at`. SQLite remains the canonical annotation-metadata
 index; the PDF remains the portable visual representation. Existing v2 rows
 upgrade to Pending (under the previous lifecycle successfully embedded rows
 were deleted, so anything still present had not been cleared after a save).
 `External` is reserved for a future import of annotations syodep did not create.
 
-Phase 2 adds marks/bookmarks/notes tables as further migrations.
+The schema ends at v4. Schema v4 adds `text_annotations` /
+`text_annotation_rects` for independent Markdown annotations. A withdrawn
+Step 5 `highlight_notes` schema also used version 4; open-time inspection
+refuses a DB that has `highlight_notes` without `text_annotations` (delete and
+recreate). A valid real-v4 database opens normally.
+
+Phase 2 adds marks/bookmarks tables as further migrations.
 
 **Consequence of saving:** writing highlights into the PDF changes its bytes and
 therefore its fingerprint, which is the document's identity. `rekey_document`
@@ -459,7 +486,8 @@ heap copies with explicit `syo_*_free` functions. The header is generated
 by cbindgen at build time into `crates/syodep-ffi/include/syodep_ffi.h`.
 Canvas overlays (`syo_app_highlights`) stay screen-space and Pending-only;
 the annotation list API (`syo_app_highlight_list`, revision, reveal,
-Markdown) feeds the Qt sidebar through `CoreController`.
+Markdown, `syo_app_delete_highlight`) feeds the Qt sidebar through
+`CoreController`.
 
 ### ui-qt
 
@@ -467,14 +495,14 @@ Markdown) feeds the Qt sidebar through `CoreController`.
 MainWindow
     native dialogs and window composition
     status bar, quit confirmation
-    View → Highlights dock toggle
+    the one sidebar toggle (View → Highlights, <leader>a, dock close button)
 
 CoreController
     owns SyoApp*
     C ABI conversion to owned Qt values
     effect-bit routing → signals
     pending-key QTimer
-    annotation snapshot / revision / reveal / Markdown
+    annotation snapshot / revision / reveal / Markdown / delete
 
 CanvasWidget
     page and overlay painting
@@ -482,14 +510,13 @@ CanvasWidget
     device-pixel-ratio conversion
     forwards keyboard/wheel/resize through CoreController
 
-AnnotationSidebar (QDockWidget "Highlights")
-    HighlightListModel — disposable snapshot projection
-    HighlightDelegate — card paint (source + optional comment preview)
-    HighlightCommentEditor — one selected-item Markdown editor
-    SafeMarkdownView — preview with HTML/external resources blocked
+AnnotationSidebar (QDockWidget "Highlights", right edge, closable only)
+    HighlightListModel — disposable snapshot projection, core's order kept
+    HighlightDelegate — card paint (page, state, source text)
+    keyboard navigation (j/k, gg/G, Enter, dd, y/Y, Esc)
     empty states (no document / no highlights)
-    reveal + clipboard via CoreController
-    dirty-draft protection on selection / open / close
+    reveal + clipboard + delete via CoreController
+    Markdown file export (QSaveFile)
 ```
 
 Six small components; intentionally boring:
@@ -514,24 +541,31 @@ Six small components; intentionally boring:
   is in the core. Tiled GL texture rendering is planned for phase 3 (roadmap).
   Canvas overlays stay Pending-only; Embedded highlights are drawn by MuPDF
   inside the page bitmap and must not be double-painted by the overlay.
-- `AnnotationSidebar` is a dock beside the canvas with a vertical splitter:
-  the highlight list above and one `HighlightCommentEditor` below (never one
-  editor per row). It consumes disposable `HighlightSnapshot` values from
-  `CoreController`, refreshes only when `documentChanged` fires or
-  `annotationRevision` advances, and restores selection by stable highlight id.
-  Cards show a bounded plain-text comment preview; the editor edits raw
-  Markdown and previews via `SafeMarkdownView` (`MarkdownNoHTML`, no external
-  resources, no automatic link opening). Save/Revert go through
-  `setHighlightNote`; Qt owns only the unsaved draft. Canonical annotation
-  Markdown (quote + saved comment) is produced in Rust. Unsaved drafts are
-  prompted on selection change, document open, and application close. Both
-  Pending and Embedded rows appear in the list; Embedded ones stay absent from
-  the application overlay. No SQLite or raw FFI types reach the sidebar.
-- `MainWindow` composes the canvas, Highlights dock, and status line, owns
-  native dialogs (open file, quit confirmation), and accepts PDFs dropped onto
-  the window. It does not own or free `SyoApp*`. The canvas fills the window but
-  leaves `acceptDrops()` false, so Qt delivers drag events to the window; only
-  it needs the flag.
+- `AnnotationSidebar` owns a stacked Highlights / Annotations page in one
+  fixed-right dock (`DockWidgetClosable`, `RightDockWidgetArea` only — never
+  floated or moved). Highlights keep the Step 6 list behaviour. Annotations
+  add an independent Markdown list + editor (`SafeMarkdownView`): full source
+  and full body in the snapshot; cards derive a plain-text preview only.
+  Both pages refresh on the shared `annotationRevision` and restore selection
+  by stable id. Shared list keys live in `sidebar_list_keys.h`. Escape in the
+  list focuses the canvas and leaves the dock open; Escape in a clean editor
+  returns to the list, while a dirty editor keeps focus and reinforces the
+  unsaved cue. Dirty prompts are Save / Discard / Cancel (failed Save aborts
+  the transition). Drafts survive hide and page substitution; prompts run on
+  new create, document change, quit, delete of the edited row, and selection
+  change that would replace the editor — not on hide, Highlights substitute,
+  reveal, resize, PDF save, or window deactivation.
+- `MainWindow` composes the canvas, annotation dock, and status line, owns
+  native dialogs, and centralizes sidebar visibility in
+  `toggleSidebarPage` / `showSidebarPage` / `hideSidebar` /
+  `openAnnotationCreation`, with `visibleSidebarPage()` as the single read
+  model for menu checks. `<leader>a` and `View → Highlights` toggle
+  Highlights; `<leader>n` and `View → Annotations` toggle Annotations;
+  `n` opens Annotations in creation mode and never hides the dock. Opening a
+  document focuses the canvas unless the dock was already visible (then the
+  previous page stays active). It does not own or free `SyoApp*`. The canvas
+  fills the window but leaves `acceptDrops()` false, so Qt delivers drag
+  events to the window; only it needs the flag.
 - `diagnostics` detects the platform's graphics situation (WSL, software GL,
   missing OpenGL) and produces the `--check`/`--version` reports. CLI-only
   `syo_*` helpers (version, default paths, default config text) stay here and
@@ -566,8 +600,8 @@ Six small components; intentionally boring:
 | 12 | Visual-mode scope belongs to each *endpoint*, not to the start/end role | crossing the anchor and coming back is the identity, so the selection never silently changes shape on an overshoot | a use case needs "the first edge is always line-granular" |
 | 13 | Selection overlay is computed per visible page, not per selected page | cost is O(visible lines) however long the selection is, and page content is never force-extracted off-screen | ✅ done: storing a highlight needs the whole span, so `page_span_rects` is now the shared per-page geometry and `span_page_rects` walks every covered page |
 | 15 | A highlight is stored as page-space rectangles plus its text, not as a caret span | rectangles are what all three consumers need — the overlay, the PDF's `/QuadPoints`, and export — and they draw correctly on reload without re-extracting any page content | highlights need to be re-anchored to text that has moved (a re-flowed or replaced document) |
-| 16 | Saving re-keys the document row to the rewritten file's fingerprint, and marks the exact saved highlight ids Embedded (rows kept) | the fingerprint *is* the identity, so the position must follow the file; keeping rows after embed preserves stable ids for the sidebar/export/comments while filtering overlays and later saves to Pending only, which prevents double-painting | a future import pass reconciles Pending rows that already exist in the PDF after a DB update failure (cross-resource integrity window) |
-| 18 | One optional Markdown comment per highlight in a separate `highlight_notes` table | keeps the immutable PDF source anchor distinct from user-authored notes; empty/whitespace clears the row; chat needs different concepts (roles, ordering, tools) so notes must not become message history | multiple human comments per highlight, or agent chat threads |
+| 16 | Saving re-keys the document row to the rewritten file's fingerprint, and marks the exact saved highlight ids Embedded (rows kept) | the fingerprint *is* the identity, so the position must follow the file; keeping rows after embed preserves stable ids for the sidebar and export while filtering overlays and later saves to Pending only, which prevents double-painting | a future import pass reconciles Pending rows that already exist in the PDF after a DB update failure (cross-resource integrity window) |
+| 18 | **Withdrawn before release:** one optional Markdown comment per highlight (`highlight_notes`, migration v4) | it shipped a single editable body per highlight, which is not how a paper gets annotated, and it would have frozen a published schema in front of the threads and agent chat that are actually wanted. Removed by deleting the unreleased migration rather than adding a drop migration: an entry nobody ever ran in a release is not history worth keeping, and undoing it in a second migration would make every future database run both | comments come back as threads (rows with author/order/kind), at which point they get a new migration and this row a successor |
 | 17 | Highlight mode binds visual mode's commands rather than having its own | one implementation of reshaping a two-ended range, so a key provably cannot mean different things in the two modes; the feature cost three commands and no motion code | a highlight needs a motion a selection does not have |
 | 6 | Synchronous rendering + byte-bounded LRU cache | simplest correct thing for M1 | phase 3 (async tiles) |
 | 7 | Counts are runtime input, not part of binding syntax | matches Vim; keeps keymap finite | — |
@@ -576,7 +610,9 @@ Six small components; intentionally boring:
 | 10 | cbindgen-generated header, checked into neither repo nor docs | single source of truth in Rust | ABI freeze for plugins (not planned) |
 | 11 | Modal caret over content geometry (mode-selected keymap) | Vim-like `hjkl` caret without losing `hjkl` scrolling; one stop per image; goal-column vertical motion | always-on caret, or richer text objects (phase 3) |
 | 14 | Atomicity is a property of the content, layered over the motion table rather than built into it | `step_scope` stays the pure per-scope description of a word/line/sentence/paragraph; one wrapper makes every scope treat a table or image as one unit, so counts and all six call sites keep working unchanged | ✅ done: unit-hood became per-scope in decision 19, and the wrapper now asks `unit_object_at(.., scope)` rather than a single category |
-| 18 | Quitting with unsaved highlights asks (Save & Quit / Discard & Quit / Cancel) instead of quitting silently or refusing outright | highlights already outlive the session in the database, so "unsaved" only means "not yet embedded in the PDF bytes"; losing that silently on one careless keystroke (or window-manager Alt+F4) was the bug being fixed, and the existing `save_document`/`quit_discarding_highlights` split made the confirm-then-branch trivial to add without a new `Command` | a command palette or scripting API needs to trigger Save & Quit / Discard & Quit outside of the dialog flow (then promote them to `Command` variants) |
+| 22 | Quitting with unsaved highlights asks (Save & Quit / Discard & Quit / Cancel) instead of quitting silently or refusing outright | highlights already outlive the session in the database, so "unsaved" only means "not yet embedded in the PDF bytes"; losing that silently on one careless keystroke (or window-manager Alt+F4) was the bug being fixed, and the existing `save_document`/`quit_discarding_highlights` split made the confirm-then-branch trivial to add without a new `Command` | a command palette or scripting API needs to trigger Save & Quit / Discard & Quit outside of the dialog flow (then promote them to `Command` variants) |
+| 20 | Document order is defined once in the core (`(page, y0, x0, id)` over normalized rectangles) and Qt sorts nothing | the sidebar list, the clipboard, the file export and any future palette have to agree on "the next highlight"; a `QSortFilterProxyModel` would agree only by coincidence, and would put half the definition in C++ where the core cannot test it. Rectangles are normalized where they enter the app (load and commit), so `rects.first()` means "where this starts" everywhere downstream | a view needs an order the core does not define (grouping by colour, filtering by state) — then it is a *view* concern and a proxy is right, but document order stays the model's |
+| 21 | An Embedded highlight is deleted from the PDF first, matched by the `/NM` name written when it was embedded, and refused outright when no annotation carries that name | the PDF copy is the one the user sees, so it must go first: the reverse order can leave an annotation syodep no longer knows about and can no longer identify. Matching on a name syodep itself wrote is the only identification that is not a guess — geometry and subtype repeat, and a wrong guess deletes an annotation somebody else made. A multi-page highlight shares one name across its per-page annotations, so they are removed together | importing external annotations (`External` state) needs deletion of things syodep did not name — those need their own identification story, not a looser match here |
 | 19 | Unit-hood is per scope: `is_atomic()` from word scope up, `is_block()` from line scope up | a table's rows and an equation's rows are not reading lines, so both should be one stop for `e`/`s`/`p` and paint as one box — but their contents *are* worth a word at a time, which a single category could not express without losing one or the other. Two nested categories say it in two `matches!` lines, and `page_span_rects` needs no scope at all because covering an object end to end already happens exactly at the scopes where it is one unit | a kind needs a third boundary (say, one unit from sentence scope up but not line), at which point the two booleans should become one "smallest scope at which this is a unit" — which requires moving the mapping into `syodep-core`, since `syodep-pdf` cannot name `Scope` |
 
 ## Sioyek: conceptual inspirations (clean-room)

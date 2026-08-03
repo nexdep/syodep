@@ -32,24 +32,24 @@ Ordered roughly by dependency:
    (migrations v2–v3); Pending overlays on reload; `<leader>w` embeds Pending
    highlights as PDF annotations and keeps the rows as Embedded (stable ids,
    summaries, reveal-by-id, Markdown export, C ABI list)
-4. ⬜ Search within document; result overlays; `/`, `n`, `N`
-5. ✅ Text notes attached to highlights — one optional Markdown comment per
-   stable highlight id (`highlight_notes` migration v4); sidebar Edit/Preview
-   editor; safe Qt preview; included in Rust Markdown clipboard export. Multiple
-   human comment threads and agent chat remain planned (separate storage)
+4. ⬜ Search within document; result overlays; `/` and next/previous result
+   bindings (not bare `n`/`N` — those are reserved for annotations and must use
+   different chords when search lands)
+5. ✅ Markdown annotations anchored to selected text (independent of highlights;
+   `text_annotations` migration v4; `n` creates from Focus/Visual/Highlight;
+   `<leader>n` toggles the Annotations sidebar page; Step 8 stabilizes dirty
+   prompts, id-based selection, export format, and persistence-off behavior)
 6. ⬜ Bookmarks (current position) and single-key marks (`m{a-z}`,
    `'{a-z}`)
 7. ⬜ Jump history: jump-back / jump-forward (`<C-o>` / `<C-i>`)
-8. ⬜ Fuzzy search over highlights and notes
-9. 🚧 Export annotations to Markdown and JSON — clipboard Markdown for one/
-   all highlights (including saved comments) is available via the sidebar
-   (Rust-canonical serialization); a full export-file workflow is not yet
-   implemented
-10. ✅ Annotation sidebar (Qt) — dockable Highlights panel with
-    model/view/delegate cards, comment editor, revision-aware refresh,
-    reveal-by-id, plain/Markdown clipboard copy. Agent chat, filtering, and
-    external PDF annotation import remain planned. Caret-anchored chat waits on
-    later traversal refactors (`docs/traversal-audit.md`)
+8. ⬜ Fuzzy search over highlights
+9. 🚧 Export annotations to Markdown and JSON — Markdown is done for highlights
+   and text annotations (`# Highlights` / `# Annotations` with `## Page`
+   sections; clipboard + `.md` file export). JSON export is not implemented
+10. ✅ Annotation sidebar (Qt) — one fixed-right dock with mutually exclusive
+    Highlights and Annotations pages (`<leader>a` / `<leader>n`), keyboard-driven
+    lists, Markdown annotation editing, clipboard copy and file export. Agent chat,
+    filtering, and external PDF annotation import remain planned.
 
 Delivered ahead of the rest: a **modal caret** (`c` to enter, then `hjkl`)
 navigates the content layer character- and line-wise across text and images,

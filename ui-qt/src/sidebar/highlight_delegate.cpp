@@ -142,35 +142,7 @@ HighlightDelegate::Layout HighlightDelegate::computeLayout(
     layoutWrappedText(text, option.font, textWidth, kMaxTextLines, &textHeight);
     layout.text = QRect(content.left(), textTop, textWidth, int(qCeil(textHeight)));
 
-    int bottom = layout.text.bottom();
-    layout.hasNote = index.data(HighlightListModel::HasNoteRole).toBool();
-    if (layout.hasNote) {
-        const QString preview =
-            index.data(HighlightListModel::NotePlainPreviewRole).toString();
-        QFont noteLabelFont = option.font;
-        noteLabelFont.setPointSizeF(qMax(8.0, noteLabelFont.pointSizeF() - 1.0));
-        noteLabelFont.setBold(true);
-        const QFontMetrics noteLabelFm(noteLabelFont);
-        const int noteLabelTop = layout.text.bottom() + kNoteGap;
-        layout.noteLabel = QRect(content.left(),
-                                 noteLabelTop,
-                                 content.width(),
-                                 noteLabelFm.height());
-
-        QFont noteFont = option.font;
-        noteFont.setItalic(true);
-        qreal noteHeight = 0;
-        layoutWrappedText(preview, noteFont, textWidth, kMaxNoteLines, &noteHeight);
-        layout.noteText = QRect(content.left(),
-                                layout.noteLabel.bottom() + 2,
-                                textWidth,
-                                int(qCeil(noteHeight)));
-        bottom = layout.noteText.isValid() && layout.noteText.height() > 0
-            ? layout.noteText.bottom()
-            : layout.noteLabel.bottom();
-    }
-
-    layout.height = bottom - option.rect.top() + kMargin;
+    layout.height = layout.text.bottom() - option.rect.top() + kMargin;
     return layout;
 }
 
@@ -223,22 +195,6 @@ void HighlightDelegate::paint(QPainter *painter,
     const QString text = index.data(HighlightListModel::TextRole).toString();
     QColor textColor = pal.color(selected ? QPalette::HighlightedText : QPalette::Text);
     paintWrappedText(painter, text, opt.font, layout.text, kMaxTextLines, textColor);
-
-    if (layout.hasNote) {
-        QFont noteLabelFont = opt.font;
-        noteLabelFont.setPointSizeF(qMax(8.0, noteLabelFont.pointSizeF() - 1.0));
-        noteLabelFont.setBold(true);
-        painter->setFont(noteLabelFont);
-        painter->setPen(metaColor);
-        painter->drawText(layout.noteLabel, Qt::AlignLeft | Qt::AlignVCenter,
-                          QObject::tr("COMMENT"));
-
-        QFont noteFont = opt.font;
-        noteFont.setItalic(true);
-        const QString preview =
-            index.data(HighlightListModel::NotePlainPreviewRole).toString();
-        paintWrappedText(painter, preview, noteFont, layout.noteText, kMaxNoteLines, textColor);
-    }
 
     if (opt.state & QStyle::State_HasFocus) {
         QStyleOptionFocusRect focusOpt;

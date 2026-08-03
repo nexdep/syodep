@@ -77,6 +77,9 @@ focused.
 |---|---|
 | `open_file` | open the native file picker and load the chosen PDF |
 | `save_document` | overwrite the open PDF with its highlights embedded |
+| `toggle_highlights_sidebar` | toggle or activate the Highlights sidebar page |
+| `toggle_annotations_sidebar` | toggle or activate the Annotations sidebar page |
+| `create_annotation` | capture the current Focus/Visual/Highlight source as a pending Markdown annotation and open the editor (rejected in Normal mode) |
 | `quit` | save the reading position and quit; asks first if there are highlights not yet saved to the PDF |
 | `cancel` | clear pending count/sequence input (bound to `<Esc>`; Esc also clears pending input implicitly mid-sequence) |
 
@@ -107,6 +110,37 @@ Two consequences worth knowing:
 
 Saving with nothing to save leaves the file completely alone.
 
+### `toggle_highlights_sidebar`
+
+Bound to `<leader>a` and available in every mode, including with no document
+open — the sidebar has an empty state, and a binding that silently does nothing
+depending on hidden state is worse than one that shows it.
+
+The core only *asks*: whether a panel is on screen is the shell's business.
+`MainWindow::toggleSidebarPage(Highlights)` shows the Highlights page, substitutes
+it for Annotations if that page is visible, or hides the dock when Highlights is
+already active. Opening focuses the Highlights list; hiding returns focus to the
+canvas. `View → Highlights` runs the same code.
+
+### `toggle_annotations_sidebar`
+
+Bound to `<leader>n`. Mirrors `toggle_highlights_sidebar` for the Annotations
+page of the same dock. Cross-toggling substitutes the page without hiding the
+dock; self-toggling hides it.
+
+### `create_annotation`
+
+Bound to `n` in every mode. In Focus, Visual, or Highlight mode it captures an
+immutable `DocumentAnchor` from the current focus unit or selection, stores it as
+`pending_annotation_anchor`, and asks the shell to open the Annotations page in
+creation mode — never a toggle, never hides the dock, and never commits a
+highlight. In Normal mode it does nothing except report:
+
+> Enter Focus, Visual, or Highlight mode to create an annotation.
+
+Empty Save is rejected; cancel creates nothing. The Markdown body is stored
+exactly as entered once non-empty validation passes.
+
 ### `quit`
 
 Bound to `<leader>q` — bare `q` does nothing, so a single careless keystroke
@@ -126,7 +160,7 @@ The window's own close button (and Alt+F4) is protected the same way.
 
 ## Planned (not yet implemented)
 
-Phase 2 adds search/bookmark/mark/jump commands and notes attached to
-highlights, on top of the selection visual mode provides (mouse selection is
-still to come); phase 3 adds text-object commands (`select_word`,
-`highlight_sentence`, …) and smart jump. See `docs/roadmap.md`.
+Phase 2 adds search/bookmark/mark/jump commands on top of the selection visual
+mode provides (mouse selection is still to come); phase 3 adds text-object
+commands (`select_word`, `highlight_sentence`, …) and smart jump. See
+`docs/roadmap.md`.

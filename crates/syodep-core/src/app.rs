@@ -19,7 +19,9 @@ use syodep_pdf::{
     Bitmap, CellKind, ContentLine, ContentObject, ContentOptions, FurnitureProfile,
     HighlightAnnotation, ObjectKind, PageContent, Rect,
 };
-use syodep_storage::{HighlightId, HighlightPdfState, HighlightRect, Position, Storage};
+use syodep_storage::{
+    HighlightId, HighlightPdfState, HighlightRect, Position, Storage, TextAnnotationId,
+};
 
 use crate::caret::{
     column_index_of, column_ranges, continues_word_run, is_abbreviation, is_attached_number_suffix,
@@ -73,6 +75,17 @@ pub struct Effects {
     /// persistence degradation). Distinct from [`Self::redraw`]: a canvas
     /// refresh and a sidebar list refresh are different requests.
     pub annotations_changed: bool,
+    /// The shell should show or hide the highlights sidebar and move keyboard
+    /// focus accordingly. The core does not track whether the sidebar is
+    /// visible — that is shell state — so this is a toggle request, not a
+    /// desired state.
+    pub toggle_highlights_sidebar: bool,
+    /// The shell should show or hide the annotations sidebar page. Same
+    /// toggle-request shape as [`Self::toggle_highlights_sidebar`].
+    pub toggle_annotations_sidebar: bool,
+    /// A pending annotation anchor was captured; the shell should open the
+    /// Annotations page in creation mode. Not a toggle — never hides the dock.
+    pub create_annotation_requested: bool,
 }
 
 impl Effects {
@@ -93,6 +106,12 @@ impl Effects {
             reload: self.reload || other.reload,
             confirm_quit: self.confirm_quit || other.confirm_quit,
             annotations_changed: self.annotations_changed || other.annotations_changed,
+            toggle_highlights_sidebar: self.toggle_highlights_sidebar
+                || other.toggle_highlights_sidebar,
+            toggle_annotations_sidebar: self.toggle_annotations_sidebar
+                || other.toggle_annotations_sidebar,
+            create_annotation_requested: self.create_annotation_requested
+                || other.create_annotation_requested,
             // Not a request like the others: it describes the state left
             // behind, so the later value wins rather than OR-ing.
             pending_input: other.pending_input,
@@ -136,8 +155,17 @@ pub enum AppError {
     NoDocument,
     #[error("unknown highlight {0}")]
     UnknownHighlight(i64),
+    #[error("unknown text annotation {0}")]
+    UnknownTextAnnotation(i64),
+    #[error("annotation body must not be empty")]
+    EmptyAnnotationBody,
     #[error("annotation storage is not available")]
     PersistenceUnavailable,
+    /// An Embedded highlight whose PDF annotation carries no matching `/NM`.
+    /// Deleting it would mean guessing which annotation to remove from
+    /// geometry, which can silently destroy someone else's annotation.
+    #[error("This embedded highlight cannot be identified safely in the PDF.")]
+    EmbeddedHighlightUnidentifiable,
     #[error("cannot write {path}: {source}")]
     Write {
         path: String,
@@ -157,15 +185,6 @@ pub struct DocumentAnchor {
     pub rects: Vec<HighlightRect>,
 }
 
-/// User-authored Markdown comment attached to a highlight.
-///
-/// Distinct from [`DocumentAnchor::text`]: the source quote is immutable PDF
-/// capture; this body is editable and optional.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HighlightNote {
-    pub body_markdown: String,
-}
-
 /// A stored highlight, held for the open document.
 ///
 /// Geometry rather than a caret span, for the reason spelled out on
@@ -180,8 +199,6 @@ pub struct Highlight {
     pub color: String,
     pub anchor: DocumentAnchor,
     pub pdf_state: HighlightPdfState,
-    /// Optional Markdown comment. `None` means no comment row.
-    pub note: Option<HighlightNote>,
 }
 
 /// UI-neutral summary of one highlight for the annotations sidebar.
@@ -195,14 +212,120 @@ pub struct HighlightSummary {
     /// Zero-based; derived from stored rectangles.
     pub last_page: usize,
     pub pdf_state: HighlightPdfState,
-    /// Raw saved Markdown, when a comment exists.
-    pub note_markdown: Option<String>,
+}
+
+/// A stored Markdown annotation for the open document.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextAnnotation {
+    pub id: Option<TextAnnotationId>,
+    pub anchor: DocumentAnchor,
+    pub body_markdown: String,
+}
+
+/// Full snapshot of one text annotation for the sidebar (complete body, not a preview).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextAnnotationSummary {
+    pub id: TextAnnotationId,
+    pub text: String,
+    pub body_markdown: String,
+    pub first_page: usize,
+    pub last_page: usize,
 }
 
 impl Highlight {
     fn is_pending(&self) -> bool {
         self.pdf_state == HighlightPdfState::Pending
     }
+}
+
+/// The `/NM` a highlight's PDF annotations are written with.
+///
+/// One name per *highlight*, not per annotation: a highlight spanning pages
+/// becomes one annotation per page, and all of them share this name so
+/// deleting the highlight can remove exactly its own annotations — every page
+/// of it, and nothing else. Derived from the stable SQLite row id, which is
+/// the only identity that survives a reload.
+pub fn embedded_highlight_name(id: HighlightId) -> String {
+    format!("syodep-highlight-{}", id.0)
+}
+
+/// Where a rectangle sits in reading order.
+///
+/// **Document order convention.** Highlight rectangles are in page space with
+/// the origin at the *top left* and `y` growing *downward* — the space
+/// `Cell::bbox` and the whole content layer report, and the one
+/// `syodep_pdf::write_highlights` converts from. So a smaller `y0` is higher on
+/// the page and therefore earlier, and the ordering is
+/// `(page, y0 ascending, x0 ascending)`. Ties (side-by-side columns on one
+/// line, or two highlights starting at the same point) are broken by the
+/// stable row id at the call site.
+fn rect_order_key(rect: &HighlightRect) -> (usize, f32, f32) {
+    (rect.page, rect.y0, rect.x0)
+}
+
+fn compare_rects_in_document_order(a: &HighlightRect, b: &HighlightRect) -> std::cmp::Ordering {
+    let (ap, ay, ax) = rect_order_key(a);
+    let (bp, by, bx) = rect_order_key(b);
+    ap.cmp(&bp).then(ay.total_cmp(&by)).then(ax.total_cmp(&bx))
+}
+
+/// Put a highlight's rectangles in document order.
+///
+/// Applied wherever rectangles enter the app — on load from SQLite and when a
+/// highlight is committed — so everything downstream can treat
+/// `rects.first()` as "where this highlight starts" and
+/// [`pending_highlight_annotations`](App::pending_highlight_annotations) can
+/// keep grouping by page in a single pass. Storage keeps whatever ordinal order
+/// it was given; ordering is a reading-order question, not a persistence one.
+fn normalize_rects_document_order(rects: &mut [HighlightRect]) {
+    rects.sort_by(compare_rects_in_document_order);
+}
+
+/// Sort key for a whole highlight: its first canonical rectangle, then the
+/// stable row id. Callers must have normalized the rectangles first.
+fn highlight_order_key(highlight: &Highlight) -> (usize, f32, f32, i64) {
+    let id = highlight.id.map(|id| id.0).unwrap_or(i64::MAX);
+    match highlight.anchor.rects.first() {
+        // A highlight with no geometry cannot be placed in the document, so it
+        // sorts last rather than pretending to be on page 0.
+        None => (usize::MAX, f32::MAX, f32::MAX, id),
+        Some(rect) => {
+            let (page, y0, x0) = rect_order_key(rect);
+            (page, y0, x0, id)
+        }
+    }
+}
+
+fn compare_highlights_in_document_order(a: &Highlight, b: &Highlight) -> std::cmp::Ordering {
+    let (ap, ay, ax, aid) = highlight_order_key(a);
+    let (bp, by, bx, bid) = highlight_order_key(b);
+    ap.cmp(&bp)
+        .then(ay.total_cmp(&by))
+        .then(ax.total_cmp(&bx))
+        .then(aid.cmp(&bid))
+}
+
+fn text_annotation_order_key(annotation: &TextAnnotation) -> (usize, f32, f32, i64) {
+    let id = annotation.id.map(|id| id.0).unwrap_or(i64::MAX);
+    match annotation.anchor.rects.first() {
+        None => (usize::MAX, f32::MAX, f32::MAX, id),
+        Some(rect) => {
+            let (page, y0, x0) = rect_order_key(rect);
+            (page, y0, x0, id)
+        }
+    }
+}
+
+fn compare_text_annotations_in_document_order(
+    a: &TextAnnotation,
+    b: &TextAnnotation,
+) -> std::cmp::Ordering {
+    let (ap, ay, ax, aid) = text_annotation_order_key(a);
+    let (bp, by, bx, bid) = text_annotation_order_key(b);
+    ap.cmp(&bp)
+        .then(ay.total_cmp(&by))
+        .then(ax.total_cmp(&bx))
+        .then(aid.cmp(&bid))
 }
 
 /// First and last page of an ordered rect list. `None` when empty.
@@ -216,14 +339,14 @@ fn page_range(rects: &[HighlightRect]) -> Option<(usize, usize)> {
 
 /// One highlight as Markdown. Pages are one-based for the user.
 ///
-/// The source quote is a blockquote. When a saved comment exists, it follows
-/// after one blank line as raw Markdown (not escaped, not re-quoted).
+/// The source quote is a blockquote, and that is the whole record: a highlight
+/// carries no user-authored body.
 fn format_highlight_markdown(highlight: &Highlight) -> String {
     let (first, last) = page_range(&highlight.anchor.rects).unwrap_or((0, 0));
     let heading = if first == last {
-        format!("### Page {}", first + 1)
+        format!("## Page {}", first + 1)
     } else {
-        format!("### Pages {}–{}", first + 1, last + 1)
+        format!("## Pages {}–{}", first + 1, last + 1)
     };
     let body = if highlight.anchor.text.is_empty() {
         "> ".to_owned()
@@ -236,23 +359,33 @@ fn format_highlight_markdown(highlight: &Highlight) -> String {
             .collect::<Vec<_>>()
             .join("\n")
     };
-    match highlight.note.as_ref() {
-        Some(note) if !note.body_markdown.trim().is_empty() => {
-            format!("{heading}\n\n{body}\n\n{}", note.body_markdown)
-        }
-        _ => format!("{heading}\n\n{body}"),
-    }
+    format!("{heading}\n\n{body}")
 }
 
-/// Canonicalise editor input: whitespace-only bodies clear the comment.
-fn canonicalize_note_markdown(body: String) -> Option<HighlightNote> {
-    if body.trim().is_empty() {
-        None
+/// One text annotation as Markdown: heading, source blockquote, then body.
+fn format_text_annotation_markdown(annotation: &TextAnnotation) -> String {
+    let (first, last) = page_range(&annotation.anchor.rects).unwrap_or((0, 0));
+    let heading = if first == last {
+        format!("## Page {}", first + 1)
     } else {
-        Some(HighlightNote {
-            body_markdown: body,
-        })
-    }
+        format!("## Pages {}–{}", first + 1, last + 1)
+    };
+    let quote = if annotation.anchor.text.is_empty() {
+        "> ".to_owned()
+    } else {
+        annotation
+            .anchor
+            .text
+            .split('\n')
+            .map(|line| format!("> {line}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    format!("{heading}\n\n{quote}\n\n{}", annotation.body_markdown)
+}
+
+fn annotation_body_is_empty(body: &str) -> bool {
+    body.trim().is_empty()
 }
 
 struct Session {
@@ -332,9 +465,14 @@ pub struct App {
     /// Highlights stored for the open document (Pending and Embedded). The
     /// overlay and PDF save filter to Pending; the sidebar lists all of them.
     highlights: Vec<Highlight>,
+    /// Markdown annotations stored for the open document (syodep-local only).
+    text_annotations: Vec<TextAnnotation>,
+    /// Frozen source for an annotation being created in the shell editor.
+    /// Captured when `n` succeeds; later focus/selection changes do not alter it.
+    pending_annotation_anchor: Option<DocumentAnchor>,
     /// Bumped whenever the annotation snapshot changes so a future Qt model
-    /// can cheaply decide whether it needs a fresh list. Not bumped by caret
-    /// motion or scrolling.
+    /// can cheaply decide whether it needs a fresh list. Covers both highlights
+    /// and text annotations. Not bumped by caret motion or scrolling.
     annotation_revision: u64,
     /// Config/keymap problems collected at startup, for the UI to surface.
     startup_warnings: Vec<String>,
@@ -415,6 +553,8 @@ impl App {
             visual_span: None,
             pending: None,
             highlights: Vec::new(),
+            text_annotations: Vec::new(),
+            pending_annotation_anchor: None,
             annotation_revision: 0,
             startup_warnings,
             last_error: None,
@@ -497,10 +637,12 @@ impl App {
         self.visual = None;
         self.visual_span = None;
         self.pending = None;
+        self.pending_annotation_anchor = None;
         self.last_error = None;
         // Stored highlights are geometry, so they can be drawn immediately —
         // nothing has to be extracted or resolved first.
         self.load_highlights();
+        self.load_text_annotations();
         Ok(())
     }
 
@@ -701,6 +843,11 @@ impl App {
         for highlight in self.highlights.iter().filter(|h| h.is_pending()) {
             let color = syodep_config::parse_hex_color(&highlight.color)
                 .unwrap_or_else(default_highlight_rgb);
+            // Every annotation of one highlight carries the same name, so a
+            // later delete can find all of its pages. A highlight with no row
+            // id (persistence unavailable) gets none: there is nothing stable
+            // to name it after, and it can never be addressed for deletion.
+            let name = highlight.id.map(embedded_highlight_name);
             // Grouped by page in one pass over rectangles that are already in
             // document order, so no sorting is needed.
             let mut current: Option<HighlightAnnotation> = None;
@@ -722,6 +869,7 @@ impl App {
                             rects: vec![rect_out],
                             color,
                             opacity,
+                            name: name.clone(),
                         });
                     }
                 }
@@ -888,6 +1036,22 @@ impl App {
                     ..Effects::default()
                 };
             }
+            Command::ToggleHighlightsSidebar => {
+                // Available with no document open: the sidebar has an
+                // empty state, and a binding that silently does nothing
+                // depending on hidden state is worse than one that shows it.
+                return Effects {
+                    toggle_highlights_sidebar: true,
+                    ..Effects::default()
+                };
+            }
+            Command::ToggleAnnotationsSidebar => {
+                return Effects {
+                    toggle_annotations_sidebar: true,
+                    ..Effects::default()
+                };
+            }
+            Command::CreateAnnotation => return self.create_annotation(),
             Command::Cancel => return Effects::redraw(),
             Command::FocusEnter => return self.enter_focus(self.focus_scope),
             Command::FocusEnterChar => return self.enter_focus(Scope::Char),
@@ -994,6 +1158,9 @@ impl App {
             Command::ZoomReset => view.set_zoom(1.0),
             Command::Quit
             | Command::OpenFile
+            | Command::ToggleHighlightsSidebar
+            | Command::ToggleAnnotationsSidebar
+            | Command::CreateAnnotation
             | Command::Cancel
             | Command::FocusEnter
             | Command::FocusEnterChar
@@ -3082,7 +3249,7 @@ impl App {
     ///
     /// Images and table rules contribute nothing, so a highlight over a figure
     /// has empty text rather than a placeholder — the geometry is what makes it
-    /// visible, and the text is only there for notes and export.
+    /// visible, and the text is only there for the sidebar and export.
     fn span_text(&mut self, start: Caret, end: Caret) -> String {
         let mut out = String::new();
         for page in start.page..=end.page {
@@ -3699,7 +3866,7 @@ impl App {
         let Some((start, end)) = self.visual_span else {
             return false;
         };
-        let rects: Vec<HighlightRect> = self
+        let mut rects: Vec<HighlightRect> = self
             .span_page_rects(start, end)
             .into_iter()
             .flat_map(|(page, rects)| {
@@ -3715,6 +3882,7 @@ impl App {
         if rects.is_empty() {
             return false;
         }
+        normalize_rects_document_order(&mut rects);
         let text = self.span_text(start, end);
         let id = self.persist_highlight(&pending.color, &text, &rects);
         self.highlights.push(Highlight {
@@ -3722,7 +3890,6 @@ impl App {
             color: pending.color,
             anchor: DocumentAnchor { text, rects },
             pdf_state: HighlightPdfState::Pending,
-            note: None,
         });
         self.bump_annotation_revision();
         true
@@ -3750,9 +3917,10 @@ impl App {
         }
     }
 
-    /// Load the document's stored highlights and their optional notes. Called
-    /// on open, so annotations from an earlier session are available before any
-    /// page content is extracted.
+    /// Load the document's stored highlights. Called on open, so annotations
+    /// from an earlier session are available before any page content is
+    /// extracted. Rectangles are normalized into document order here, which is
+    /// what every consumer downstream assumes.
     fn load_highlights(&mut self) {
         self.highlights.clear();
         let Some(document_id) = self.session.as_ref().and_then(|s| s.document_id) else {
@@ -3765,28 +3933,19 @@ impl App {
         };
         match storage.load_highlights(document_id) {
             Ok(stored) => {
-                let notes = match storage.load_highlight_notes(document_id) {
-                    Ok(notes) => notes,
-                    Err(e) => {
-                        self.last_error = Some(format!("could not load highlight notes: {e}"));
-                        Default::default()
-                    }
-                };
                 self.highlights = stored
                     .into_iter()
                     .map(|h| {
-                        let note = notes.get(&h.id).map(|n| HighlightNote {
-                            body_markdown: n.body_markdown.clone(),
-                        });
+                        let mut rects = h.rects;
+                        normalize_rects_document_order(&mut rects);
                         Highlight {
                             id: Some(h.id),
                             color: h.color,
                             anchor: DocumentAnchor {
                                 text: h.text,
-                                rects: h.rects,
+                                rects,
                             },
                             pdf_state: h.pdf_state,
-                            note,
                         }
                     })
                     .collect();
@@ -3800,87 +3959,523 @@ impl App {
         self.annotation_revision = self.annotation_revision.wrapping_add(1);
     }
 
+    /// Capture the current focus or selection as a pending annotation anchor
+    /// and ask the shell to open the editor. Does not change mode, selection,
+    /// viewport, or the pending highlight.
+    fn create_annotation(&mut self) -> Effects {
+        if self.session.is_none() {
+            self.last_error =
+                Some("Enter Focus, Visual, or Highlight mode to create an annotation.".to_owned());
+            return Effects::default();
+        }
+        if self.storage.is_none() {
+            self.status_message =
+                Some("Annotation storage is not available; changes cannot be saved.".to_owned());
+            return Effects::default();
+        }
+        match self.mode {
+            Mode::Normal => {
+                self.status_message = Some(
+                    "Enter Focus, Visual, or Highlight mode to create an annotation.".to_owned(),
+                );
+                return Effects::default();
+            }
+            Mode::Focus | Mode::Visual | Mode::Highlight => {}
+        }
+        let Some(anchor) = self.capture_annotation_anchor() else {
+            return Effects::default();
+        };
+        self.pending_annotation_anchor = Some(anchor);
+        Effects {
+            create_annotation_requested: true,
+            ..Effects::default()
+        }
+    }
+
+    /// Build an owned [`DocumentAnchor`] from the current focus or selection.
+    fn capture_annotation_anchor(&mut self) -> Option<DocumentAnchor> {
+        let (start, end) = match self.mode {
+            Mode::Focus => match self.focus_span {
+                Some(span) => span,
+                None => {
+                    self.last_error = Some("nothing is focused to annotate".to_owned());
+                    return None;
+                }
+            },
+            Mode::Visual | Mode::Highlight => match self.visual_span {
+                Some(span) => span,
+                None => {
+                    self.last_error = Some("nothing is selected to annotate".to_owned());
+                    return None;
+                }
+            },
+            Mode::Normal => return None,
+        };
+        let mut rects: Vec<HighlightRect> = self
+            .span_page_rects(start, end)
+            .into_iter()
+            .flat_map(|(page, rects)| {
+                rects.into_iter().map(move |r| HighlightRect {
+                    page,
+                    x0: r.x0,
+                    y0: r.y0,
+                    x1: r.x1,
+                    y1: r.y1,
+                })
+            })
+            .collect();
+        if rects.is_empty() {
+            self.last_error = Some("annotation source has no geometry".to_owned());
+            return None;
+        }
+        normalize_rects_document_order(&mut rects);
+        let text = self.span_text(start, end);
+        if text.trim().is_empty() {
+            self.last_error = Some("annotation source has no text".to_owned());
+            return None;
+        }
+        Some(DocumentAnchor { text, rects })
+    }
+
+    /// Whether SQLite persistence is available for annotations and highlights.
+    pub fn has_persistence(&self) -> bool {
+        self.storage.is_some()
+    }
+
+    /// The frozen pending annotation anchor, if `n` captured one.
+    pub fn pending_annotation_anchor(&self) -> Option<&DocumentAnchor> {
+        self.pending_annotation_anchor.as_ref()
+    }
+
+    /// Drop a pending create without writing a row.
+    pub fn cancel_pending_annotation(&mut self) {
+        self.pending_annotation_anchor = None;
+    }
+
+    /// Persist a new text annotation from the pending anchor and body.
+    ///
+    /// Trimmed-empty bodies are rejected and create nothing. On success the
+    /// body is stored exactly as entered, the pending anchor is cleared, and
+    /// the new stable id is returned. Persistence is required — there are no
+    /// session-only annotation ids.
+    pub fn create_text_annotation(
+        &mut self,
+        body_markdown: String,
+    ) -> Result<(TextAnnotationId, Effects), AppError> {
+        if annotation_body_is_empty(&body_markdown) {
+            self.last_error = Some("annotation body must not be empty".to_owned());
+            return Err(AppError::EmptyAnnotationBody);
+        }
+        if self.storage.is_none() {
+            self.last_error =
+                Some("Annotation storage is not available; changes cannot be saved.".to_owned());
+            return Err(AppError::PersistenceUnavailable);
+        }
+        let Some(anchor) = self.pending_annotation_anchor.clone() else {
+            self.last_error = Some("no pending annotation to save".to_owned());
+            return Err(AppError::NoDocument);
+        };
+        if self.session.is_none() {
+            return Err(AppError::NoDocument);
+        }
+        let Some(id) = self.persist_text_annotation(&anchor, &body_markdown) else {
+            return Err(AppError::PersistenceUnavailable);
+        };
+        self.text_annotations.push(TextAnnotation {
+            id: Some(id),
+            anchor,
+            body_markdown,
+        });
+        self.pending_annotation_anchor = None;
+        self.bump_annotation_revision();
+        Ok((
+            id,
+            Effects {
+                annotations_changed: true,
+                ..Effects::default()
+            },
+        ))
+    }
+
+    /// Replace the Markdown body of an existing text annotation.
+    ///
+    /// Trimmed-empty bodies are rejected and the previous body is kept.
+    pub fn set_text_annotation_body(
+        &mut self,
+        id: TextAnnotationId,
+        body_markdown: String,
+    ) -> Result<Effects, AppError> {
+        if annotation_body_is_empty(&body_markdown) {
+            self.last_error = Some("annotation body must not be empty".to_owned());
+            return Err(AppError::EmptyAnnotationBody);
+        }
+        let Some(index) = self.text_annotations.iter().position(|a| a.id == Some(id)) else {
+            self.last_error = Some(format!("unknown text annotation {}", id.0));
+            return Err(AppError::UnknownTextAnnotation(id.0));
+        };
+        if self.text_annotations[index].body_markdown == body_markdown {
+            return Ok(Effects::default());
+        }
+        let document_id = self.session.as_ref().and_then(|s| s.document_id);
+        if let (Some(storage), Some(document_id)) = (self.storage.as_ref(), document_id) {
+            match storage.set_text_annotation_body(document_id, id, &body_markdown) {
+                Ok(true) => {}
+                Ok(false) => {
+                    self.last_error = Some(format!("unknown text annotation {}", id.0));
+                    return Err(AppError::UnknownTextAnnotation(id.0));
+                }
+                Err(e) => {
+                    self.last_error = Some(format!("could not save annotation: {e}"));
+                    return Err(AppError::Storage(e));
+                }
+            }
+        } else if self.storage.is_none() {
+            self.last_error =
+                Some("Annotation storage is not available; changes cannot be saved.".to_owned());
+            return Err(AppError::PersistenceUnavailable);
+        } else {
+            return Err(AppError::NoDocument);
+        }
+        self.text_annotations[index].body_markdown = body_markdown;
+        self.bump_annotation_revision();
+        Ok(Effects {
+            annotations_changed: true,
+            ..Effects::default()
+        })
+    }
+
+    fn persist_text_annotation(
+        &mut self,
+        anchor: &DocumentAnchor,
+        body_markdown: &str,
+    ) -> Option<TextAnnotationId> {
+        let document_id = self.session.as_ref()?.document_id?;
+        let storage = self.storage.as_ref()?;
+        match storage.insert_text_annotation(
+            document_id,
+            &anchor.text,
+            body_markdown,
+            &anchor.rects,
+        ) {
+            Ok(id) => Some(id),
+            Err(e) => {
+                self.last_error = Some(format!("could not save annotation: {e}"));
+                None
+            }
+        }
+    }
+
+    fn load_text_annotations(&mut self) {
+        self.text_annotations.clear();
+        let Some(document_id) = self.session.as_ref().and_then(|s| s.document_id) else {
+            self.bump_annotation_revision();
+            return;
+        };
+        let Some(storage) = self.storage.as_ref() else {
+            self.bump_annotation_revision();
+            return;
+        };
+        match storage.load_text_annotations(document_id) {
+            Ok(stored) => {
+                self.text_annotations = stored
+                    .into_iter()
+                    .map(|a| {
+                        let mut rects = a.rects;
+                        normalize_rects_document_order(&mut rects);
+                        TextAnnotation {
+                            id: Some(a.id),
+                            anchor: DocumentAnchor {
+                                text: a.text,
+                                rects,
+                            },
+                            body_markdown: a.body_markdown,
+                        }
+                    })
+                    .collect();
+            }
+            Err(e) => {
+                self.last_error = Some(format!("could not load annotations: {e}"));
+            }
+        }
+        self.bump_annotation_revision();
+    }
+
+    /// Every text annotation of the open document, in document order.
+    pub fn text_annotation_summaries(&self) -> Vec<TextAnnotationSummary> {
+        let mut summaries: Vec<(&TextAnnotation, TextAnnotationSummary)> = self
+            .text_annotations
+            .iter()
+            .filter_map(|a| {
+                let id = a.id?;
+                let (first_page, last_page) = page_range(&a.anchor.rects)?;
+                Some((
+                    a,
+                    TextAnnotationSummary {
+                        id,
+                        text: a.anchor.text.clone(),
+                        body_markdown: a.body_markdown.clone(),
+                        first_page,
+                        last_page,
+                    },
+                ))
+            })
+            .collect();
+        summaries.sort_by(|(a, _), (b, _)| compare_text_annotations_in_document_order(a, b));
+        summaries.into_iter().map(|(_, summary)| summary).collect()
+    }
+
+    fn text_annotations_in_document_order(&self) -> Vec<&TextAnnotation> {
+        let mut ordered: Vec<&TextAnnotation> = self.text_annotations.iter().collect();
+        ordered.sort_by(|a, b| compare_text_annotations_in_document_order(a, b));
+        ordered
+    }
+
+    pub fn text_annotation_markdown(&self, id: TextAnnotationId) -> Result<String, AppError> {
+        let annotation = self
+            .text_annotations
+            .iter()
+            .find(|a| a.id == Some(id))
+            .ok_or(AppError::UnknownTextAnnotation(id.0))?;
+        Ok(format_text_annotation_markdown(annotation))
+    }
+
+    pub fn all_text_annotations_markdown(&self) -> String {
+        let items: Vec<String> = self
+            .text_annotations_in_document_order()
+            .into_iter()
+            .filter(|a| a.id.is_some())
+            .map(format_text_annotation_markdown)
+            .collect();
+        if items.is_empty() {
+            return String::new();
+        }
+        format!("# Annotations\n\n{}", items.join("\n\n"))
+    }
+
+    pub fn reveal_text_annotation(&mut self, id: TextAnnotationId) -> Effects {
+        let Some(annotation) = self.text_annotations.iter().find(|a| a.id == Some(id)) else {
+            self.last_error = Some(format!("unknown text annotation {}", id.0));
+            return Effects::default();
+        };
+        let Some(first) = annotation.anchor.rects.first().copied() else {
+            return Effects::default();
+        };
+        let page = first.page;
+        let rect = Rect {
+            x0: first.x0,
+            y0: first.y0,
+            x1: first.x1,
+            y1: first.y1,
+        };
+        self.scroll_page_rect_into_view(page, rect);
+        self.save_position();
+        Effects::redraw()
+    }
+
+    pub fn delete_text_annotation(&mut self, id: TextAnnotationId) -> Result<Effects, AppError> {
+        let Some(index) = self.text_annotations.iter().position(|a| a.id == Some(id)) else {
+            self.last_error = Some(format!("unknown text annotation {}", id.0));
+            return Err(AppError::UnknownTextAnnotation(id.0));
+        };
+        if self.storage.is_none() {
+            self.last_error =
+                Some("Annotation storage is not available; changes cannot be saved.".to_owned());
+            return Err(AppError::PersistenceUnavailable);
+        }
+        let document_id = self.session.as_ref().and_then(|s| s.document_id);
+        if let (Some(storage), Some(document_id)) = (self.storage.as_ref(), document_id) {
+            match storage.delete_text_annotation(document_id, id) {
+                Ok(_) => {}
+                Err(e) => {
+                    self.last_error = Some(format!("could not delete annotation: {e}"));
+                    return Err(AppError::Storage(e));
+                }
+            }
+        } else {
+            return Err(AppError::NoDocument);
+        }
+        self.text_annotations.remove(index);
+        self.bump_annotation_revision();
+        Ok(Effects {
+            annotations_changed: true,
+            ..Effects::default()
+        })
+    }
+
     /// Monotonic counter for the annotation snapshot. The sidebar compares
     /// this against its last-seen value to decide whether to refresh.
     pub fn annotation_revision(&self) -> u64 {
         self.annotation_revision
     }
 
-    /// Every highlight of the open document, in stable database-id order.
-    /// Includes Pending and Embedded records; does not require content extraction.
+    /// Every highlight of the open document, in document order (see
+    /// [`rect_order_key`]). Includes Pending and Embedded records; does not
+    /// require content extraction.
+    ///
+    /// Ordering is the core's job, not the shell's: the sidebar list, the
+    /// Markdown export and any future palette must agree on what "the next
+    /// highlight" means, and a Qt-side sort proxy would only agree by accident.
     pub fn highlight_summaries(&self) -> Vec<HighlightSummary> {
-        self.highlights
+        let mut summaries: Vec<(&Highlight, HighlightSummary)> = self
+            .highlights
             .iter()
             .filter_map(|h| {
                 let id = h.id?;
                 let (first_page, last_page) = page_range(&h.anchor.rects)?;
-                Some(HighlightSummary {
-                    id,
-                    text: h.anchor.text.clone(),
-                    color: h.color.clone(),
-                    first_page,
-                    last_page,
-                    pdf_state: h.pdf_state,
-                    note_markdown: h.note.as_ref().map(|n| n.body_markdown.clone()),
-                })
+                Some((
+                    h,
+                    HighlightSummary {
+                        id,
+                        text: h.anchor.text.clone(),
+                        color: h.color.clone(),
+                        first_page,
+                        last_page,
+                        pdf_state: h.pdf_state,
+                    },
+                ))
             })
-            .collect()
+            .collect();
+        summaries.sort_by(|(a, _), (b, _)| compare_highlights_in_document_order(a, b));
+        summaries.into_iter().map(|(_, summary)| summary).collect()
     }
 
-    /// Set or clear the Markdown comment for a highlight of the open document.
+    /// The open document's highlights in document order, for the callers that
+    /// need the records themselves rather than summaries.
+    fn highlights_in_document_order(&self) -> Vec<&Highlight> {
+        let mut ordered: Vec<&Highlight> = self.highlights.iter().collect();
+        ordered.sort_by(|a, b| compare_highlights_in_document_order(a, b));
+        ordered
+    }
+
+    /// Delete one highlight of the open document.
     ///
-    /// Whitespace-only bodies clear the comment. Persistence must succeed before
-    /// the in-memory value changes; failures leave the previous comment and do
-    /// not bump the annotation revision. A no-op equal body returns empty
-    /// effects without rewriting storage.
-    pub fn set_highlight_note(
-        &mut self,
-        id: HighlightId,
-        body_markdown: String,
-    ) -> Result<Effects, AppError> {
-        let document_id = self
-            .session
-            .as_ref()
-            .and_then(|s| s.document_id)
-            .ok_or(AppError::NoDocument)?;
+    /// A Pending highlight lives only in SQLite, so deleting it is one row
+    /// removal. An Embedded one also exists in the PDF, and *that* copy is what
+    /// the user sees: the annotation is removed from the file first, and only a
+    /// successful rewrite is followed by the database delete. The reverse order
+    /// would leave an annotation in the PDF that syodep no longer knows about
+    /// and could no longer identify.
+    ///
+    /// The PDF copy is found by the `/NM` name
+    /// [`embedded_highlight_name`] wrote when it was embedded. An Embedded
+    /// record whose annotation carries no such name is refused rather than
+    /// guessed at from geometry — see [`AppError::EmbeddedHighlightUnidentifiable`].
+    pub fn delete_highlight(&mut self, id: HighlightId) -> Result<Effects, AppError> {
         let Some(index) = self.highlights.iter().position(|h| h.id == Some(id)) else {
             self.last_error = Some(format!("unknown highlight {}", id.0));
             return Err(AppError::UnknownHighlight(id.0));
         };
-        let new_note = canonicalize_note_markdown(body_markdown);
-        let previous = self.highlights[index].note.clone();
-        if previous == new_note {
-            return Ok(Effects::default());
+        if self.session.is_none() {
+            return Err(AppError::NoDocument);
         }
+        if self.highlights[index].is_pending() {
+            return self.delete_pending_highlight(index, id);
+        }
+        self.delete_embedded_highlight(id)
+    }
 
-        let Some(storage) = self.storage.as_ref() else {
-            self.last_error = Some(
-                "Comments are unavailable because annotation storage is not available.".to_owned(),
-            );
-            return Err(AppError::PersistenceUnavailable);
-        };
-
-        let body_for_storage = new_note
-            .as_ref()
-            .map(|n| n.body_markdown.as_str())
-            .unwrap_or("");
-        match storage.set_highlight_note_for_document(document_id, id, body_for_storage) {
-            Ok(true) => {}
-            Ok(false) => {
-                self.last_error = Some(format!("unknown highlight {}", id.0));
-                return Err(AppError::UnknownHighlight(id.0));
-            }
-            Err(e) => {
-                self.last_error = Some(format!("could not save comment: {e}"));
-                return Err(AppError::Storage(e));
+    /// Delete a highlight that exists only in the database.
+    fn delete_pending_highlight(
+        &mut self,
+        index: usize,
+        id: HighlightId,
+    ) -> Result<Effects, AppError> {
+        let document_id = self.session.as_ref().and_then(|s| s.document_id);
+        if let (Some(storage), Some(document_id)) = (self.storage.as_ref(), document_id) {
+            match storage.delete_highlight(document_id, id) {
+                // A row that is already gone still leaves the session copy to
+                // remove, so this is not an error.
+                Ok(_) => {}
+                Err(e) => {
+                    self.last_error = Some(format!("could not delete highlight: {e}"));
+                    return Err(AppError::Storage(e));
+                }
             }
         }
-
-        self.highlights[index].note = new_note;
+        self.highlights.remove(index);
         self.bump_annotation_revision();
         Ok(Effects {
             annotations_changed: true,
-            ..Effects::default()
+            ..Effects::redraw()
+        })
+    }
+
+    /// Delete a highlight that has been written into the PDF: rewrite the file
+    /// without it, then drop the row.
+    ///
+    /// The rewrite follows [`App::write_document`]'s shape exactly — temporary
+    /// file beside the original, rename over it, re-key the document row
+    /// because the content hash changed, reopen — because it is the same
+    /// operation with a different edit.
+    fn delete_embedded_highlight(&mut self, id: HighlightId) -> Result<Effects, AppError> {
+        let Some(session) = &self.session else {
+            return Err(AppError::NoDocument);
+        };
+        let path = session.path.clone();
+        let document_id = session.document_id;
+        let name = embedded_highlight_name(id);
+
+        let temp = path.with_extension("pdf.syodep-tmp");
+        let removed = match syodep_pdf::remove_highlight_annotation(&path, &temp, &name) {
+            Ok(removed) => removed,
+            Err(e) => {
+                let _ = std::fs::remove_file(&temp);
+                self.last_error = Some(format!("could not delete highlight: {e}"));
+                return Err(e.into());
+            }
+        };
+        if removed == 0 {
+            let _ = std::fs::remove_file(&temp);
+            let error = AppError::EmbeddedHighlightUnidentifiable;
+            self.last_error = Some(error.to_string());
+            return Err(error);
+        }
+
+        // Close the document before the rename: on Windows, replacing a file
+        // MuPDF still holds open fails with a sharing violation.
+        let restore = self.take_selection_state();
+        self.session = None;
+        if let Err(source) = std::fs::rename(&temp, &path) {
+            let _ = std::fs::remove_file(&temp);
+            let _ = self.open_document(&path);
+            self.restore_selection_state(restore);
+            let error = AppError::Write {
+                path: path.display().to_string(),
+                source,
+            };
+            self.last_error = Some(format!("could not delete highlight: {error}"));
+            return Err(error);
+        }
+
+        // The rewritten file hashes differently, so the document row has to
+        // follow it before the reopen, exactly as saving does.
+        let mut db_error = None;
+        if let (Some(storage), Some(document_id)) = (&self.storage, document_id) {
+            let outcome = Storage::fingerprint_file(&path).and_then(|fingerprint| {
+                storage.rekey_document(document_id, &fingerprint, &path.display().to_string())?;
+                storage.delete_highlight(document_id, id)
+            });
+            if let Err(e) = outcome {
+                db_error = Some(format!(
+                    "removed the highlight from the PDF, but could not delete its \
+                     database row: {e}"
+                ));
+            }
+        }
+        self.open_document(&path)?;
+        self.restore_selection_state(restore);
+        // The reopen reloaded the highlights from SQLite; when the row survived
+        // a failed delete it is back, and the session copy must go so the list
+        // matches the PDF the user is now looking at.
+        if let Some(message) = db_error {
+            self.highlights.retain(|h| h.id != Some(id));
+            self.bump_annotation_revision();
+            self.last_error = Some(message);
+        }
+        Ok(Effects {
+            reload: true,
+            annotations_changed: true,
+            ..Effects::redraw()
         })
     }
 
@@ -3929,14 +4524,19 @@ impl App {
         Ok(format_highlight_markdown(highlight))
     }
 
-    /// Deterministic Markdown for every highlight, in canonical id order.
+    /// Deterministic Markdown for every highlight, in document order — the
+    /// same order the sidebar lists them in. Empty when there are none.
     pub fn all_highlights_markdown(&self) -> String {
-        self.highlights
-            .iter()
+        let items: Vec<String> = self
+            .highlights_in_document_order()
+            .into_iter()
             .filter(|h| h.id.is_some())
             .map(format_highlight_markdown)
-            .collect::<Vec<_>>()
-            .join("\n\n")
+            .collect();
+        if items.is_empty() {
+            return String::new();
+        }
+        format!("# Highlights\n\n{}", items.join("\n\n"))
     }
 
     /// Pending highlights to paint, plus the one being placed while highlight
@@ -8841,11 +9441,14 @@ mod tests {
         press(&mut app, "aa");
         let id = app.highlights()[0].id.unwrap();
         let pending_md = app.highlight_markdown(id).unwrap();
-        assert_eq!(pending_md, "### Page 1\n\n> alpha");
+        assert_eq!(pending_md, "## Page 1\n\n> alpha");
         press(&mut app, "<Space>w");
         let embedded_md = app.highlight_markdown(id).unwrap();
         assert_eq!(embedded_md, pending_md);
-        assert_eq!(app.all_highlights_markdown(), pending_md);
+        assert_eq!(
+            app.all_highlights_markdown(),
+            format!("# Highlights\n\n{pending_md}")
+        );
     }
 
     #[test]
@@ -8873,11 +9476,10 @@ mod tests {
                 ],
             },
             pdf_state: HighlightPdfState::Pending,
-            note: None,
         };
         assert_eq!(
             format_highlight_markdown(&highlight),
-            "### Pages 1–2\n\n> line one\n> \n> unicodé 文字"
+            "## Pages 1–2\n\n> line one\n> \n> unicodé 文字"
         );
         let empty = Highlight {
             id: Some(HighlightId(2)),
@@ -8893,13 +9495,12 @@ mod tests {
                 }],
             },
             pdf_state: HighlightPdfState::Embedded,
-            note: None,
         };
-        assert_eq!(format_highlight_markdown(&empty), "### Page 3\n\n> ");
+        assert_eq!(format_highlight_markdown(&empty), "## Page 3\n\n> ");
     }
 
     #[test]
-    fn markdown_orders_by_stable_id() {
+    fn markdown_orders_by_document_position() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma delta"]);
         press(&mut app, "fw");
@@ -8913,7 +9514,7 @@ mod tests {
         let second = app
             .highlight_markdown(app.highlights()[1].id.unwrap())
             .unwrap();
-        assert_eq!(all, format!("{first}\n\n{second}"));
+        assert_eq!(all, format!("# Highlights\n\n{first}\n\n{second}"));
         assert!(first.contains("alpha"));
         assert!(second.contains("beta"));
     }
@@ -8937,8 +9538,141 @@ mod tests {
         assert_eq!(summaries[0].last_page, 0);
     }
 
+    /// A highlight with one rectangle, for ordering tests that do not care
+    /// about anything else.
+    fn highlight_at(id: i64, page: usize, y0: f32, x0: f32) -> Highlight {
+        Highlight {
+            id: Some(HighlightId(id)),
+            color: "#ffe066".to_owned(),
+            anchor: DocumentAnchor {
+                text: format!("h{id}"),
+                rects: vec![HighlightRect {
+                    page,
+                    x0,
+                    y0,
+                    x1: x0 + 10.0,
+                    y1: y0 + 10.0,
+                }],
+            },
+            pdf_state: HighlightPdfState::Pending,
+        }
+    }
+
     #[test]
-    fn highlight_notes_persist_across_save_and_reopen() {
+    fn summaries_are_in_document_order_not_creation_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha", "beta"]);
+        // Deliberately scrambled: a later page first, then a lower line, then
+        // the second column of the top line, then its first column.
+        app.highlights = vec![
+            highlight_at(1, 1, 100.0, 72.0),
+            highlight_at(2, 0, 300.0, 72.0),
+            highlight_at(3, 0, 100.0, 300.0),
+            highlight_at(4, 0, 100.0, 72.0),
+        ];
+        let order: Vec<i64> = app
+            .highlight_summaries()
+            .into_iter()
+            .map(|s| s.id.0)
+            .collect();
+        // Page first, then down the page (y grows downward), then across it.
+        assert_eq!(order, vec![4, 3, 2, 1]);
+        // The export agrees with the list; one order, one implementation.
+        let expected = format!(
+            "# Highlights\n\n{}",
+            [4, 3, 2, 1]
+                .iter()
+                .map(|id| app.highlight_markdown(HighlightId(*id)).unwrap())
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        );
+        assert_eq!(app.all_highlights_markdown(), expected);
+    }
+
+    #[test]
+    fn highlights_starting_at_the_same_point_fall_back_to_their_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha"]);
+        app.highlights = vec![
+            highlight_at(7, 0, 50.0, 50.0),
+            highlight_at(3, 0, 50.0, 50.0),
+        ];
+        let order: Vec<i64> = app
+            .highlight_summaries()
+            .into_iter()
+            .map(|s| s.id.0)
+            .collect();
+        assert_eq!(order, vec![3, 7]);
+    }
+
+    #[test]
+    fn a_highlights_rectangles_are_normalized_into_document_order() {
+        let mut rects = vec![
+            HighlightRect {
+                page: 1,
+                x0: 10.0,
+                y0: 10.0,
+                x1: 20.0,
+                y1: 20.0,
+            },
+            HighlightRect {
+                page: 0,
+                x0: 300.0,
+                y0: 100.0,
+                x1: 320.0,
+                y1: 110.0,
+            },
+            HighlightRect {
+                page: 0,
+                x0: 72.0,
+                y0: 100.0,
+                x1: 90.0,
+                y1: 110.0,
+            },
+            HighlightRect {
+                page: 0,
+                x0: 72.0,
+                y0: 40.0,
+                x1: 90.0,
+                y1: 50.0,
+            },
+        ];
+        normalize_rects_document_order(&mut rects);
+        let order: Vec<(usize, f32, f32)> = rects.iter().map(|r| (r.page, r.y0, r.x0)).collect();
+        assert_eq!(
+            order,
+            vec![
+                (0, 40.0, 72.0),
+                (0, 100.0, 72.0),
+                (0, 100.0, 300.0),
+                (1, 10.0, 10.0)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_highlight_committed_out_of_order_still_lists_in_document_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma"]);
+        // Highlight the second word first, then go back and highlight the first.
+        press(&mut app, "fw");
+        press(&mut app, "w");
+        press(&mut app, "aa");
+        press(&mut app, "b");
+        press(&mut app, "aa");
+
+        let summaries = app.highlight_summaries();
+        assert_eq!(summaries.len(), 2);
+        assert_eq!(summaries[0].text, "alpha");
+        assert_eq!(summaries[1].text, "beta");
+        assert!(
+            summaries[0].id.0 > summaries[1].id.0,
+            "the earlier text was stored second, so id order is not document order"
+        );
+    }
+
+    #[test]
+    fn deleting_a_pending_highlight_removes_it_everywhere() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_pdf_bytes(
             dir.path(),
@@ -8946,134 +9680,463 @@ mod tests {
             pdf_with_pages(&["alpha beta gamma"]),
         );
         let db = dir.path().join("syodep.sqlite3");
-        let id = {
+        let kept = {
             let mut app = App::new(Config::default(), Some(Storage::open(&db).unwrap()));
             app.set_viewport_size(595.0, 600.0);
             app.open_document(&path).unwrap();
             press(&mut app, "fw");
             press(&mut app, "aa");
-            let id = app.highlights()[0].id.unwrap();
-            let rev = app.annotation_revision();
-            let effects = app
-                .set_highlight_note(id, "Important because annotations survive.".to_owned())
-                .unwrap();
+            press(&mut app, "w");
+            press(&mut app, "aa");
+            let doomed = app.highlights()[0].id.unwrap();
+            let kept = app.highlights()[1].id.unwrap();
+            let revision = app.annotation_revision();
+
+            let effects = app.delete_highlight(doomed).unwrap();
             assert!(effects.annotations_changed);
-            assert!(!effects.redraw);
-            assert!(app.annotation_revision() > rev);
-            assert_eq!(
-                app.highlight_summaries()[0].note_markdown.as_deref(),
-                Some("Important because annotations survive.")
-            );
-            assert_eq!(
-                app.highlight_markdown(id).unwrap(),
-                "### Page 1\n\n> alpha\n\nImportant because annotations survive."
-            );
-            assert_eq!(app.highlights()[0].anchor.text, "alpha");
-            press(&mut app, "<Space>w");
-            assert_eq!(app.highlights()[0].pdf_state, HighlightPdfState::Embedded);
-            assert_eq!(
-                app.highlights()[0]
-                    .note
-                    .as_ref()
-                    .map(|n| n.body_markdown.as_str()),
-                Some("Important because annotations survive.")
-            );
-            id
+            assert!(effects.redraw);
+            assert!(!effects.reload, "no PDF was rewritten");
+            assert!(app.annotation_revision() > revision);
+            assert_eq!(app.highlights().len(), 1);
+            assert_eq!(app.highlights()[0].id, Some(kept));
+            // The record is gone, so a second delete has nothing to address.
+            assert!(matches!(
+                app.delete_highlight(doomed),
+                Err(AppError::UnknownHighlight(_))
+            ));
+            kept
         };
+
+        // Reopening proves the row left SQLite, not just the session.
         let mut app = App::new(Config::default(), Some(Storage::open(&db).unwrap()));
         app.set_viewport_size(595.0, 600.0);
         app.open_document(&path).unwrap();
         assert_eq!(app.highlights().len(), 1);
-        assert_eq!(app.highlights()[0].id, Some(id));
-        assert_eq!(
-            app.highlights()[0]
-                .note
-                .as_ref()
-                .map(|n| n.body_markdown.as_str()),
-            Some("Important because annotations survive.")
-        );
+        assert_eq!(app.highlights()[0].id, Some(kept));
     }
 
     #[test]
-    fn highlight_note_clear_noop_and_unknown_id() {
+    fn deleting_an_embedded_highlight_removes_its_pdf_annotation() {
         let dir = tempfile::tempdir().unwrap();
-        let mut app = app_with_text_pages(dir.path(), &["alpha beta"]);
-        press(&mut app, "fw");
-        press(&mut app, "aa");
-        let id = app.highlights()[0].id.unwrap();
-
-        app.set_highlight_note(id, "keep".to_owned()).unwrap();
-        let rev = app.annotation_revision();
-        let noop = app.set_highlight_note(id, "keep".to_owned()).unwrap();
-        assert_eq!(noop, Effects::default());
-        assert_eq!(app.annotation_revision(), rev);
-
-        let cleared = app.set_highlight_note(id, "  \n ".to_owned()).unwrap();
-        assert!(cleared.annotations_changed);
-        assert!(app.highlights()[0].note.is_none());
-        assert_eq!(app.highlight_markdown(id).unwrap(), "### Page 1\n\n> alpha");
-
-        // Clearing again is a no-op.
-        let rev2 = app.annotation_revision();
-        assert_eq!(
-            app.set_highlight_note(id, "".to_owned()).unwrap(),
-            Effects::default()
+        let path = write_pdf_bytes(
+            dir.path(),
+            "text.pdf",
+            pdf_with_pages(&["alpha beta gamma"]),
         );
-        assert_eq!(app.annotation_revision(), rev2);
-
-        assert!(matches!(
-            app.set_highlight_note(HighlightId(999_999), "x".to_owned()),
-            Err(AppError::UnknownHighlight(999_999))
-        ));
-    }
-
-    #[test]
-    fn markdown_export_includes_multiline_and_structured_comments() {
-        let highlight = Highlight {
-            id: Some(HighlightId(1)),
-            color: "#ffe066".to_owned(),
-            anchor: DocumentAnchor {
-                text: "source quote".to_owned(),
-                rects: vec![HighlightRect {
-                    page: 0,
-                    x0: 0.0,
-                    y0: 0.0,
-                    x1: 10.0,
-                    y1: 10.0,
-                }],
-            },
-            pdf_state: HighlightPdfState::Pending,
-            note: Some(HighlightNote {
-                body_markdown:
-                    "# Why\n\n- one\n- two\n\n```text\ncode\n```\n\n[link](https://example.com)"
-                        .to_owned(),
-            }),
-        };
-        assert_eq!(
-            format_highlight_markdown(&highlight),
-            "### Page 1\n\n> source quote\n\n# Why\n\n- one\n- two\n\n```text\ncode\n```\n\n[link](https://example.com)"
-        );
-    }
-
-    #[test]
-    fn note_on_embedded_highlight_and_copy_all_mix() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma"]);
+        let db = dir.path().join("syodep.sqlite3");
+        let mut app = App::new(Config::default(), Some(Storage::open(&db).unwrap()));
+        app.set_viewport_size(595.0, 600.0);
+        app.open_document(&path).unwrap();
         press(&mut app, "fw");
         press(&mut app, "aa");
         press(&mut app, "w");
         press(&mut app, "aa");
-        let first = app.highlights()[0].id.unwrap();
-        let second = app.highlights()[1].id.unwrap();
+        let doomed = app.highlights()[0].id.unwrap();
+        let kept = app.highlights()[1].id.unwrap();
         press(&mut app, "<Space>w");
+        assert_eq!(
+            syodep_pdf::page_highlight_names(&path, 0).unwrap(),
+            vec![
+                Some(embedded_highlight_name(doomed)),
+                Some(embedded_highlight_name(kept))
+            ]
+        );
+
+        let effects = app.delete_highlight(doomed).unwrap();
+        assert!(effects.annotations_changed);
+        assert!(
+            effects.reload,
+            "the PDF was rewritten, so bitmaps are stale"
+        );
+
+        assert_eq!(
+            syodep_pdf::page_highlight_names(&path, 0).unwrap(),
+            vec![Some(embedded_highlight_name(kept))],
+            "only the deleted highlight left the PDF"
+        );
+        assert_eq!(app.highlights().len(), 1);
+        assert_eq!(app.highlights()[0].id, Some(kept));
+        // The reopen after the rewrite re-keyed the document row, so the
+        // surviving highlight is still found on a fresh open.
+        let mut reopened = App::new(Config::default(), Some(Storage::open(&db).unwrap()));
+        reopened.set_viewport_size(595.0, 600.0);
+        reopened.open_document(&path).unwrap();
+        assert_eq!(reopened.highlights().len(), 1);
+        assert_eq!(reopened.highlights()[0].id, Some(kept));
+    }
+
+    #[test]
+    fn an_embedded_highlight_with_no_matching_name_is_refused() {
+        // A row that claims to be Embedded but has no annotation carrying its
+        // `/NM` — what an interrupted save or an externally edited PDF leaves
+        // behind. Deleting it would mean guessing, so it must refuse.
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_pdf_bytes(dir.path(), "text.pdf", pdf_with_pages(&["alpha beta"]));
+        let db = dir.path().join("syodep.sqlite3");
+        let id = {
+            let storage = Storage::open(&db).unwrap();
+            let fingerprint = Storage::fingerprint_file(&path).unwrap();
+            let document_id = storage
+                .upsert_document(&fingerprint, &path.display().to_string())
+                .unwrap();
+            let id = storage
+                .insert_highlight(
+                    document_id,
+                    "#ffe066",
+                    "alpha",
+                    &[HighlightRect {
+                        page: 0,
+                        x0: 72.0,
+                        y0: 100.0,
+                        x1: 100.0,
+                        y1: 112.0,
+                    }],
+                )
+                .unwrap();
+            storage
+                .mark_highlights_embedded(document_id, &[id])
+                .unwrap();
+            id
+        };
+
+        let mut app = App::new(Config::default(), Some(Storage::open(&db).unwrap()));
+        app.set_viewport_size(595.0, 600.0);
+        app.open_document(&path).unwrap();
         assert_eq!(app.highlights()[0].pdf_state, HighlightPdfState::Embedded);
-        app.set_highlight_note(first, "only first".to_owned())
+        let before = std::fs::read(&path).unwrap();
+
+        let err = app.delete_highlight(id).unwrap_err();
+        assert!(
+            matches!(err, AppError::EmbeddedHighlightUnidentifiable),
+            "{err}"
+        );
+        assert_eq!(
+            err.to_string(),
+            "This embedded highlight cannot be identified safely in the PDF."
+        );
+        assert_eq!(app.highlights().len(), 1, "the record survives a refusal");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "the PDF is untouched"
+        );
+        assert!(app.status_text().contains("cannot be identified"));
+    }
+
+    #[test]
+    fn deleting_without_a_document_or_with_an_unknown_id_is_an_error() {
+        let mut app = App::new(Config::default(), Some(Storage::in_memory().unwrap()));
+        assert!(matches!(
+            app.delete_highlight(HighlightId(1)),
+            Err(AppError::UnknownHighlight(1))
+        ));
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta"]);
+        press(&mut app, "fw");
+        press(&mut app, "aa");
+        assert!(matches!(
+            app.delete_highlight(HighlightId(999_999)),
+            Err(AppError::UnknownHighlight(999_999))
+        ));
+        assert_eq!(app.highlights().len(), 1);
+    }
+
+    #[test]
+    fn toggling_the_highlights_sidebar_is_a_shell_request_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta"]);
+        let effects = press(&mut app, "<Space>a");
+        assert!(effects.toggle_highlights_sidebar);
+        // Nothing about the document changed, so nothing else is requested.
+        assert!(!effects.redraw);
+        assert!(!effects.annotations_changed);
+        assert!(!effects.quit);
+
+        // Also available with no document: the sidebar has an empty state.
+        let mut empty = App::new(Config::default(), None);
+        assert!(press(&mut empty, "<Space>a").toggle_highlights_sidebar);
+    }
+
+    // ---- Text annotations (Step 7) ---------------------------------------
+
+    #[test]
+    fn n_in_normal_mode_rejects_without_creating() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma"]);
+        assert_eq!(app.mode(), Mode::Normal);
+        let effects = press(&mut app, "n");
+        assert!(!effects.create_annotation_requested);
+        assert!(app.pending_annotation_anchor().is_none());
+        assert_eq!(app.mode(), Mode::Normal);
+        assert!(
+            app.status_text()
+                .contains("Enter Focus, Visual, or Highlight mode"),
+            "{}",
+            app.status_text()
+        );
+    }
+
+    #[test]
+    fn n_from_focus_captures_the_focused_unit_without_moving() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma"]);
+        press(&mut app, "fw");
+        let mode = app.mode();
+        let focus = app.focus_span().unwrap();
+        let scroll = app.session.as_ref().unwrap().view.scroll();
+        let focused_text = {
+            let (start, end) = focus;
+            app.span_text(start, end)
+        };
+
+        let effects = press(&mut app, "n");
+        assert!(effects.create_annotation_requested);
+        assert_eq!(app.mode(), mode);
+        assert_eq!(app.focus_span(), Some(focus));
+        assert_eq!(app.session.as_ref().unwrap().view.scroll(), scroll);
+        assert!(!app.has_pending_highlight());
+        let pending = app.pending_annotation_anchor().unwrap();
+        assert_eq!(pending.text, focused_text);
+        assert!(!pending.rects.is_empty());
+
+        // Later focus motion must not alter the frozen pending anchor.
+        let frozen = pending.clone();
+        press(&mut app, "w");
+        assert_eq!(app.pending_annotation_anchor(), Some(&frozen));
+    }
+
+    #[test]
+    fn n_from_visual_captures_the_selection_without_exiting() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma"]);
+        press(&mut app, "fw");
+        press(&mut app, "vw");
+        press(&mut app, "l");
+        let span = app.visual_span().unwrap();
+        let selected = {
+            let (start, end) = span;
+            app.span_text(start, end)
+        };
+
+        let effects = press(&mut app, "n");
+        assert!(effects.create_annotation_requested);
+        assert_eq!(app.mode(), Mode::Visual);
+        assert_eq!(app.visual_span(), Some(span));
+        assert_eq!(app.pending_annotation_anchor().unwrap().text, selected);
+    }
+
+    #[test]
+    fn n_from_highlight_mode_does_not_commit_the_highlight() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma"]);
+        press(&mut app, "fw");
+        press(&mut app, "a");
+        assert!(app.has_pending_highlight());
+        let span = app.visual_span().unwrap();
+
+        let effects = press(&mut app, "n");
+        assert!(effects.create_annotation_requested);
+        assert_eq!(app.mode(), Mode::Highlight);
+        assert!(app.has_pending_highlight());
+        assert_eq!(app.visual_span(), Some(span));
+        assert!(app.highlights().is_empty());
+    }
+
+    #[test]
+    fn leader_n_toggles_annotations_sidebar_distinct_from_create() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta"]);
+        let toggle = press(&mut app, "<Space>n");
+        assert!(toggle.toggle_annotations_sidebar);
+        assert!(!toggle.create_annotation_requested);
+
+        press(&mut app, "fw");
+        let create = press(&mut app, "n");
+        assert!(create.create_annotation_requested);
+        assert!(!create.toggle_annotations_sidebar);
+    }
+
+    #[test]
+    fn cancel_pending_annotation_creates_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta"]);
+        press(&mut app, "fw");
+        press(&mut app, "n");
+        assert!(app.pending_annotation_anchor().is_some());
+        app.cancel_pending_annotation();
+        assert!(app.pending_annotation_anchor().is_none());
+        assert!(app.text_annotation_summaries().is_empty());
+    }
+
+    #[test]
+    fn empty_body_create_and_update_are_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta"]);
+        press(&mut app, "fw");
+        press(&mut app, "n");
+        assert!(matches!(
+            app.create_text_annotation("   \n\t  ".to_owned()),
+            Err(AppError::EmptyAnnotationBody)
+        ));
+        assert!(app.text_annotation_summaries().is_empty());
+        assert!(app.pending_annotation_anchor().is_some());
+
+        app.create_text_annotation("kept body".to_owned()).unwrap();
+        let id = app.text_annotation_summaries()[0].id;
+        assert!(matches!(
+            app.set_text_annotation_body(id, "  ".to_owned()),
+            Err(AppError::EmptyAnnotationBody)
+        ));
+        assert_eq!(
+            app.text_annotation_summaries()[0].body_markdown,
+            "kept body"
+        );
+    }
+
+    #[test]
+    fn save_persists_captured_source_exactly_and_survives_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_pdf_bytes(
+            dir.path(),
+            "text.pdf",
+            pdf_with_pages(&["alpha beta gamma"]),
+        );
+        let db_path = dir.path().join("syodep.sqlite3");
+        let mut app = App::new(Config::default(), Some(Storage::open(&db_path).unwrap()));
+        app.set_viewport_size(595.0, 600.0);
+        app.open_document(&path).unwrap();
+        press(&mut app, "fw");
+        press(&mut app, "n");
+        let pending = app.pending_annotation_anchor().unwrap().clone();
+        let body = "Note with  trailing spaces  ";
+        app.create_text_annotation(body.to_owned()).unwrap();
+        let summary = &app.text_annotation_summaries()[0];
+        assert_eq!(summary.text, pending.text);
+        assert_eq!(summary.body_markdown, body);
+        assert!(app.pending_annotation_anchor().is_none());
+
+        let mut reopened = App::new(Config::default(), Some(Storage::open(&db_path).unwrap()));
+        reopened.set_viewport_size(595.0, 600.0);
+        reopened.open_document(&path).unwrap();
+        let loaded = reopened.text_annotation_summaries();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].text, pending.text);
+        assert_eq!(loaded[0].body_markdown, body);
+    }
+
+    #[test]
+    fn text_annotations_sort_in_document_order_not_creation_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta", "gamma delta"]);
+        // Annotate page 2 first, then page 1 — list must still be document order.
+        press(&mut app, "G");
+        press(&mut app, "fw");
+        press(&mut app, "n");
+        app.create_text_annotation("second".to_owned()).unwrap();
+        press(&mut app, "gg");
+        press(&mut app, "fw");
+        press(&mut app, "n");
+        app.create_text_annotation("first".to_owned()).unwrap();
+
+        let summaries = app.text_annotation_summaries();
+        assert_eq!(summaries.len(), 2);
+        assert_eq!(summaries[0].body_markdown, "first");
+        assert_eq!(summaries[1].body_markdown, "second");
+        assert!(summaries[0].first_page < summaries[1].first_page);
+    }
+
+    #[test]
+    fn deleting_a_text_annotation_removes_it_everywhere() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta"]);
+        press(&mut app, "fw");
+        press(&mut app, "n");
+        app.create_text_annotation("gone".to_owned()).unwrap();
+        let id = app.text_annotation_summaries()[0].id;
+        let rev = app.annotation_revision();
+        let effects = app.delete_text_annotation(id).unwrap();
+        assert!(effects.annotations_changed);
+        assert!(app.annotation_revision() > rev);
+        assert!(app.text_annotation_summaries().is_empty());
+    }
+
+    #[test]
+    fn text_annotation_markdown_includes_source_and_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta"]);
+        press(&mut app, "fw");
+        press(&mut app, "n");
+        app.create_text_annotation("why it matters".to_owned())
             .unwrap();
-        let all = app.all_highlights_markdown();
-        let first_md = app.highlight_markdown(first).unwrap();
-        let second_md = app.highlight_markdown(second).unwrap();
-        assert!(first_md.contains("only first"));
-        assert!(!second_md.contains("only first"));
-        assert_eq!(all, format!("{first_md}\n\n{second_md}"));
+        let id = app.text_annotation_summaries()[0].id;
+        let md = app.text_annotation_markdown(id).unwrap();
+        assert!(md.contains("## Page 1"));
+        assert!(md.contains("> alpha"));
+        assert!(md.contains("why it matters"));
+        assert_eq!(
+            app.all_text_annotations_markdown(),
+            format!("# Annotations\n\n{md}")
+        );
+    }
+
+    #[test]
+    fn n_and_save_leave_mode_selection_and_viewport_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["alpha beta gamma"]);
+        press(&mut app, "fw");
+        press(&mut app, "a");
+        assert_eq!(app.mode(), Mode::Highlight);
+        assert!(app.has_pending_highlight());
+
+        press(&mut app, "n");
+        let frozen = app.pending_annotation_anchor().unwrap().clone();
+
+        // Move the selection before save — the stored source must stay frozen,
+        // and save itself must not alter mode / pending highlight / viewport.
+        press(&mut app, "w");
+        let mode = app.mode();
+        let span = app.visual_span().unwrap();
+        let scroll = app.session.as_ref().unwrap().view.scroll();
+        assert!(app.has_pending_highlight());
+
+        let (id, effects) = app
+            .create_text_annotation("immutable note".to_owned())
+            .unwrap();
+        assert!(effects.annotations_changed);
+        assert_eq!(app.mode(), mode);
+        assert_eq!(app.visual_span(), Some(span));
+        assert_eq!(app.session.as_ref().unwrap().view.scroll(), scroll);
+        assert!(app.has_pending_highlight());
+        assert!(app.pending_annotation_anchor().is_none());
+
+        let summary = app
+            .text_annotation_summaries()
+            .into_iter()
+            .find(|s| s.id == id)
+            .unwrap();
+        assert_eq!(summary.text, frozen.text);
+        assert_eq!(summary.body_markdown, "immutable note");
+    }
+
+    #[test]
+    fn persistence_unavailable_rejects_annotation_mutations() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_pdf_bytes(dir.path(), "text.pdf", pdf_with_pages(&["alpha beta"]));
+        let mut app = App::new(Config::default(), None);
+        app.set_viewport_size(595.0, 600.0);
+        app.open_document(&path).unwrap();
+        assert!(!app.has_persistence());
+
+        press(&mut app, "fw");
+        let effects = press(&mut app, "n");
+        assert!(!effects.create_annotation_requested);
+        assert!(app.pending_annotation_anchor().is_none());
+        assert!(
+            app.status_text()
+                .contains("Annotation storage is not available"),
+            "{}",
+            app.status_text()
+        );
     }
 }

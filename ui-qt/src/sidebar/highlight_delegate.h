@@ -22,12 +22,10 @@ public:
 
 private:
     static constexpr int kMaxTextLines = 4;
-    static constexpr int kMaxNoteLines = 3;
     static constexpr int kMargin = 10;
     static constexpr int kMarkerSize = 10;
     static constexpr int kMetaGap = 8;
     static constexpr int kTextGap = 6;
-    static constexpr int kNoteGap = 8;
 
     struct Layout
     {
@@ -35,10 +33,7 @@ private:
         QRect pageLabel;
         QRect stateLabel;
         QRect text;
-        QRect noteLabel;
-        QRect noteText;
         int height = 0;
-        bool hasNote = false;
     };
 
     Layout computeLayout(const QStyleOptionViewItem &option,

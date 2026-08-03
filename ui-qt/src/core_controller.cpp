@@ -278,6 +278,14 @@ QString CoreController::openDirectory() const
     return takeSyoString(syo_app_open_dir(m_app));
 }
 
+QString CoreController::documentPath() const
+{
+    assertGuiThread();
+    if (!m_app)
+        return {};
+    return takeSyoString(syo_app_document_path(m_app));
+}
+
 quint64 CoreController::annotationRevision() const
 {
     assertGuiThread();
@@ -311,10 +319,6 @@ HighlightSnapshot CoreController::highlightSnapshot() const
         out.id = item.id;
         out.text = item.text ? QString::fromUtf8(item.text) : QString();
         out.color = item.color ? QString::fromUtf8(item.color) : QString();
-        out.hasNote = item.has_note != 0;
-        out.noteMarkdown = (item.has_note != 0 && item.note_markdown)
-            ? QString::fromUtf8(item.note_markdown)
-            : QString();
         out.firstPage = qsizetype(item.first_page);
         out.lastPage = qsizetype(item.last_page);
         out.state = state;
@@ -348,21 +352,151 @@ QString CoreController::allHighlightsMarkdown() const
     return takeSyoString(syo_app_all_highlights_markdown(m_app));
 }
 
-bool CoreController::setHighlightNote(qint64 highlightId, const QString &bodyMarkdown)
+bool CoreController::deleteHighlight(qint64 highlightId)
 {
     assertGuiThread();
     if (!m_app)
         return false;
 
-    const QByteArray utf8 = bodyMarkdown.toUtf8();
     uint32_t effects = 0;
-    const bool ok = syo_app_set_highlight_note(
-        m_app, highlightId, utf8.constData(), &effects);
+    const bool ok = syo_app_delete_highlight(m_app, highlightId, &effects);
+    if (ok)
+        applyEffects(effects);
+    else
+        emit statusChanged(); // the refusal is in the core's status text
+    return ok;
+}
+
+TextAnnotationSnapshot CoreController::textAnnotationSnapshot() const
+{
+    assertGuiThread();
+    TextAnnotationSnapshot snapshot;
+    if (!m_app)
+        return snapshot;
+
+    SyoTextAnnotationList *list = syo_app_text_annotation_list(m_app);
+    if (!list)
+        return snapshot;
+
+    snapshot.revision = quint64(list->revision);
+    snapshot.items.reserve(qsizetype(list->count));
+    for (size_t i = 0; i < list->count; ++i) {
+        const SyoTextAnnotationItem &item = list->items[i];
+        TextAnnotationListItem out;
+        out.id = item.id;
+        out.text = item.text ? QString::fromUtf8(item.text) : QString();
+        out.bodyMarkdown =
+            item.body_markdown ? QString::fromUtf8(item.body_markdown) : QString();
+        out.firstPage = qsizetype(item.first_page);
+        out.lastPage = qsizetype(item.last_page);
+        snapshot.items.push_back(out);
+    }
+    syo_text_annotation_list_free(list);
+    return snapshot;
+}
+
+QString CoreController::pendingAnnotationText() const
+{
+    assertGuiThread();
+    if (!m_app)
+        return {};
+    return takeSyoString(syo_app_pending_annotation_text(m_app));
+}
+
+void CoreController::revealTextAnnotation(qint64 id)
+{
+    assertGuiThread();
+    if (!m_app)
+        return;
+    applyEffects(syo_app_reveal_text_annotation(m_app, id));
+}
+
+QString CoreController::textAnnotationMarkdown(qint64 id) const
+{
+    assertGuiThread();
+    if (!m_app)
+        return {};
+    return takeSyoString(syo_app_text_annotation_markdown(m_app, id));
+}
+
+QString CoreController::allTextAnnotationsMarkdown() const
+{
+    assertGuiThread();
+    if (!m_app)
+        return {};
+    return takeSyoString(syo_app_all_text_annotations_markdown(m_app));
+}
+
+bool CoreController::deleteTextAnnotation(qint64 annotationId)
+{
+    assertGuiThread();
+    if (!m_app)
+        return false;
+
+    uint32_t effects = 0;
+    const bool ok = syo_app_delete_text_annotation(m_app, annotationId, &effects);
     if (ok)
         applyEffects(effects);
     else
         emit statusChanged();
     return ok;
+}
+
+bool CoreController::createTextAnnotation(const QString &bodyMarkdown, qint64 *createdId)
+{
+    assertGuiThread();
+    if (createdId)
+        *createdId = 0;
+    if (!m_app)
+        return false;
+
+    uint32_t effects = 0;
+    int64_t id = 0;
+    const QByteArray utf8 = bodyMarkdown.toUtf8();
+    const bool ok =
+        syo_app_create_text_annotation(m_app, utf8.constData(), &id, &effects);
+    if (ok) {
+        if (createdId)
+            *createdId = static_cast<qint64>(id);
+        applyEffects(effects);
+    } else {
+        emit statusChanged();
+    }
+    return ok;
+}
+
+bool CoreController::hasPersistence() const
+{
+    assertGuiThread();
+    if (!m_app)
+        return false;
+    return syo_app_has_persistence(m_app);
+}
+
+bool CoreController::setTextAnnotationBody(qint64 annotationId,
+                                           const QString &bodyMarkdown)
+{
+    assertGuiThread();
+    if (!m_app)
+        return false;
+
+    uint32_t effects = 0;
+    const QByteArray utf8 = bodyMarkdown.toUtf8();
+    const bool ok = syo_app_set_text_annotation_body(
+        m_app, annotationId, utf8.constData(), &effects);
+    if (ok)
+        applyEffects(effects);
+    else
+        emit statusChanged();
+    return ok;
+}
+
+void CoreController::cancelPendingAnnotation()
+{
+    assertGuiThread();
+    if (!m_app)
+        return;
+    syo_app_cancel_pending_annotation(m_app);
 }
 
 bool CoreController::hasUnsavedHighlights() const
@@ -417,6 +551,14 @@ bool CoreController::applyEffects(uint32_t effects, QuitDelivery quitDelivery)
     // 4. Open-file dialog
     if (effects & SYO_EFFECT_OPEN_FILE_DIALOG)
         emit openFileRequested();
+
+    // 4b. Sidebar visibility. Before the redraw so the canvas resizes once.
+    if (effects & SYO_EFFECT_TOGGLE_HIGHLIGHTS_SIDEBAR)
+        emit toggleHighlightsSidebarRequested();
+    if (effects & SYO_EFFECT_TOGGLE_ANNOTATIONS_SIDEBAR)
+        emit toggleAnnotationsSidebarRequested();
+    if (effects & SYO_EFFECT_CREATE_ANNOTATION_REQUESTED)
+        emit createTextAnnotationRequested();
 
     // 5. Canvas redraw
     if (effects & SYO_EFFECT_REDRAW)

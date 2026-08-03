@@ -290,6 +290,15 @@ pub fn default_keybindings() -> BTreeMap<String, String> {
         // leader gives it the same "deliberate" cost as the other leader
         // bindings.
         ("<leader>q", "quit"),
+        // `a` for annotations. On the leader because a bare `a` is
+        // `highlight_enter` in focus and visual mode, and one letter must not
+        // mean two things; on the normal table so the sidebar can be reached
+        // from every mode, the way saving can.
+        ("<leader>a", "toggle_highlights_sidebar"),
+        // `n` for notes/annotations sidebar, on the leader so bare `n` can
+        // create an annotation from Focus/Visual/Highlight (and reject in Normal).
+        ("<leader>n", "toggle_annotations_sidebar"),
+        ("n", "create_annotation"),
         ("<Esc>", "cancel"),
     ]
     .into_iter()
@@ -334,6 +343,8 @@ pub fn default_focus_keybindings() -> BTreeMap<String, String> {
         // normal table, so that in normal mode — where there is no selection,
         // only a remembered position — it stays unbound.
         ("a", "highlight_enter"),
+        // Create a Markdown annotation from the focused unit.
+        ("n", "create_annotation"),
         ("<Esc>", "focus_exit"),
     ]
     .into_iter()
@@ -380,6 +391,7 @@ pub fn default_visual_keybindings() -> BTreeMap<String, String> {
         ("vs", "visual_scope_sentence"),
         ("vp", "visual_scope_paragraph"),
         ("a", "highlight_enter"),
+        ("n", "create_annotation"),
         ("<Esc>", "visual_exit"),
     ]
     .into_iter()
@@ -424,6 +436,7 @@ pub fn default_highlight_keybindings() -> BTreeMap<String, String> {
         ("op", "visual_other_paragraph"),
         // `a` again keeps the highlight; either undo key throws it away.
         ("a", "highlight_commit"),
+        ("n", "create_annotation"),
         ("<Esc>", "highlight_discard"),
         ("<BS>", "highlight_discard"),
     ]

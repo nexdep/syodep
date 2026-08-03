@@ -20,12 +20,20 @@ qt_add_executable(syodep
     src/key_encoder.h
     src/sidebar/annotation_sidebar.cpp
     src/sidebar/annotation_sidebar.h
+    src/sidebar/highlights_panel.cpp
+    src/sidebar/highlights_panel.h
+    src/sidebar/annotations_panel.cpp
+    src/sidebar/annotations_panel.h
     src/sidebar/highlight_list_model.cpp
     src/sidebar/highlight_list_model.h
     src/sidebar/highlight_delegate.cpp
     src/sidebar/highlight_delegate.h
-    src/sidebar/highlight_comment_editor.cpp
-    src/sidebar/highlight_comment_editor.h
+    src/sidebar/text_annotation_list_model.cpp
+    src/sidebar/text_annotation_list_model.h
+    src/sidebar/text_annotation_delegate.cpp
+    src/sidebar/text_annotation_delegate.h
+    src/sidebar/text_annotation_editor.cpp
+    src/sidebar/text_annotation_editor.h
     src/sidebar/safe_markdown_view.cpp
     src/sidebar/safe_markdown_view.h)
 

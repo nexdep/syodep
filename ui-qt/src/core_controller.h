@@ -53,8 +53,6 @@ struct HighlightListItem
     qint64 id = 0;
     QString text;
     QString color;
-    QString noteMarkdown;
-    bool hasNote = false;
     qsizetype firstPage = 0;
     qsizetype lastPage = 0;
     HighlightState state = HighlightState::Pending;
@@ -63,6 +61,22 @@ struct HighlightListItem
 struct HighlightSnapshot
 {
     QVector<HighlightListItem> items;
+    quint64 revision = 0;
+};
+
+// Disposable presentation snapshot for Markdown annotations — full body, not a preview.
+struct TextAnnotationListItem
+{
+    qint64 id = 0;
+    QString text;
+    QString bodyMarkdown;
+    qsizetype firstPage = 0;
+    qsizetype lastPage = 0;
+};
+
+struct TextAnnotationSnapshot
+{
+    QVector<TextAnnotationListItem> items;
     quint64 revision = 0;
 };
 
@@ -97,6 +111,9 @@ public:
     // Input and view
     void sendKey(const QString &chord);
     void handleKeyTimeout();
+    // Configured multi-key timeout, so shell-local key sequences (the
+    // sidebar's `gg`/`dd`) expire on the same clock as the core's.
+    int keyTimeoutMs() const { return m_pendingInputTimer.interval(); }
     void scrollBy(float dx, float dy);
     void setViewportSize(float width, float height);
 
@@ -116,18 +133,34 @@ public:
     QString statusText() const;
     QString startupWarnings() const;
     QString openDirectory() const;
+    // Empty when no document is open.
+    QString documentPath() const;
 
     // Annotation queries (Pending + Embedded; not filtered like the overlay)
     quint64 annotationRevision() const;
     HighlightSnapshot highlightSnapshot() const;
+    TextAnnotationSnapshot textAnnotationSnapshot() const;
+    QString pendingAnnotationText() const;
 
     // Annotation actions — Markdown and navigation stay core-owned
     void revealHighlight(qint64 id);
     QString highlightMarkdown(qint64 id) const;
     QString allHighlightsMarkdown() const;
-    // Returns true only when the core confirms the save. Whitespace-only bodies
-    // clear the comment (core-owned rule). Does not trim or rewrite Markdown.
-    bool setHighlightNote(qint64 highlightId, const QString &bodyMarkdown);
+    // Returns true only when the core confirms the deletion. Removing an
+    // Embedded highlight rewrites the PDF, so the effects the core reports
+    // (and this controller applies) may include a page-cache invalidation.
+    // Failures leave everything in place and the reason in statusText().
+    bool deleteHighlight(qint64 highlightId);
+
+    void revealTextAnnotation(qint64 id);
+    QString textAnnotationMarkdown(qint64 id) const;
+    QString allTextAnnotationsMarkdown() const;
+    bool deleteTextAnnotation(qint64 annotationId);
+    // On success writes the new stable id to *createdId when non-null.
+    bool createTextAnnotation(const QString &bodyMarkdown, qint64 *createdId = nullptr);
+    bool setTextAnnotationBody(qint64 annotationId, const QString &bodyMarkdown);
+    void cancelPendingAnnotation();
+    bool hasPersistence() const;
 
     // Quit flow
     bool hasUnsavedHighlights() const;
@@ -147,6 +180,13 @@ signals:
     void openFileRequested();
     void quitRequested();
     void confirmQuitRequested();
+    // `<leader>a` reached the core. Sidebar visibility is shell state, so the
+    // core only asks; MainWindow decides what "toggle" means, including where
+    // keyboard focus lands.
+    void toggleHighlightsSidebarRequested();
+    void toggleAnnotationsSidebarRequested();
+    // `n` captured a pending anchor; open Annotations in creation mode.
+    void createTextAnnotationRequested();
 
 private:
     enum class QuitDelivery

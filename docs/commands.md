@@ -43,7 +43,7 @@ per-mode page.
 
 ## Planned (not yet implemented)
 
-Phase 2 adds search/bookmark/mark/jump commands and notes attached to
-highlights, on top of the selection visual mode provides (mouse selection is
-still to come); phase 3 adds text-object commands (`select_word`,
-`highlight_sentence`, …) and smart jump. See `docs/roadmap.md`.
+Phase 2 adds search/bookmark/mark/jump commands on top of the selection visual
+mode provides (mouse selection is still to come); phase 3 adds text-object
+commands (`select_word`, `highlight_sentence`, …) and smart jump. See
+`docs/roadmap.md`.

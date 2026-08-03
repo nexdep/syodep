@@ -122,6 +122,9 @@ Application:
 |---|---|
 | `<leader>o` | `open_file` — open the native file picker |
 | `<leader>w` | `save_document` — overwrite the PDF with the highlights embedded |
+| `<leader>a` | `toggle_highlights_sidebar` — toggle or activate the Highlights sidebar page |
+| `<leader>n` | `toggle_annotations_sidebar` — toggle or activate the Annotations sidebar page |
+| `n` | `create_annotation` — capture Focus/Visual/Highlight source as a pending Markdown annotation (rejected in Normal) |
 | `<leader>q` | `quit` — save the reading position and quit; asks first if there are highlights not yet saved to the PDF |
 | `<Esc>` | `cancel` |
 
@@ -288,6 +291,81 @@ mode's. See `docs/commands-highlight-mode.md` for the full list.
 
 Customize highlight-mode keys with a `[highlight_keys]` table (see
 `docs/config.md`); it overlays the normal bindings while a highlight is pending.
+
+## Annotation sidebar
+
+One fixed-right dock holds either the Highlights page or the Annotations page
+(never both at once). `<leader>a` toggles Highlights; `<leader>n` toggles
+Annotations. Invoking the other page substitutes it without hiding the dock;
+invoking the currently visible page hides the dock and focuses the canvas.
+`View → Highlights` / `View → Annotations` share that path. `n` always opens
+Annotations in creation mode and never hides the dock.
+
+The dock can be closed and resized, but not floated or moved to another edge.
+Escape from either page clears local pending `gg`/`dd` state, focuses the
+canvas, and leaves the dock visible.
+
+### Highlights page
+
+Highlights are listed in document order: page, then down the page, then across
+it. That is the same order `Copy all highlights as Markdown` and the Markdown
+export use.
+
+While the Highlights list has the keyboard:
+
+| Keys | Action |
+|---|---|
+| `j`, `<Down>` | next highlight |
+| `k`, `<Up>` | previous highlight |
+| `gg`, `<Home>` | first highlight |
+| `G`, `<End>` | last highlight |
+| `<Enter>` | scroll the canvas to the highlight (the list keeps the keyboard) |
+| `dd`, `<Delete>` | delete the highlight, after a confirmation |
+| `y` | copy the highlighted text |
+| `Y` | copy the highlight as Markdown |
+| `<C-S-e>` | export every highlight to a Markdown file |
+| `<Esc>` | give the canvas the keyboard back, leaving the sidebar open |
+
+These keys are not part of `[keys]` and cannot be rebound yet: they act on the
+sidebar's selection, which is the shell's, not the document's.
+
+Deleting says which kind of highlight it is about to remove, because the two
+are different promises: one that has not been saved into the PDF yet only
+exists in syodep's database, while an embedded one is removed from the PDF
+itself, rewriting the file. Selection then lands on whatever moved up into the
+deleted row, so `dd dd` deletes two in a row.
+
+### Annotations page
+
+Independent Markdown annotations (not highlights). Listed in the same document
+order. `n` from Focus/Visual/Highlight opens this page in creation mode with the
+captured source quote; Save requires a non-empty body.
+
+While the Annotations list has the keyboard:
+
+| Keys | Action |
+|---|---|
+| `j`, `<Down>` | next annotation |
+| `k`, `<Up>` | previous annotation |
+| `gg`, `<Home>` | first annotation |
+| `G`, `<End>` | last annotation |
+| `<Enter>` | reveal the annotation on the canvas |
+| `e` | edit the selected annotation |
+| `dd`, `<Delete>` | delete the annotation, after a confirmation |
+| `y` | copy the source text |
+| `Y` | copy the annotation as Markdown |
+| `<C-S-e>` | export every annotation to a Markdown file |
+| `<Esc>` | give the canvas the keyboard back, leaving the sidebar open |
+
+In the annotation editor: Escape on a clean draft returns to the list; Escape
+on a dirty draft keeps the editor focused and keeps the unsaved cue visible
+(no silent discard).
+
+Dirty drafts survive hiding the dock or substituting the Highlights page.
+Save / Discard / Cancel prompts appear when starting another annotation,
+changing documents, closing the app, deleting the annotation being edited, or
+selecting another annotation that would replace the editor. Create/edit/delete
+are disabled when annotation storage is unavailable.
 
 ## Customizing
 
