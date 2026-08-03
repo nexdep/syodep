@@ -53,6 +53,10 @@ highlight_opacity = 0.4
 # Images are always single stops; this only controls table detection,
 # which costs a second text pass per page.
 detect_tables = true
+# Treat each figure/table caption as one stop from line scope up.
+# Sentence and paragraph auto-search skip captions the way they skip
+# footnotes. Costs nothing extra to extract.
+detect_captions = true
 # Treat each heading as one step at sentence and paragraph scope,
 # so it is not glued to the text below it for want of a full stop.
 # Word and line scope still move through a heading normally.
@@ -63,6 +67,9 @@ detect_headings = true
 # rather than one per row. Word and char scope still walk through one.
 # Maths written inline in a sentence is left alone.
 detect_equations = true
+# Treat each monospace code block as one stop from line scope up.
+# Costs nothing extra to extract.
+detect_code = true
 # Skip page furniture when moving: running headers, page numbers, and
 # text that does not run in the page's reading direction, such as a
 # sideways margin stamp or an inclined watermark. Headers and footers

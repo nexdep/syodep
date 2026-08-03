@@ -145,6 +145,9 @@ pub struct ViewConfig {
     /// motions above char scope. Costs a second text-extraction pass per page
     /// and relies on a heuristic, so it can be turned off.
     pub detect_tables: bool,
+    /// Detect figure/table captions so each is a single stop from line scope
+    /// up. Sentence/paragraph auto-search skips captions like footnotes.
+    pub detect_captions: bool,
     /// Detect headings so each is a single step at sentence and paragraph
     /// scope. Costs nothing extra to extract, but relies on a heuristic.
     pub detect_headings: bool,
@@ -152,6 +155,9 @@ pub struct ViewConfig {
     /// paragraph scope, while staying walkable by word and character. Costs
     /// nothing extra to extract, but relies on a heuristic.
     pub detect_equations: bool,
+    /// Detect monospace code blocks so each is a single stop from line scope
+    /// up. Costs nothing extra to extract, but relies on a heuristic.
+    pub detect_code: bool,
     /// Drop running headers, page numbers and text that does not run in the
     /// page's reading direction, so the caret never traverses them.
     pub skip_page_furniture: bool,
@@ -193,8 +199,10 @@ impl Default for ViewConfig {
             highlight_color: "#ffd400".to_owned(),
             highlight_opacity: 0.4,
             detect_tables: true,
+            detect_captions: true,
             detect_headings: true,
             detect_equations: true,
+            detect_code: true,
             skip_page_furniture: true,
             detect_footnotes: true,
         }
@@ -627,6 +635,12 @@ pub fn default_config_doc() -> String {
     );
     let _ = writeln!(out, "detect_tables = {}", view.detect_tables);
     out.push_str(
+        "# Treat each figure/table caption as one stop from line scope up.\n\
+         # Sentence and paragraph auto-search skip captions the way they skip\n\
+         # footnotes. Costs nothing extra to extract.\n",
+    );
+    let _ = writeln!(out, "detect_captions = {}", view.detect_captions);
+    out.push_str(
         "# Treat each heading as one step at sentence and paragraph scope,\n\
          # so it is not glued to the text below it for want of a full stop.\n\
          # Word and line scope still move through a heading normally.\n",
@@ -640,6 +654,11 @@ pub fn default_config_doc() -> String {
          # Maths written inline in a sentence is left alone.\n",
     );
     let _ = writeln!(out, "detect_equations = {}", view.detect_equations);
+    out.push_str(
+        "# Treat each monospace code block as one stop from line scope up.\n\
+         # Costs nothing extra to extract.\n",
+    );
+    let _ = writeln!(out, "detect_code = {}", view.detect_code);
     out.push_str(
         "# Skip page furniture when moving: running headers, page numbers, and\n\
          # text that does not run in the page's reading direction, such as a\n\

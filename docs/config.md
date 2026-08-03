@@ -44,8 +44,10 @@ bookmarks, highlights, notes, history. That lives in the SQLite database
 | `highlight_color` | string | `"#ffd400"` | colour of a highlight, `#rrggbb` — also what is written into the PDF on save |
 | `highlight_opacity` | float | `0.4` | opacity of the highlight overlay, `0.0`-`1.0` |
 | `detect_tables` | bool | `true` | treat each detected table as one stop from line scope up, drawn as one box |
+| `detect_captions` | bool | `true` | treat each figure/table caption as one stop from line scope up; `s`/`p` skip it |
 | `detect_headings` | bool | `true` | treat each detected heading as one step at sentence and paragraph scope |
 | `detect_equations` | bool | `true` | treat each detected display equation as one stop from line scope up, drawn as one box |
+| `detect_code` | bool | `true` | treat each monospace code block as one stop from line scope up |
 | `skip_page_furniture` | bool | `true` | keep running headers, page numbers and sideways text out of the caret's path |
 | `detect_footnotes` | bool | `true` | treat each detected footnote as one stop from line scope up, drawn as one box; `s`/`p` skip it entirely |
 
@@ -82,6 +84,13 @@ pass per page; set it to `false` to navigate tables line by line as before.
 Images go further — they are single stops at word scope too, having no words
 inside.
 
+**Caption detection.** With `detect_captions = true` a figure or table caption
+near an image/table (prefixed `Fig.`/`Figure`/`Table`/`Tab.` + number, or set
+apart typographically) is one stop from line scope up. Body `s`/`p` auto-search
+skips captions the way it skips footnotes; landing on one via line motion still
+treats it as one sentence step. Detection costs nothing extra; set it to
+`false` if the heuristic misjudges a document.
+
 **Heading detection.** With `detect_headings = true` a heading is one step at
 sentence and paragraph scope: `s` lands on it and the next `s` lands on the body
 beneath, and it is never glued to the following text for want of a full stop.
@@ -116,6 +125,11 @@ line of its own (`(3.4)`) belongs to the equation beside it.
 step it would have to be a region, and a region would split the sentence around
 it. Detection costs nothing extra to extract; set it to `false` if the heuristic
 misjudges a document.
+
+**Code-block detection.** With `detect_code = true` a run of monospace lines
+(Courier, Menlo, Consolas, …) is one stop from line scope up. Unlike captions
+and footnotes it is never auto-skipped by `s`/`p`. Detection costs nothing
+extra; set it to `false` if the heuristic misjudges a document.
 
 **Page furniture.** With `skip_page_furniture = true` the caret never traverses
 a running header, a page number, a manuscript line-numbering column, a

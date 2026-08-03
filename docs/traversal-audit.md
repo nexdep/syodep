@@ -57,7 +57,7 @@ PDF page
 → kept lines + furniture lines
 → table_bboxes (optional second MuPDF pass)
 → heading_ranges / equation_ranges / footnote_ranges
-→ content_objects (tables → images → headings → equations → footnotes → lists)
+→ content_objects (tables → images → captions → headings → equations → code → footnotes → lists)
 → PageContent
 → Session.content[page]  (lazy, permanent for the session)
 → caret traversal / scope_span / overlays / stored highlight geometry
@@ -199,20 +199,21 @@ search — not from the draft table in the audit brief.
 |-------------|------|------|------|----------|-----------|----------------------------|
 | Image | one cell | **one atomic unit** | **one block unit** | block unit | block; splits paragraphs | no |
 | Table | inspect cells | inspect words | **one block** | region-bounded; one block step | splits; block step | no (visible stop) |
+| Caption | inspect | inspect words | **one block** | **one block unit**; search skips | splits; **search skips** | **yes** |
 | Heading | inspect | inspect words | **inspect lines** (not a unit) | **one sentence** (`is_one_sentence` + region) | **own paragraph** (`splits_paragraphs`) | no |
 | Equation | inspect | inspect terms | **one block** | **one sentence** + block | splits; block | no |
+| Code | inspect | inspect words | **one block** | block unit | splits; block | no |
 | List item | inspect | inspect words | inspect lines | sentences; marker not a boundary | **merged into list paragraph** | no |
 | Footnote | inspect deliberately | inspect deliberately | **one block** | expand if inside; **search skips** | segment exists; **search skips** | **yes** |
 
 Policy is split across:
 
 - `ObjectKind::{is_atomic,is_block,is_one_sentence,splits_paragraphs}` in pdf
-- `unit_object_at` in App
-- `in_footnote` auto-skip in App (explicitly *not* an `ObjectKind` bit —
-  architecture decision 19)
+- `object_policy::{movement_unit, auto_skip_in_search}` in core (consulted by
+  `unit_object_at` and sentence/paragraph search)
 
-That split is intentional for footnotes; it is still easy to mis-extend. See
-**F-OBJ-1** and Candidate B.
+That split is intentional for footnotes/captions; it is still easy to mis-extend.
+See **F-OBJ-1** and Candidate B.
 
 ---
 
@@ -368,12 +369,14 @@ Additional dimensions:
 - **Tests:** existing app motion suite unchanged at the command level.
 - **Risk:** Medium borrow plumbing.
 - **Before sidebar?** Not for read-only highlight list. **Yes** before chat that asks “next sentence from caret”.
+- **Status (2026-08-03):** Step (1) landed as `content_session::ContentSession` (content, furniture, derived caches). Step (2) partially landed as `App::apply_motion` collapsing the four mode wrappers; the full `step_scope` funnel still lives on `App`.
 
 ### Candidate B — Centralize object/scope policy
 - **Solves:** F-OBJ-1 readability; prevents contradictory predicates.
 - **Must preserve:** footnote auto-skip axis separate from block axis.
 - **Form:** `fn movement_unit(self, scope) -> bool` + `fn auto_skip_in_search(self, scope) -> bool` in core using pdf kinds.
 - **Before sidebar?** Nice-to-have; document matrix is enough for now.
+- **Status (2026-08-03):** Done — `object_policy::{movement_unit, auto_skip_in_search}`.
 
 ### Candidate C — TextNeighborhood
 - **Solves:** F-ADJ-1.
@@ -392,7 +395,7 @@ Additional dimensions:
 ### Candidate F — Named state transitions
 - **Solves:** F-STATE-1.
 - **Before sidebar?** Helpful if sidebar triggers mode changes; not blocking for read-only panel.
-
+- **Status (2026-08-03):** Done — `App::apply_motion` / `MotionTarget`.
 ---
 
 ## 13. Performance notes (estimates)

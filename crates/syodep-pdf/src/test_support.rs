@@ -98,6 +98,9 @@ pub fn pdf_with_pages(page_texts: &[&str]) -> Vec<u8> {
 /// Build a single A4 page whose text is laid out in two columns: a left band
 /// near x=72 and a right band near x=340, each with `rows` lines stacked top to
 /// bottom. Used to exercise multi-column detection (line focus `H`/`L`).
+///
+/// Content-stream order is **column-major**: all left lines, then all right.
+/// Contrast [`pdf_interleaved_two_column_page`], which emits L1,R1,L2,R2,…
 pub fn pdf_two_column_page(rows: usize) -> Vec<u8> {
     let mut runs = String::new();
     for (col, x) in [72.0_f32, 340.0_f32].into_iter().enumerate() {
@@ -107,7 +110,27 @@ pub fn pdf_two_column_page(rows: usize) -> Vec<u8> {
             runs.push_str(&format!("BT /F1 18 Tf {x} {y} Td ({text}) Tj ET\n"));
         }
     }
+    two_column_page_pdf(&runs)
+}
 
+/// Like [`pdf_two_column_page`], but content-stream order is **row-major**
+/// (L1, R1, L2, R2, …). Real PDFs sometimes emit columns this way; MuPDF's
+/// structured-text order then interleaves the columns, which is the reading-
+/// order characterisation case (column bands may still be detected while
+/// sequential line motion follows stream order).
+pub fn pdf_interleaved_two_column_page(rows: usize) -> Vec<u8> {
+    let mut runs = String::new();
+    for r in 0..rows {
+        let y = 750.0 - r as f32 * 40.0;
+        for (col, x) in [72.0_f32, 340.0_f32].into_iter().enumerate() {
+            let text = format!("C{}L{}.", col + 1, r + 1);
+            runs.push_str(&format!("BT /F1 18 Tf {x} {y} Td ({text}) Tj ET\n"));
+        }
+    }
+    two_column_page_pdf(&runs)
+}
+
+fn two_column_page_pdf(runs: &str) -> Vec<u8> {
     let mut buf: Vec<u8> = b"%PDF-1.4\n".to_vec();
     let total_objects = 5; // catalog, pages, font, page, content
     let mut offsets: Vec<usize> = vec![0; total_objects + 1];
@@ -208,8 +231,10 @@ pub fn pdf_with_image() -> Vec<u8> {
           /Resources << /Font << /F1 3 0 R >> /XObject << /Im0 6 0 R >> >> \
           /Contents 5 0 R >>",
     );
-    // Caption text, then draw the image scaled to 120x90 at (100, 400).
-    let stream = "BT /F1 24 Tf 72 750 Td (Caption) Tj ET\nq 120 0 0 90 100 400 cm /Im0 Do Q";
+    // Caption tucked just under the image (120x90 at y=400 → bottom at 400).
+    // Prefix + proximity are what caption detection keys on.
+    let stream =
+        "q 120 0 0 90 100 400 cm /Im0 Do Q\nBT /F1 10 Tf 100 380 Td (Fig. 1 Caption) Tj ET";
     write_obj(
         &mut buf,
         &mut offsets,
@@ -304,7 +329,7 @@ pub fn pdf_with_table_gap(cols: usize, rows: usize, caption_gap: f32) -> Vec<u8>
 
     let caption_y = TOP - table_h - caption_gap;
     content.push_str(&format!(
-        "BT /F1 10 Tf 100 {caption_y} Td (Caption for the table) Tj ET\n"
+        "BT /F1 10 Tf 100 {caption_y} Td (Table 1. Caption for the table) Tj ET\n"
     ));
 
     let mut buf: Vec<u8> = b"%PDF-1.4\n".to_vec();
@@ -457,9 +482,36 @@ pub fn pdf_with_heading() -> Vec<u8> {
     two_font_page_pdf(&content, b"/Helvetica-Bold")
 }
 
+/// Build a single A4 page with body prose and a short monospace listing.
+/// Used to exercise code-block detection via Courier font share.
+pub fn pdf_with_code_block() -> Vec<u8> {
+    let mut content = String::new();
+    let body = [
+        "The database is a set of directories that each contain a copy of the",
+        "same layout, so that applications may add to it without touching any",
+        "of the files that another application installed there previously.",
+    ];
+    for (i, text) in body.iter().enumerate() {
+        let y = 740.0 - i as f32 * 14.0;
+        content.push_str(&format!("BT /F1 10 Tf 100 {y} Td ({text}) Tj ET\n"));
+    }
+    for (i, row) in ["fn main() {", "    println!(hello);", "}"]
+        .iter()
+        .enumerate()
+    {
+        let y = 680.0 - i as f32 * 14.0;
+        content.push_str(&format!("BT /F2 10 Tf 120 {y} Td ({row}) Tj ET\n"));
+    }
+    for (i, text) in body.iter().enumerate() {
+        let y = 620.0 - i as f32 * 14.0;
+        content.push_str(&format!("BT /F1 10 Tf 100 {y} Td ({text}) Tj ET\n"));
+    }
+    two_font_page_pdf(&content, b"/Courier")
+}
+
 /// Assemble a one-page A4 PDF around `content`, with `/F1` Helvetica and `/F2`
 /// the given base font.
-fn two_font_page_pdf(content: &str, second_font: &[u8]) -> Vec<u8> {
+pub fn two_font_page_pdf(content: &str, second_font: &[u8]) -> Vec<u8> {
     let mut buf: Vec<u8> = b"%PDF-1.4\n".to_vec();
     let total_objects = 6; // catalog, pages, text font, second font, page, content
     let mut offsets: Vec<usize> = vec![0; total_objects + 1];

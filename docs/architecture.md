@@ -16,9 +16,12 @@ joined by a small C ABI:
                                 │ C ABI (crates/syodep-ffi, cbindgen header)
  ┌──────────────────────────────┴────────────────────────────────────────┐
  │ syodep-core: App                                                      │
+ │   ContentSession ─ page content, furniture, derived paragraphs/cols   │
+ │   object_policy ─ movement_unit / auto_skip_in_search                 │
  │   command system ─ input state machine (counts, sequences, keymap)    │
  │   layout/View ─ document space, scroll, zoom, visible pages           │
  │   render cache ─ byte-bounded LRU of page bitmaps                     │
+ │   apply_motion ─ shared focus/visual motion wrapper                   │
  ├───────────────┬──────────────────────────┬────────────────────────────┤
  │ syodep-config │ syodep-pdf               │ syodep-storage             │
  │ TOML, chords  │ safe MuPDF wrapper       │ SQLite + migrations        │
@@ -254,7 +257,10 @@ sideways keep everything, and what makes the rule provably unable to empty a
 page, since the dominant cluster is the majority and is never flagged.
 *Repetition* flags a margin-band line whose digit-masked text and baseline recur
 across sampled pages; position alone is never evidence, so a title that appears
-once survives. Sampling takes four anchors of *two consecutive pages*, plus the opening and
+once survives. The rule never takes a page's last remaining reachable inked
+line — a margin is only a margin if there is something it is in the margin
+*of* — so a bottom folio under body content still masks, while a match that
+would empty the page does not. Sampling takes four anchors of *two consecutive pages*, plus the opening and
 closing page pairs, because evenly spaced single pages land on one parity and
 would miss the recto running head of any book that alternates, and because
 publisher mastheads often concentrate on the first leaves. Baselines, not
@@ -293,27 +299,31 @@ mutability and merely reading a document never pays for it.
 `ContentObject` bounds a sentence, which is what being a region means; four
 predicates on `ObjectKind` say how much further each kind goes, from the finest
 scope up. An image `is_atomic()` — one stop from *word* scope up, because there
-are no words inside one to walk. An image, a table, an equation and a
-footnote `is_block()` — one stop from *line* scope up, and drawn as a single
-box; the two categories nest, so atomic implies block. (A footnote's further
-invisibility to Sentence/Paragraph auto-search does not fit these four
-predicates at all — see the dedicated decision below.) A heading, an
-equation, a table and a footnote `splits_paragraphs()`, each being one step
-for `s` and `p`; a heading and an
+are no words inside one to walk. An image, a table, a caption, an equation, a
+code block and a footnote `is_block()` — one stop from *line* scope up, and
+drawn as a single box; the two categories nest, so atomic implies block. (A
+footnote's and caption's further invisibility to Sentence/Paragraph auto-search
+does not fit these four predicates — see `object_policy` in `syodep-core`.) A
+heading, an equation, a table, a caption, a code block and a footnote
+`splits_paragraphs()`, each being one step for `s` and `p`; a heading and an
 equation are also `is_one_sentence()`, so every terminator inside them is inert,
-which is what keeps `2.12.` and `f(x) = 0.` from splitting. A list item is none
-of them: one step for `s` only, because a list is a single paragraph made of
-many items, and its sentences are worth walking. Adding a kind means answering
-those four questions rather than threading a new mechanism through the motion
-code — which is exactly what list items did before they became regions, and what
-removing that mechanism bought back.
+which is what keeps `2.12.` and `f(x) = 0.` from splitting. Captions deliberately
+are *not* one-sentence (multi-sentence captions exist). A list item is none of
+them: one step for `s` only, because a list is a single paragraph made of many
+items, and its sentences are worth walking. Claim order in `content_objects` is
+tables → images → captions → headings → equations → code → footnotes → lists.
+Adding a kind means answering those four questions rather than threading a new
+mechanism through the motion code — which is exactly what list items did before
+they became regions, and what removing that mechanism bought back.
 
 Which category a scope consults is the whole of the per-scope difference, and it
-lives in one function (`App::unit_object_at`): char has no units at all, word
-asks for atomic kinds, line and coarser ask for blocks. `page_span_rects` asks
-for blocks unconditionally and needs no scope, because it already keys the
-collapse on whether the span covers the object end to end — which is true at
-exactly the scopes where the object is one unit.
+lives in `object_policy::movement_unit` (consulted by `unit_object_at`): char has
+no units at all, word asks for atomic kinds, line and paragraph ask for blocks,
+and sentence asks for blocks except footnotes (which stay sentence-walkable
+once inside). `page_span_rects` asks for blocks unconditionally and needs no
+scope, because it already keys the collapse on whether the span covers the
+object end to end — which is true at exactly the scopes where the object is one
+unit.
 
 **Decision — a heading is a *region*, and neither atomic nor a block:** motion
 and highlighting go through the unit accessors, which exclude headings at every
@@ -324,7 +334,9 @@ sentence and paragraph scope. Headings are found from typography rather than
 structure: a line set noticeably larger than the page's body size (the
 character-count mode, which body text dominates on every page), or entirely
 bold at body size without filling the column. Both signals come free from the
-pass that extracts the text. A third, shape-based rule catches multi-level
+pass that extracts the text. A single alphanumeric glyph that is oversized is
+rejected as a drop cap, not a heading — claiming it would sever a chapter's
+first letter from its own sentence. A third, shape-based rule catches multi-level
 section numbers at body size — `1.1. Methods`, `2.12. Recommended checking
 order` — which typography alone misses; those lines must end with the
 section-number's own trailing dot before the title, so a decimal that opens a
@@ -362,14 +374,17 @@ auto-search skip a region entirely — a table, already `is_block()`, still
 costs `s` one stop of its own (`sentence_span_does_not_run_into_a_table`
 pins only that a sentence *outside* the table does not extend into it, not
 that the table is invisible to the search). So the actual "skip it" behaviour
-lives outside `ObjectKind` altogether, in two new `App` predicates
-(`in_footnote`, consulted only by `step_next_sentence_start` /
-`step_prev_sentence_start` / `first_sentence_start_on_page` /
-`paragraph_step_next` / `paragraph_step_prev`) — never by
-`sentence_run_start`/`sentence_run_end`, so a caret placed inside a footnote
+lives outside `ObjectKind` altogether, in `App` predicates
+(`in_footnote` / `skip_footnote_in_search`, consulted only by
+`step_next_sentence_start` / `step_prev_sentence_start` /
+`first_sentence_start_on_page` / `paragraph_step_next` /
+`paragraph_step_prev`) — never by `sentence_run_start`/`sentence_run_end`.
+`unit_object_at` also excludes footnotes at Sentence scope (they remain
+blocks at Line and Paragraph), so a caret placed inside a footnote
 deliberately (word, char or line motion — a footnote stays in
 `content.lines`, unlike furniture, which is removed outright) still expands
-and steps through its own sentences normally once there. Decision-log entry
+and steps through its own sentences normally once there; the search skip
+only hides a footnote the caret has not already entered. Decision-log entry
 19 below anticipates a kind someday needing a third boundary on the existing
 word/line axis, at which point the two booleans there should collapse into
 one; a footnote is not that case; it is a genuinely different axis
@@ -386,6 +401,35 @@ when it fails the fuller equation gates. Found and claimed before list items in
 `content_objects`, deliberately: a footnote's own citation text is often
 itself enumerator-shaped (`12. Author, Title`) and must not be misread as, or
 corrupt the extent of, an unrelated list elsewhere on the page.
+
+**Decision — captions and code blocks are blocks with different search
+policies:** a caption is detected by proximity to an image/table bbox plus a
+`Fig.`/`Figure`/`Table`/`Tab.`+number prefix (or set-apart typography). It is a
+block at Line/Sentence/Paragraph, auto-skipped by Sentence/Paragraph search
+like a footnote, but — unlike a footnote — remains a Sentence movement unit
+when landed on via line motion. A code block is a run of high-monospace-share
+lines (Courier/Mono/…); block at line scope up, never auto-skipped. Both are
+wired through `object_policy`.
+
+**Note — two-column reading order follows MuPDF stream order today:**
+`column_ranges` recovers x-bands for `H`/`L` jumps regardless of emission order,
+but sequential line motion walks `PageContent::lines` as extracted. Column-major
+fixtures (`pdf_two_column_page`) yield all-left-then-all-right; row-major ones
+(`pdf_interleaved_two_column_page`) yield L1,R1,L2,R2,… — characterised, not
+"fixed," until a dedicated reading-order pass exists.
+
+**Decision — sentences and paragraphs are page-local marks:** a
+`SentenceMark` / `ParagraphMark` never crosses a page break (product decision,
+not an accident of the steppers). Page breaks always terminate them; motion
+*finds* the next unit on the next content page rather than expanding across.
+Full cross-page spans would need mark shapes → `(Caret, Caret)`, cross-page
+expansion that skips destination furniture, and a paragraph join heuristic —
+tracked on the roadmap, not implemented.
+
+**Note — CJK sentence terminators are recognised; word segmentation is not:**
+`。！？．` end a sentence the same way `.!?` do, and `」』）】` are trailers.
+Full CJK word segmentation (and therefore useful `w` motion in Chinese/Japanese)
+remains out of scope.
 
 **Decision — highlight annotations are written through a second, short-lived
 document handle, and their geometry and opacity go in by hand:**

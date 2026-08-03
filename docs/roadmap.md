@@ -78,6 +78,15 @@ the same code. See the development log.
   motion, never walked line by line); `s`/`p` additionally skip a footnote
   entirely while reading through a page's body, so it never interrupts
   ordinary reading
+- ✅ Captions detected from proximity to figures/tables plus `Fig.`/`Table`
+  prefixes; one stop from line scope up; `s`/`p` skip them like footnotes
+- ✅ Code blocks detected from monospace font share; one stop from line scope
+  up (not auto-skipped by `s`/`p`)
+- ✅ CJK sentence terminators (`。！？．`) recognised; full CJK word
+  segmentation remains out of scope
+- ⬜ Cross-page sentences/paragraphs (marks are page-local by design today —
+  see architecture; would need mark shapes → `(Caret, Caret)`, cross-page
+  expansion, and a paragraph join heuristic)
 - ⬜ Text-object selection, highlighting, annotation (`viw`-style
   composability on top of the existing command/count system)
 - ⬜ Smart jump to references, figures, tables, equations (the table, image and
@@ -86,6 +95,8 @@ the same code. See the development log.
   targets
 - ⬜ Bibliography/reference detection
 - ⬜ Async/tiled rendering with GL textures; prefetch neighboring pages
+- ⬜ Explicit reading-order rewrite (MuPDF stream order is documented;
+  interleaved-column fixtures characterise current behaviour only)
 
 ## Infrastructure milestones 🚧
 

@@ -10,32 +10,35 @@
 //! (redraw, quit, show a file dialog). The shell never interprets keys or
 //! touches document state itself.
 
-use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use syodep_config::keys::Chord;
 use syodep_config::Config;
+#[cfg(test)]
+use syodep_pdf::PageContent;
 use syodep_pdf::{
-    Bitmap, CellKind, ContentLine, ContentObject, ContentOptions, FurnitureProfile,
-    HighlightAnnotation, ObjectKind, PageContent, Rect,
+    Bitmap, CellKind, ContentLine, ContentObject, ContentOptions, HighlightAnnotation, ObjectKind,
+    Rect,
 };
 use syodep_storage::{
     HighlightId, HighlightPdfState, HighlightRect, Position, Storage, TextAnnotationId,
 };
 
 use crate::caret::{
-    column_index_of, column_ranges, continues_word_run, is_abbreviation, is_attached_number_suffix,
+    column_index_of, continues_word_run, is_abbreviation, is_attached_number_suffix,
     is_exponent_sign, is_inside_dotted_token, is_inside_hyphenated_word, is_inside_number,
     is_inside_scientific_exponent, is_line_final_colon, is_number_suffix, is_numeric_separator,
     is_sentence_terminator, is_sentence_trailer, is_word_hyphen, is_word_target, link_span,
     nearest_cell_in_line, nearest_line_in_column, opens_a_sentence, page_span_rects,
-    paragraph_segments, split_segments_at_objects, word_class, Caret, Dir, Landing, LineMark, Mode,
-    ObjectId, ParagraphMark, PendingHighlight, Scope, SentenceMark, VisualAnchor, VisualSelection,
-    WordClass, WordMark,
+    suppresses_capital_boundary, word_class, Caret, Dir, Landing, LineMark, Mode, ObjectId,
+    ParagraphMark, PendingHighlight, Scope, SentenceMark, VisualAnchor, VisualSelection, WordClass,
+    WordMark,
 };
 use crate::command::Command;
+use crate::content_session::ContentSession;
 use crate::input::{InputState, KeyOutcome, Keymap, KeymapError};
 use crate::layout::{DocumentLayout, PageSize, ScreenRect, View};
+use crate::object_policy::{auto_skip_in_search, movement_unit};
 use crate::render_cache::RenderCache;
 
 /// Hard bound on how many raw steps one atomic step may take to leave an
@@ -394,18 +397,15 @@ struct Session {
     document_id: Option<i64>,
     view: View,
     cache: RenderCache,
-    /// Lazily-extracted navigable content, per page. Text is cheap to keep, so
-    /// every visited page stays cached for the life of the session.
-    content: HashMap<usize, PageContent>,
-    /// Pages whose extraction returned an error. Still cached as empty content
-    /// so motion skips them, but distinct from a genuinely blank page for
-    /// diagnostics (see [`App::ensure_content`]).
-    content_extraction_failed: HashSet<usize>,
-    /// What this document repeats in its margins. Learned once, before the
-    /// first page is extracted, so every cached page above was filtered
-    /// against the same evidence — otherwise navigation would differ depending
-    /// on which page happened to be visited first.
-    furniture: Option<FurnitureProfile>,
+    /// Lazily-extracted navigable content and furniture profile for this document.
+    content: ContentSession,
+}
+
+/// Which caret motions update: the focus highlight, or the visual selection head.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MotionTarget {
+    Focus,
+    Visual,
 }
 
 /// Top-level application state. One instance per window.
@@ -629,9 +629,7 @@ impl App {
             document_id,
             view,
             cache: RenderCache::default(),
-            content: HashMap::new(),
-            content_extraction_failed: HashSet::new(),
-            furniture: None,
+            content: ContentSession::new(),
         });
         // Caret positions are document-specific; reset to normal mode.
         self.mode = Mode::Normal;
@@ -1352,45 +1350,23 @@ impl App {
     /// surfaced via [`Self::last_error`] so a damaged extract is not silently
     /// indistinguishable from a blank page.
     fn ensure_content(&mut self, page: usize) {
-        let Some(session) = self.session.as_mut() else {
-            return;
+        let result = {
+            let Some(session) = self.session.as_mut() else {
+                return;
+            };
+            let opts = ContentOptions {
+                detect_tables: self.config.view.detect_tables,
+                detect_captions: self.config.view.detect_captions,
+                detect_headings: self.config.view.detect_headings,
+                detect_equations: self.config.view.detect_equations,
+                detect_code: self.config.view.detect_code,
+                skip_page_furniture: self.config.view.skip_page_furniture,
+                detect_footnotes: self.config.view.detect_footnotes,
+            };
+            session.content.ensure(&session.doc, page, opts)
         };
-        if session.content.contains_key(&page) {
-            return;
-        }
-        // Learn the margins before extracting anything, so every page in this
-        // session is filtered against the same evidence. Done here rather than
-        // at open so that merely reading a document never pays for it — page
-        // content is only ever extracted once the caret is used.
-        if session.furniture.is_none() && self.config.view.skip_page_furniture {
-            session.furniture = Some(session.doc.furniture_profile().unwrap_or_default());
-        }
-        let opts = ContentOptions {
-            detect_tables: self.config.view.detect_tables,
-            detect_headings: self.config.view.detect_headings,
-            detect_equations: self.config.view.detect_equations,
-            skip_page_furniture: self.config.view.skip_page_furniture,
-            detect_footnotes: self.config.view.detect_footnotes,
-        };
-        let extracted = session
-            .doc
-            .page_content(page, opts, session.furniture.as_ref());
-        let Some(session) = self.session.as_mut() else {
-            return;
-        };
-        match extracted {
-            Ok(content) => {
-                session.content.insert(page, content);
-            }
-            Err(e) => {
-                session.content_extraction_failed.insert(page);
-                session.content.insert(page, PageContent::default());
-                // 1-based page number matches what the status line shows.
-                self.last_error = Some(format!(
-                    "could not extract content on page {}: {e}",
-                    page + 1
-                ));
-            }
+        if let Err(msg) = result {
+            self.last_error = Some(msg);
         }
     }
 
@@ -1399,16 +1375,25 @@ impl App {
     #[cfg(test)]
     fn set_page_content(&mut self, page: usize, content: PageContent) {
         if let Some(session) = self.session.as_mut() {
-            session.content.insert(page, content);
+            session.content.set_page_content(page, content);
         }
+    }
+
+    /// Place the focus caret directly for regression tests that need a landing
+    /// the steppers would otherwise skip (empty lines between paragraphs).
+    #[cfg(test)]
+    fn set_focus_for_test(&mut self, at: Caret, scope: Scope) {
+        self.mode = Mode::Focus;
+        self.focus_scope = scope;
+        self.focus = Some(at);
+        self.refresh_focus_span();
     }
 
     /// Cached content lines for `page` (empty if absent/uncached).
     fn content(&self, page: usize) -> &[ContentLine] {
         self.session
             .as_ref()
-            .and_then(|s| s.content.get(&page))
-            .map(|c| c.lines.as_slice())
+            .map(|s| s.content.content(page))
             .unwrap_or(&[])
     }
 
@@ -1416,8 +1401,7 @@ impl App {
     fn objects(&self, page: usize) -> &[ContentObject] {
         self.session
             .as_ref()
-            .and_then(|s| s.content.get(&page))
-            .map(|c| c.objects.as_slice())
+            .map(|s| s.content.objects(page))
             .unwrap_or(&[])
     }
 
@@ -1449,12 +1433,7 @@ impl App {
     /// this one function is where that distinction is made.
     fn unit_object_at(&mut self, page: usize, line: usize, scope: Scope) -> Option<ContentObject> {
         let object = self.region_at(page, line)?;
-        let counts = match scope {
-            Scope::Char => false,
-            Scope::Word => object.kind.is_atomic(),
-            Scope::Line | Scope::Sentence | Scope::Paragraph => object.kind.is_block(),
-        };
-        counts.then_some(object)
+        movement_unit(object.kind, scope).then_some(object)
     }
 
     /// Identity of the region a caret sits in, for "are these two positions in
@@ -1519,6 +1498,22 @@ impl App {
     fn line_cell_count(&mut self, page: usize, line: usize) -> usize {
         self.ensure_content(page);
         self.content(page).get(line).map_or(0, |l| l.cells.len())
+    }
+
+    /// First non-empty line on `page`, or `0` when the page has none (callers
+    /// that cross via [`Self::next_content_page`] already guarantee content).
+    fn first_nonempty_line(&mut self, page: usize) -> usize {
+        (0..self.page_line_count(page))
+            .find(|&l| self.line_cell_count(page, l) > 0)
+            .unwrap_or(0)
+    }
+
+    /// Last non-empty line on `page`, or `0` when the page has none.
+    fn last_nonempty_line(&mut self, page: usize) -> usize {
+        (0..self.page_line_count(page))
+            .rev()
+            .find(|&l| self.line_cell_count(page, l) > 0)
+            .unwrap_or(0)
     }
 
     fn cell_rect(&mut self, page: usize, line: usize, cell: usize) -> Option<Rect> {
@@ -1594,9 +1589,7 @@ impl App {
             }
         }
         if let Some(next) = self.next_content_page(caret.page) {
-            let line = (0..self.page_line_count(next))
-                .find(|&l| self.line_cell_count(next, l) > 0)
-                .unwrap_or(0);
+            let line = self.first_nonempty_line(next);
             *caret = Caret {
                 page: next,
                 line,
@@ -1621,10 +1614,7 @@ impl App {
             }
         }
         if let Some(prev) = self.prev_content_page(caret.page) {
-            let line = (0..self.page_line_count(prev))
-                .rev()
-                .find(|&l| self.line_cell_count(prev, l) > 0)
-                .unwrap_or(0);
+            let line = self.last_nonempty_line(prev);
             caret.page = prev;
             caret.line = line;
             caret.cell = self.line_cell_count(prev, line).saturating_sub(1);
@@ -1643,9 +1633,7 @@ impl App {
             }
         }
         if let Some(next) = self.next_content_page(caret.page) {
-            let line = (0..self.page_line_count(next))
-                .find(|&l| self.line_cell_count(next, l) > 0)
-                .unwrap_or(0);
+            let line = self.first_nonempty_line(next);
             caret.page = next;
             caret.line = line;
             caret.cell = self.nearest_cell(next, line, goal_x);
@@ -1663,10 +1651,7 @@ impl App {
             }
         }
         if let Some(prev) = self.prev_content_page(caret.page) {
-            let line = (0..self.page_line_count(prev))
-                .rev()
-                .find(|&l| self.line_cell_count(prev, l) > 0)
-                .unwrap_or(0);
+            let line = self.last_nonempty_line(prev);
             caret.page = prev;
             caret.line = line;
             caret.cell = self.nearest_cell(prev, line, goal_x);
@@ -2104,7 +2089,7 @@ impl App {
     /// construct, so they are trimmed off before the token is recognised and
     /// they keep their own word stops afterwards. Note that `c` may sit outside
     /// the returned span — every caller checks.
-    fn abbreviation_at(&mut self, c: Caret) -> Option<(usize, usize)> {
+    fn abbreviation_at(&mut self, c: Caret) -> Option<(usize, usize, String)> {
         let (mut start, mut end) = self.token_span(c)?;
         self.ensure_content(c.page);
         let cells = self.content(c.page).get(c.line)?.cells.as_slice();
@@ -2126,13 +2111,13 @@ impl App {
             return None;
         }
         let token: String = cells[start..=end].iter().filter_map(char_of).collect();
-        is_abbreviation(&token).then_some((start, end))
+        is_abbreviation(&token).then_some((start, end, token))
     }
 
     /// Whether the stop at `c` closes an abbreviation without ending the
     /// sentence it sits in.
     fn is_abbreviation_stop(&mut self, c: Caret) -> bool {
-        let Some((start, end)) = self.abbreviation_at(c) else {
+        let Some((start, end, token)) = self.abbreviation_at(c) else {
             return false;
         };
         // Punctuation beside the construct is not part of it: the `)` closing
@@ -2144,7 +2129,13 @@ impl App {
         if c.cell < end {
             return true;
         }
-        // The closing stop does, but only when a new sentence follows it.
+        // Titles and initials precede proper nouns: a following capital must
+        // not re-enable a boundary (`Dr. Smith`, `U.S. Government`, `J. R.`).
+        if suppresses_capital_boundary(&token) {
+            return true;
+        }
+        // Ordinary abbreviations (`etc.`) still end the sentence when a new
+        // one follows.
         let mut following = String::new();
         let mut cur = c;
         for _ in 0..8 {
@@ -2316,11 +2307,8 @@ impl App {
             }
         }
         if let Some(next) = self.next_content_page(mark.page) {
-            let line = (0..self.page_line_count(next))
-                .find(|&l| self.line_cell_count(next, l) > 0)
-                .unwrap_or(0);
             mark.page = next;
-            mark.line = line;
+            mark.line = self.first_nonempty_line(next);
             return true;
         }
         false
@@ -2334,12 +2322,8 @@ impl App {
             }
         }
         if let Some(prev) = self.prev_content_page(mark.page) {
-            let line = (0..self.page_line_count(prev))
-                .rev()
-                .find(|&l| self.line_cell_count(prev, l) > 0)
-                .unwrap_or(0);
             mark.page = prev;
-            mark.line = line;
+            mark.line = self.last_nonempty_line(prev);
             return true;
         }
         false
@@ -2350,11 +2334,11 @@ impl App {
     /// already in the edge column toward `forward`.
     fn line_step_column(&mut self, mark: &mut LineMark, goal_y: f32, forward: bool) -> bool {
         self.ensure_content(mark.page);
-        let lines = self.content(mark.page);
-        let cols = column_ranges(lines);
+        let cols = self.page_columns(mark.page);
         if cols.len() < 2 {
             return false;
         }
+        let lines = self.content(mark.page);
         let Some(cur_box) = lines.get(mark.line).map(|l| l.bbox) else {
             return false;
         };
@@ -2585,21 +2569,25 @@ impl App {
             .is_some_and(|o| o.kind.is_one_sentence())
     }
 
-    /// Whether `at` sits inside a footnote block.
+    /// Whether `at` sits inside a region Sentence/Paragraph auto-search skips.
     ///
-    /// Consulted only by the Sentence/Paragraph *auto-search* loops below
-    /// (`step_next_sentence_start`, `step_prev_sentence_start`,
-    /// `first_sentence_start_on_page`, `paragraph_step_next`,
-    /// `paragraph_step_prev`), which treat a footnote as invisible — reading
-    /// through a page's body prose with `s`/`p` never lands on one, the same
-    /// as page furniture. It is never consulted by `sentence_run_start`/
+    /// See [`auto_skip_in_search`]. Never consulted by `sentence_run_start`/
     /// `sentence_run_end`, so a caret placed inside a footnote deliberately
-    /// (word, char or line motion — a footnote stays in `content.lines`,
-    /// unlike furniture) still expands and steps through its sentences
-    /// normally once there.
-    fn in_footnote(&mut self, at: Caret) -> bool {
+    /// still expands and steps through its sentences once there.
+    fn auto_skipped_at(&mut self, at: Caret, scope: Scope) -> bool {
         self.region_at(at.page, at.line)
-            .is_some_and(|o| o.kind == ObjectKind::Footnote)
+            .is_some_and(|o| auto_skip_in_search(o.kind, scope))
+    }
+
+    /// Whether sentence auto-search should skip `at` because it is a footnote
+    /// the search has not deliberately entered.
+    ///
+    /// A search that already started inside a footnote must keep walking that
+    /// footnote's own sentences; only a *different* footnote (or any footnote
+    /// when the search started in body prose) is invisible.
+    fn skip_footnote_in_search(&mut self, from: Caret, at: Caret) -> bool {
+        self.auto_skipped_at(at, Scope::Sentence)
+            && self.region_id_at(at) != self.region_id_at(from)
     }
 
     /// Whether `at` falls within the marker that opens a list item.
@@ -2669,7 +2657,7 @@ impl App {
             cell: 0,
         };
         loop {
-            if self.in_footnote(cur) {
+            if self.auto_skipped_at(cur, Scope::Sentence) {
                 cur = self.next_cell_same_page(cur)?;
                 continue;
             }
@@ -2700,7 +2688,7 @@ impl App {
             .find_map(|(i, l)| Some((i, l.cells.len().checked_sub(1)?)))?;
         let mut cur = Caret { page, line, cell };
         loop {
-            if self.in_footnote(cur)
+            if self.auto_skipped_at(cur, Scope::Sentence)
                 || matches!(self.word_class_at(cur), Some(WordClass::Whitespace) | None)
             {
                 cur = self.prev_cell_same_page(cur)?;
@@ -2716,7 +2704,7 @@ impl App {
         let end = self.sentence_run_end(caret);
         let mut cur = self.next_cell_same_page(end)?;
         loop {
-            if self.in_footnote(cur) {
+            if self.skip_footnote_in_search(caret, cur) {
                 cur = self.next_cell_same_page(cur)?;
                 continue;
             }
@@ -2735,10 +2723,11 @@ impl App {
         let start = self.sentence_run_start(caret);
         let mut cur = self.prev_cell_same_page(start)?;
         // Skip whitespace back into the previous sentence, then expand it.
-        // A footnote is skipped the same way -- invisible to this search,
-        // even though it is real prose once a caret sits inside it.
+        // A footnote the search has not entered is skipped the same way --
+        // invisible to this search -- while sentences inside the footnote the
+        // caret already sits in remain walkable.
         while matches!(self.word_class_at(cur), Some(WordClass::Whitespace) | None)
-            || self.in_footnote(cur)
+            || self.skip_footnote_in_search(caret, cur)
         {
             cur = self.prev_cell_same_page(cur)?;
         }
@@ -2794,25 +2783,46 @@ impl App {
     ///
     /// List items are the exception: a list is a single paragraph made of many
     /// items, so `p` skips the whole list while `s` walks it item by item.
+    /// Results are memoized on the session for the life of the page's content.
     fn page_paragraphs(&mut self, page: usize) -> Vec<(usize, usize)> {
         self.ensure_content(page);
-        let segs = paragraph_segments(self.content(page));
-        let splitting: Vec<ContentObject> = self
-            .objects(page)
-            .iter()
-            .filter(|o| o.kind.splits_paragraphs())
-            .copied()
-            .collect();
-        split_segments_at_objects(&segs, &splitting)
+        let Some(session) = self.session.as_mut() else {
+            return Vec::new();
+        };
+        session.content.paragraphs(page).to_vec()
+    }
+
+    /// Memoized column ranges for `page`.
+    fn page_columns(&mut self, page: usize) -> Vec<(f32, f32)> {
+        self.ensure_content(page);
+        let Some(session) = self.session.as_mut() else {
+            return Vec::new();
+        };
+        session.content.columns(page).to_vec()
     }
 
     /// The paragraph (segment of lines) that contains `line` on `page`.
+    ///
+    /// A caret on an empty line between paragraphs is not inside any segment;
+    /// resolve to the nearest one by line distance rather than teleporting to
+    /// the page's last paragraph.
     fn paragraph_mark_containing(&mut self, page: usize, line: usize) -> Option<ParagraphMark> {
         let segs = self.page_paragraphs(page);
         segs.iter()
             .find(|(s, e)| *s <= line && line <= *e)
-            .or_else(|| segs.last())
-            .map(|&(s, e)| ParagraphMark {
+            .copied()
+            .or_else(|| {
+                segs.iter()
+                    .min_by_key(|(s, e)| {
+                        if line < *s {
+                            *s - line
+                        } else {
+                            line.saturating_sub(*e)
+                        }
+                    })
+                    .copied()
+            })
+            .map(|(s, e)| ParagraphMark {
                 page,
                 start_line: s,
                 end_line: e,
@@ -2830,11 +2840,14 @@ impl App {
             // its own — invisible to this search the same way a footnote is
             // invisible to sentence auto-search.
             for &(s, e) in &segs[i + 1..] {
-                if self.in_footnote(Caret {
-                    page: mark.page,
-                    line: s,
-                    cell: 0,
-                }) {
+                if self.auto_skipped_at(
+                    Caret {
+                        page: mark.page,
+                        line: s,
+                        cell: 0,
+                    },
+                    Scope::Paragraph,
+                ) {
                     continue;
                 }
                 *mark = ParagraphMark {
@@ -2850,11 +2863,14 @@ impl App {
             self.ensure_content(next_page);
             let segs = self.page_paragraphs(next_page);
             for &(s, e) in &segs {
-                if self.in_footnote(Caret {
-                    page: next_page,
-                    line: s,
-                    cell: 0,
-                }) {
+                if self.auto_skipped_at(
+                    Caret {
+                        page: next_page,
+                        line: s,
+                        cell: 0,
+                    },
+                    Scope::Paragraph,
+                ) {
                     continue;
                 }
                 *mark = ParagraphMark {
@@ -2877,11 +2893,14 @@ impl App {
             .position(|&(s, e)| s <= mark.start_line && mark.start_line <= e)
         {
             for &(s, e) in segs[..i].iter().rev() {
-                if self.in_footnote(Caret {
-                    page: mark.page,
-                    line: s,
-                    cell: 0,
-                }) {
+                if self.auto_skipped_at(
+                    Caret {
+                        page: mark.page,
+                        line: s,
+                        cell: 0,
+                    },
+                    Scope::Paragraph,
+                ) {
                     continue;
                 }
                 *mark = ParagraphMark {
@@ -2897,11 +2916,14 @@ impl App {
             self.ensure_content(prev_page);
             let segs = self.page_paragraphs(prev_page);
             for &(s, e) in segs.iter().rev() {
-                if self.in_footnote(Caret {
-                    page: prev_page,
-                    line: s,
-                    cell: 0,
-                }) {
+                if self.auto_skipped_at(
+                    Caret {
+                        page: prev_page,
+                        line: s,
+                        cell: 0,
+                    },
+                    Scope::Paragraph,
+                ) {
                     continue;
                 }
                 *mark = ParagraphMark {
@@ -3300,7 +3322,7 @@ impl App {
         for (page, _) in session.view.visible_pages() {
             // Content is loaded lazily; a page we have not visited yet simply
             // has nothing to draw.
-            let Some(content) = session.content.get(&page) else {
+            let Some(content) = session.content.get(page) else {
                 continue;
             };
             for rect in page_span_rects(content, page, start, end) {
@@ -3332,7 +3354,7 @@ impl App {
             let Some(session) = self.session.as_ref() else {
                 break;
             };
-            let Some(content) = session.content.get(&page) else {
+            let Some(content) = session.content.get(page) else {
                 continue;
             };
             let rects = page_span_rects(content, page, start, end);
@@ -3379,7 +3401,7 @@ impl App {
             let Some(session) = self.session.as_ref() else {
                 break;
             };
-            let Some(content) = session.content.get(&page) else {
+            let Some(content) = session.content.get(page) else {
                 continue;
             };
             for (line_idx, line) in content.lines.iter().enumerate() {
@@ -3495,37 +3517,7 @@ impl App {
 
     /// Move the focus by `count` units of the active scope.
     fn focus_move(&mut self, dir: Dir, count: Option<u32>) -> Effects {
-        if self.session.is_none() {
-            return Effects::default();
-        }
-        // Nothing focused yet (e.g. entered on an empty document): try again.
-        let Some(mut at) = self.focus else {
-            return self.enter_focus(self.focus_scope);
-        };
-        let steps = count.unwrap_or(1).max(1);
-        let goal_x = self.focus_goal_x;
-        let goal_y = self.focus_goal_y;
-        let scope = self.focus_scope;
-        for _ in 0..steps {
-            if !self.step_scope_atomic(&mut at, scope, dir, goal_x, goal_y) {
-                break; // reached a document edge
-            }
-        }
-        self.focus = Some(at);
-        // Horizontal motion redefines the column vertical motion aims for --
-        // except at line/sentence/paragraph, where the axes are swapped: there
-        // `h`/`l` jump columns and `j`/`k` set the row those jumps aim at.
-        if matches!(scope, Scope::Line | Scope::Sentence | Scope::Paragraph) {
-            if matches!(dir, Dir::Up | Dir::Down) {
-                self.update_focus_goal_y(at);
-            }
-        } else if matches!(dir, Dir::Left | Dir::Right) {
-            self.update_focus_goal_x(at);
-        }
-        self.refresh_focus_span();
-        self.ensure_focus_visible();
-        self.save_position();
-        Effects::redraw()
+        self.apply_motion(MotionTarget::Focus, self.focus_scope, dir, count)
     }
 
     /// `w`/`b`/`e`/`s`/`p` move by their own named unit in *every* scope: a
@@ -3539,11 +3531,34 @@ impl App {
     /// *is* column 0, so the goal-column update below still does the right
     /// thing without a line-shaped exception.
     fn focus_scope_motion(&mut self, scope: Scope, dir: Dir, count: Option<u32>) -> Effects {
-        if self.session.is_none() {
-            return Effects::default();
-        }
-        let Some(mut at) = self.focus else {
-            return self.enter_focus(self.focus_scope);
+        self.apply_motion(MotionTarget::Focus, scope, dir, count)
+    }
+
+    /// Shared focus/visual motion: step the caret (or visual head), refresh
+    /// goals/spans, and keep the moving end visible.
+    fn apply_motion(
+        &mut self,
+        target: MotionTarget,
+        scope: Scope,
+        dir: Dir,
+        count: Option<u32>,
+    ) -> Effects {
+        let mut at = match target {
+            MotionTarget::Focus => {
+                if self.session.is_none() {
+                    return Effects::default();
+                }
+                match self.focus {
+                    Some(at) => at,
+                    None => return self.enter_focus(self.focus_scope),
+                }
+            }
+            MotionTarget::Visual => {
+                let (Some(_), Some(head)) = (self.visual, self.focus) else {
+                    return Effects::default();
+                };
+                head
+            }
         };
         let steps = count.unwrap_or(1).max(1);
         let goal_x = self.focus_goal_x;
@@ -3554,10 +3569,27 @@ impl App {
             }
         }
         self.focus = Some(at);
-        // Landing at a new unit's start redefines the column `j`/`k` aim at.
-        self.update_focus_goal_x(at);
-        self.refresh_focus_span();
-        self.ensure_focus_visible();
+        // Horizontal motion redefines the column vertical motion aims for --
+        // except at line/sentence/paragraph, where the axes are swapped: there
+        // `h`/`l` jump columns and `j`/`k` set the row those jumps aim at.
+        // Named motions follow the same axis swap as `hjkl`.
+        if matches!(scope, Scope::Line | Scope::Sentence | Scope::Paragraph) {
+            if matches!(dir, Dir::Up | Dir::Down) {
+                self.update_focus_goal_y(at);
+            }
+        } else if matches!(dir, Dir::Left | Dir::Right) {
+            self.update_focus_goal_x(at);
+        }
+        match target {
+            MotionTarget::Focus => {
+                self.refresh_focus_span();
+                self.ensure_focus_visible();
+            }
+            MotionTarget::Visual => {
+                self.refresh_visual_span();
+                self.ensure_visual_head_visible();
+            }
+        }
         self.save_position();
         Effects::redraw()
     }
@@ -3833,56 +3865,14 @@ impl App {
     }
 
     fn visual_move(&mut self, dir: Dir, count: Option<u32>) -> Effects {
-        let (Some(_), Some(mut head)) = (self.visual, self.focus) else {
-            return Effects::default();
-        };
-        let steps = count.unwrap_or(1).max(1);
-        let goal_x = self.focus_goal_x;
-        let goal_y = self.focus_goal_y;
-        let scope = self.focus_scope;
-        for _ in 0..steps {
-            if !self.step_scope_atomic(&mut head, scope, dir, goal_x, goal_y) {
-                break;
-            }
-        }
-        self.focus = Some(head);
-        // Horizontal motion redefines the column vertical motion aims for --
-        // except at line/sentence/paragraph, where the axes are swapped: there
-        // `h`/`l` jump columns and `j`/`k` set the row those jumps aim at.
-        if matches!(scope, Scope::Line | Scope::Sentence | Scope::Paragraph) {
-            if matches!(dir, Dir::Up | Dir::Down) {
-                self.update_focus_goal_y(head);
-            }
-        } else if matches!(dir, Dir::Left | Dir::Right) {
-            self.update_focus_goal_x(head);
-        }
-        self.refresh_visual_span();
-        self.ensure_visual_head_visible();
-        self.save_position();
-        Effects::redraw()
+        self.apply_motion(MotionTarget::Visual, self.focus_scope, dir, count)
     }
 
     /// `w`/`b`/`e`/`s`/`p` move the head by their own named unit in *every*
     /// scope: see [`Self::focus_scope_motion`], which this mirrors for the
     /// selection's moving end.
     fn visual_scope_motion(&mut self, scope: Scope, dir: Dir, count: Option<u32>) -> Effects {
-        let (Some(_), Some(mut head)) = (self.visual, self.focus) else {
-            return Effects::default();
-        };
-        let steps = count.unwrap_or(1).max(1);
-        let goal_x = self.focus_goal_x;
-        let goal_y = self.focus_goal_y;
-        for _ in 0..steps {
-            if !self.step_scope_atomic(&mut head, scope, dir, goal_x, goal_y) {
-                break;
-            }
-        }
-        self.focus = Some(head);
-        self.update_focus_goal_x(head);
-        self.refresh_visual_span();
-        self.ensure_visual_head_visible();
-        self.save_position();
-        Effects::redraw()
+        self.apply_motion(MotionTarget::Visual, scope, dir, count)
     }
 
     /// Scroll so the moving end stays on screen. Only the head is followed —
@@ -4857,7 +4847,7 @@ mod tests {
             };
             self.session
                 .as_ref()
-                .and_then(|s| s.content.get(&c.page))
+                .and_then(|s| s.content.get(c.page))
                 .and_then(|page| page.lines.get(c.line))
                 .and_then(|line| line.cells.get(c.cell))
                 .is_some()
@@ -4866,7 +4856,7 @@ mod tests {
         fn content_extraction_failed(&self, page: usize) -> bool {
             self.session
                 .as_ref()
-                .is_some_and(|s| s.content_extraction_failed.contains(&page))
+                .is_some_and(|s| s.content.extraction_failed(page))
         }
 
         fn line_mark(&self) -> Option<LineMark> {
@@ -6054,6 +6044,59 @@ mod tests {
         assert_eq!(span_text(&mut app), "Globs, magic, etc.");
         press(&mut app, "s");
         assert_eq!(span_text(&mut app), "The next sentence here.");
+    }
+
+    #[test]
+    fn a_title_abbreviation_before_a_proper_noun_keeps_the_sentence() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_line(dir.path(), "Ask Dr. Smith about it. Then stop.");
+        press(&mut app, "fs");
+        assert_eq!(span_text(&mut app), "Ask Dr. Smith about it.");
+        press(&mut app, "s");
+        assert_eq!(span_text(&mut app), "Then stop.");
+    }
+
+    #[test]
+    fn dotted_country_initials_before_a_proper_noun_keep_the_sentence() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_line(dir.path(), "The U.S. Government agreed. Then stop.");
+        press(&mut app, "fs");
+        assert_eq!(span_text(&mut app), "The U.S. Government agreed.");
+    }
+
+    #[test]
+    fn single_initials_before_a_proper_noun_keep_the_sentence() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_line(dir.path(), "Meet J. R. Smith today. Then stop.");
+        press(&mut app, "fs");
+        assert_eq!(span_text(&mut app), "Meet J. R. Smith today.");
+        press(&mut app, "s");
+        assert_eq!(span_text(&mut app), "Then stop.");
+    }
+
+    #[test]
+    fn a_real_sentence_boundary_before_a_capital_still_splits() {
+        // Negative: an ordinary full stop before a capital remains a boundary.
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_line(dir.path(), "It finished. Smith arrived later.");
+        press(&mut app, "fs");
+        assert_eq!(span_text(&mut app), "It finished.");
+        press(&mut app, "s");
+        assert_eq!(span_text(&mut app), "Smith arrived later.");
+    }
+
+    #[test]
+    fn cjk_sentence_terminators_split_prose() {
+        // Full CJK word segmentation is out of scope; the terminators alone
+        // must still end a sentence.
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_line(dir.path(), "第一句。第二句！第三句？");
+        press(&mut app, "fs");
+        assert_eq!(span_text(&mut app), "第一句。");
+        press(&mut app, "s");
+        assert_eq!(span_text(&mut app), "第二句！");
+        press(&mut app, "s");
+        assert_eq!(span_text(&mut app), "第三句？");
     }
 
     #[test]
@@ -7621,14 +7664,30 @@ mod tests {
         let path = write_pdf_bytes(dir.path(), "image.pdf", pdf_with_image());
         app.open_document(&path).unwrap();
 
+        // Char entry forces content extraction; the image is the first cell.
+        press(&mut app, "fc");
+        let image_line = app.caret().unwrap().line;
+        let objects = app.session.as_ref().unwrap().content.objects(0);
+        assert!(
+            objects
+                .iter()
+                .any(|o| o.kind == syodep_pdf::ObjectKind::Image),
+            "objects: {objects:?}"
+        );
+        assert!(
+            objects
+                .iter()
+                .any(|o| o.kind == syodep_pdf::ObjectKind::Caption),
+            "objects: {objects:?}"
+        );
         press(&mut app, "fp");
         let (start, end) = app.focus_span().unwrap();
-        let image_line = app.session.as_ref().unwrap().content[&0]
-            .objects
-            .iter()
-            .find(|o| o.kind == syodep_pdf::ObjectKind::Image)
-            .unwrap()
-            .start_line;
+        assert_eq!((start.line, end.line), (image_line, image_line));
+        // Captions are auto-skipped by `p`, so reach the caption via word
+        // motion then reinterpret at paragraph scope.
+        press(&mut app, "w");
+        press(&mut app, "fp");
+        let (start, end) = app.focus_span().unwrap();
         assert!(
             !(start.line..=end.line).contains(&image_line),
             "the caption paragraph swallowed the image"
@@ -7643,14 +7702,34 @@ mod tests {
         let path = write_pdf_bytes(dir.path(), "image.pdf", pdf_with_image());
         app.open_document(&path).unwrap();
 
+        // The fixture draws the image first, then its caption underneath.
         press(&mut app, "fc");
-        press(&mut app, "w");
         let image = app.caret().unwrap();
-        let cell =
-            &app.session.as_ref().unwrap().content[&image.page].lines[image.line].cells[image.cell];
+        let cell = &app
+            .session
+            .as_ref()
+            .unwrap()
+            .content
+            .get(image.page)
+            .unwrap()
+            .lines[image.line]
+            .cells[image.cell];
         assert_eq!(cell.kind, CellKind::Image);
+        press(&mut app, "w");
+        let after = app.caret().unwrap();
+        assert_ne!(after.line, image.line, "word motion must leave the image");
         press(&mut app, "b");
-        assert_caret(&app, 0, 0, 0);
+        assert_eq!(app.caret().unwrap().line, image.line);
+        let cell = &app
+            .session
+            .as_ref()
+            .unwrap()
+            .content
+            .get(image.page)
+            .unwrap()
+            .lines[image.line]
+            .cells[image.cell];
+        assert_eq!(cell.kind, CellKind::Image);
     }
 
     #[test]
@@ -7781,6 +7860,26 @@ mod tests {
         assert_eq!(app.sentence_mark().unwrap(), right);
         press(&mut app, "h");
         assert_eq!(app.sentence_mark().unwrap(), start);
+    }
+
+    #[test]
+    fn named_sentence_motion_updates_the_goal_row_for_column_jumps() {
+        // Regression: `s`/`p` used to update only goal_x, so a later `h`/`l`
+        // aimed at the stale row from before the named motion.
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_two_column_page(dir.path());
+        press(&mut app, "fs");
+        press(&mut app, "s"); // second left-column sentence
+        let mid = app.sentence_mark().unwrap();
+        press(&mut app, "l");
+        let right = app.sentence_mark().unwrap();
+        assert_ne!(
+            (right.start_line, right.start_cell),
+            (mid.start_line, mid.start_cell)
+        );
+        // Returning must land on mid, not the original top row.
+        press(&mut app, "h");
+        assert_eq!(app.sentence_mark().unwrap(), mid);
     }
 
     #[test]
@@ -8128,14 +8227,18 @@ mod tests {
 
     // ---- Footnotes ----------------------------------------------------
 
-    /// A page of prose, a one-line footnote, then more prose. `s`/`p`
+    /// A page of prose, a multi-sentence footnote, then more prose. `s`/`p`
     /// reading through the body must skip the footnote entirely; word and
-    /// char scope can still step into it deliberately.
+    /// char scope can still step into it deliberately, and sentence scope
+    /// once inside walks its sentences normally.
     fn footnote_page_content() -> PageContent {
         let lines = vec![
             text_line(100.0, "Alpha beta gamma."),
             text_line(112.0, "Delta epsilon zeta."),
-            text_line(900.0, "1 A footnote sentence here."),
+            text_line(
+                900.0,
+                "1 First footnote sentence. Second footnote sentence.",
+            ),
             text_line(940.0, "Eta theta iota."),
         ];
         let objects = vec![ContentObject {
@@ -8143,7 +8246,7 @@ mod tests {
             bbox: Rect {
                 x0: 96.0,
                 y0: 892.0,
-                x1: 260.0,
+                x1: 420.0,
                 y1: 950.0,
             },
             start_line: 2,
@@ -8191,6 +8294,68 @@ mod tests {
     }
 
     #[test]
+    fn paragraph_scope_on_an_empty_line_picks_the_nearest_segment() {
+        // Regression: the old fallback always took the page's last segment,
+        // teleporting a caret between paragraphs 1 and 2 down to paragraph 3.
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["placeholder"]);
+        app.set_page_content(
+            0,
+            PageContent {
+                lines: vec![
+                    text_line(100.0, "First paragraph line one."),
+                    text_line(112.0, "First paragraph line two."),
+                    text_line(124.0, ""),
+                    text_line(200.0, "Second paragraph alone."),
+                    text_line(212.0, ""),
+                    text_line(400.0, "Third far-away paragraph."),
+                ],
+                ..Default::default()
+            },
+        );
+        app.set_focus_for_test(
+            Caret {
+                page: 0,
+                line: 2,
+                cell: 0,
+            },
+            Scope::Paragraph,
+        );
+        let mark = app.paragraph_mark().unwrap();
+        assert!(
+            mark.end_line <= 3,
+            "nearest segment must be the first or second paragraph, not the last: {mark:?}"
+        );
+        assert_ne!(
+            (mark.start_line, mark.end_line),
+            (5, 5),
+            "must not teleport to the page's last paragraph"
+        );
+    }
+
+    #[test]
+    fn set_page_content_drops_memoized_derived_structure() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_text_pages(dir.path(), &["Alpha. Beta."]);
+        press(&mut app, "fp");
+        assert!(
+            app.session.as_ref().unwrap().content.has_derived(0),
+            "paragraph motion should memoize derived data"
+        );
+        app.set_page_content(
+            0,
+            PageContent {
+                lines: vec![text_line(100.0, "Replacement content only.")],
+                ..Default::default()
+            },
+        );
+        assert!(
+            !app.session.as_ref().unwrap().content.has_derived(0),
+            "injected content must invalidate the derived cache"
+        );
+    }
+
+    #[test]
     fn word_motion_can_still_step_into_a_footnote() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_footnote_page(dir.path());
@@ -8212,12 +8377,16 @@ mod tests {
         press(&mut app, "jj");
         assert_caret(&app, 0, 2, 0);
         // Switching to sentence scope, still on the footnote's own line, must
-        // expand it as an ordinary sentence: deliberate entry is unaffected
-        // by the auto-search skip that keeps `s`/`p` from landing here.
+        // expand only the first of its two sentences: deliberate entry is
+        // unaffected by the auto-search skip that keeps `s`/`p` from landing
+        // here, and the footnote is not collapsed to one atomic sentence unit.
         press(&mut app, "fs");
-        let (start, end) = app.focus_span().unwrap();
-        assert_eq!((start.line, end.line), (2, 2));
-        assert_eq!(start.cell, 0);
+        assert_eq!(span_text(&mut app), "1 First footnote sentence.");
+        press(&mut app, "s");
+        assert_eq!(span_text(&mut app), "Second footnote sentence.");
+        // A further `s` leaves the footnote and lands on the body below.
+        press(&mut app, "s");
+        assert_caret(&app, 0, 3, 0);
     }
 
     /// Regression: the backward cross-page branch of sentence motion expanded

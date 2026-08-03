@@ -128,9 +128,11 @@ pub struct ContentLine {
 pub enum ObjectKind {
     Image,
     Table,
+    Caption,
     Heading,
     ListItem,
     Equation,
+    Code,
     Footnote,
 }
 
@@ -162,7 +164,12 @@ impl ObjectKind {
     pub fn is_block(self) -> bool {
         matches!(
             self,
-            Self::Image | Self::Table | Self::Equation | Self::Footnote
+            Self::Image
+                | Self::Table
+                | Self::Caption
+                | Self::Equation
+                | Self::Code
+                | Self::Footnote
         )
     }
 
@@ -171,12 +178,13 @@ impl ObjectKind {
     ///
     /// A heading needs it because `3.1. Methods` is not three sentences, and an
     /// equation because `f(x) = 0.` is not two. Prose kinds do not: a list item
-    /// is walked sentence by sentence on purpose, and so is a footnote once a
-    /// reader has deliberately stepped into one — unlike `is_block`, this
-    /// predicate is about what happens *inside* the region, not whether normal
-    /// reading order stops there at all (see the sentence/paragraph
-    /// auto-search logic in `syodep-core`, which is what actually keeps a
-    /// footnote out of ordinary reading).
+    /// is walked sentence by sentence on purpose, and so are a footnote and a
+    /// caption (captions are often multi-sentence) once a reader has
+    /// deliberately stepped into one — unlike `is_block`, this predicate is
+    /// about what happens *inside* the region, not whether normal reading
+    /// order stops there at all (see the sentence/paragraph auto-search logic
+    /// in `syodep-core`, which is what actually keeps a footnote or caption
+    /// out of ordinary reading).
     pub fn is_one_sentence(self) -> bool {
         matches!(self, Self::Heading | Self::Equation)
     }
@@ -285,6 +293,9 @@ pub struct ContentOptions {
     /// line scope up, drawn as one box, while word and char scope still walk
     /// its cells. Costs a second structured-text pass per page.
     pub detect_tables: bool,
+    /// Detect figure/table captions near images and tables. Free: geometry and
+    /// type sizes come from the extraction pass.
+    pub detect_captions: bool,
     /// Detect headings so each is one sentence and one paragraph. Free: the
     /// type sizes it keys on come from the pass that extracts the text.
     pub detect_headings: bool,
@@ -293,6 +304,9 @@ pub struct ContentOptions {
     /// walkable by word and character. Free, like headings: the fonts and
     /// characters it keys on come from the extraction pass.
     pub detect_equations: bool,
+    /// Detect monospace code blocks so each is one stop from line scope up.
+    /// Free: font names come from the extraction pass.
+    pub detect_code: bool,
     /// Drop running heads, folios and text that does not run in the page's
     /// reading direction, so the caret never traverses them.
     pub skip_page_furniture: bool,
@@ -310,8 +324,10 @@ impl Default for ContentOptions {
     fn default() -> Self {
         Self {
             detect_tables: true,
+            detect_captions: true,
             detect_headings: true,
             detect_equations: true,
+            detect_code: true,
             skip_page_furniture: true,
             detect_footnotes: true,
         }
@@ -330,6 +346,8 @@ struct LineStyle {
     bold: bool,
     /// Share of the line's inked characters set in a math font, 0.0 to 1.0.
     math: f32,
+    /// Share of the line's inked characters set in a monospace font, 0.0 to 1.0.
+    mono: f32,
     /// Angle of the line's baseline in degrees, or `None` when its characters
     /// disagree or carry no usable direction.
     angle: Option<f32>,
@@ -638,6 +656,7 @@ impl Document {
                     size: 0.0,
                     bold: false,
                     math: 0.0,
+                    mono: 0.0,
                     // An image has no direction and no text, so it can never be
                     // furniture: a logo inside a running header survives as an
                     // image stop. Deliberately conservative.
@@ -651,10 +670,10 @@ impl Document {
                 let mut sizes: Vec<(i32, usize)> = Vec::new();
                 let mut dirs: Vec<(f32, f32)> = Vec::new();
                 let mut origins: Vec<f32> = Vec::new();
-                let (mut bold, mut inked, mut math) = (0usize, 0usize, 0usize);
+                let (mut bold, mut inked, mut math, mut mono) = (0usize, 0usize, 0usize, 0usize);
                 // Glyphs come in font runs, so remembering the last verdict
                 // turns the name test into one string compare per character.
-                let mut last_font: Option<(String, bool)> = None;
+                let mut last_font: Option<(String, bool, bool)> = None;
                 for ch in line.chars() {
                     let Some(c) = ch.char() else { continue };
                     let quad = ch.quad();
@@ -693,16 +712,20 @@ impl Document {
                     }
                     if let Some(font) = ch.font() {
                         let name = font.name();
-                        let is_math = match &last_font {
-                            Some((seen, verdict)) if seen == name => *verdict,
+                        let (is_math, is_mono) = match &last_font {
+                            Some((seen, math_v, mono_v)) if seen == name => (*math_v, *mono_v),
                             _ => {
-                                let verdict = is_math_font(name);
-                                last_font = Some((name.to_owned(), verdict));
-                                verdict
+                                let math_v = is_math_font(name);
+                                let mono_v = is_mono_font(name);
+                                last_font = Some((name.to_owned(), math_v, mono_v));
+                                (math_v, mono_v)
                             }
                         };
                         if is_math {
                             math += 1;
+                        }
+                        if is_mono {
+                            mono += 1;
                         }
                     }
                 }
@@ -720,14 +743,18 @@ impl Document {
                     .copied()
                     .unwrap_or((bbox.y0 + bbox.y1) / 2.0);
                 lines.push(ContentLine { bbox, cells });
+                let share = |n: usize| {
+                    if inked > 0 {
+                        n as f32 / inked as f32
+                    } else {
+                        0.0
+                    }
+                };
                 styles.push(LineStyle {
                     size,
                     bold: inked > 0 && bold * 5 >= inked * 4,
-                    math: if inked > 0 {
-                        math as f32 / inked as f32
-                    } else {
-                        0.0
-                    },
+                    math: share(math),
+                    mono: share(mono),
                     angle: line_angle(&dirs),
                     baseline,
                 });
@@ -785,8 +812,18 @@ impl Document {
         } else {
             Vec::new()
         };
+        let captions = if opts.detect_captions {
+            caption_ranges(&lines, &styles, &image_lines, &tables)
+        } else {
+            Vec::new()
+        };
         let equations = if opts.detect_equations {
             equation_ranges(&lines, &styles)
+        } else {
+            Vec::new()
+        };
+        let code = if opts.detect_code {
+            code_ranges(&lines, &styles)
         } else {
             Vec::new()
         };
@@ -800,8 +837,10 @@ impl Document {
             &lines,
             &image_lines,
             &tables,
+            &captions,
             &headings,
             &equations,
+            &code,
             &footnotes,
             &furniture,
         );
@@ -1298,10 +1337,18 @@ fn furniture_mask(
     {
         return mask;
     }
-    // The repetition rule may never take a page's last line. A margin is only
-    // a margin if there is something it is in the margin *of*.
+    // The repetition rule may never take a page's last remaining inked line.
+    // A margin is only a margin if there is something it is in the margin *of*
+    // — bottom folios still mask when body lines sit above them.
     for (i, edge, text) in &repeated {
         if !too_many_for(*edge, text) {
+            let others_remain = lines
+                .iter()
+                .enumerate()
+                .any(|(j, l)| j != *i && !l.cells.is_empty() && !mask[j]);
+            if !others_remain {
+                continue;
+            }
             mask[*i] = true;
         }
     }
@@ -1820,6 +1867,15 @@ fn heading_ranges(lines: &[ContentLine], styles: &[LineStyle]) -> Vec<(usize, us
         if body <= 0.0 {
             return false;
         }
+        // A lone oversized glyph is a drop cap, not a heading: treating it as
+        // one severs the chapter's first letter from its own sentence.
+        let alphanum = line_text(&lines[i])
+            .chars()
+            .filter(|c| c.is_alphanumeric())
+            .count();
+        if alphanum <= 1 {
+            return false;
+        }
         let style = styles[i];
         let width = lines[i].bbox.x1 - lines[i].bbox.x0;
         style.size >= body * HEADING_SIZE_FACTOR
@@ -2026,6 +2082,30 @@ const MATH_FONT_MARKS: &[&str] = &[
 fn is_math_font(name: &str) -> bool {
     let lower = name.to_lowercase();
     MATH_FONT_MARKS.iter().any(|mark| lower.contains(mark))
+}
+
+/// Fonts whose names say "this is monospace". Matched as lower-case
+/// substrings so subset prefixes (`ABCDEF+Courier`) and family variants
+/// (`Courier-Bold`, `DejaVuSansMono`) all fire.
+const MONO_FONT_MARKS: &[&str] = &[
+    "courier",
+    "mono",
+    "consolas",
+    "menlo",
+    "monaco",
+    "inconsolata",
+    "firacode",
+    "sourcecode",
+    "anonymouspro",
+    "liberationmono",
+    "nimbusmono",
+    "notomono",
+];
+
+/// Whether a font name reads as a monospace / code font.
+fn is_mono_font(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    MONO_FONT_MARKS.iter().any(|mark| lower.contains(mark))
 }
 
 /// Whether a line reads as mathematics for the purpose of keeping it out of
@@ -2310,6 +2390,139 @@ fn equation_ranges(lines: &[ContentLine], styles: &[LineStyle]) -> Vec<(usize, u
         let lines_covered = end - start + 1;
         lines_covered <= EQUATION_MAX_LINES
     });
+    ranges
+}
+
+/// How close (in points) a caption line's bbox may sit to an image or table.
+const CAPTION_PROXIMITY_PT: f32 = 24.0;
+
+/// A set-apart caption must be narrower than this share of the widest body line.
+const CAPTION_MAX_WIDTH_SHARE: f32 = 0.85;
+
+/// Share of a line's inked glyphs that must be monospace for a code line.
+const CODE_MONO_SHARE: f32 = 0.6;
+
+/// Vertical gap between two bboxes, or 0 when they overlap in y.
+fn vertical_gap(a: Rect, b: Rect) -> f32 {
+    if a.y1 < b.y0 {
+        b.y0 - a.y1
+    } else if b.y1 < a.y0 {
+        a.y0 - b.y1
+    } else {
+        0.0
+    }
+}
+
+/// Whether `text` opens like a figure/table caption: `Fig. 1`, `Figure 2:`,
+/// `Table 3.`, `Tab. 4`.
+fn has_caption_prefix(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    let lower = trimmed.to_ascii_lowercase();
+    for prefix in ["fig.", "figure", "table", "tab."] {
+        let Some(rest) = lower.strip_prefix(prefix) else {
+            continue;
+        };
+        let rest = rest.trim_start_matches(|c: char| c == '.' || c.is_whitespace());
+        if rest.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Find figure/table captions as inclusive `(start_line, end_line)` ranges.
+///
+/// A line is a caption when it sits within [`CAPTION_PROXIMITY_PT`] of an image
+/// or table bbox (above or below) **and** either opens with a caption prefix
+/// (`Fig.` / `Figure` / `Table` / `Tab.` + number) or is set apart from the
+/// body (narrower and smaller). Pure so the thresholds stay unit-testable.
+fn caption_ranges(
+    lines: &[ContentLine],
+    styles: &[LineStyle],
+    image_line_indices: &[usize],
+    table_bboxes: &[Rect],
+) -> Vec<(usize, usize)> {
+    let inked: Vec<usize> = (0..lines.len())
+        .filter(|&i| {
+            !lines[i].cells.is_empty()
+                && styles.get(i).is_some_and(|s| s.size > 0.0)
+                && !lines[i]
+                    .cells
+                    .iter()
+                    .any(|c| matches!(c.kind, CellKind::Image))
+        })
+        .collect();
+    if inked.is_empty() {
+        return Vec::new();
+    }
+
+    let body = dominant_body_size(lines, styles, &inked);
+    let widest = inked
+        .iter()
+        .map(|&i| lines[i].bbox.x1 - lines[i].bbox.x0)
+        .fold(0.0_f32, f32::max);
+
+    let mut anchors: Vec<Rect> = table_bboxes.to_vec();
+    for &i in image_line_indices {
+        if i < lines.len() {
+            anchors.push(lines[i].bbox);
+        }
+    }
+    if anchors.is_empty() {
+        return Vec::new();
+    }
+
+    let near_anchor = |bbox: Rect| {
+        anchors
+            .iter()
+            .any(|&a| vertical_gap(bbox, a) <= CAPTION_PROXIMITY_PT)
+    };
+    let set_apart = |i: usize| {
+        if body <= 0.0 || widest <= 0.0 {
+            return false;
+        }
+        let width = lines[i].bbox.x1 - lines[i].bbox.x0;
+        styles[i].size < body * 0.95 && width < CAPTION_MAX_WIDTH_SHARE * widest
+    };
+
+    let mut ranges = Vec::new();
+    for &i in &inked {
+        let text = line_text(&lines[i]);
+        if !near_anchor(lines[i].bbox) {
+            continue;
+        }
+        if !(has_caption_prefix(&text) || set_apart(i)) {
+            continue;
+        }
+        ranges.push((i, i));
+    }
+    ranges
+}
+
+/// Find monospace code blocks as inclusive `(start_line, end_line)` ranges.
+///
+/// Consecutive lines with a high monospace-font share (≥ [`CODE_MONO_SHARE`])
+/// that do not already read as mathematics. Pure, like the other detectors.
+fn code_ranges(lines: &[ContentLine], styles: &[LineStyle]) -> Vec<(usize, usize)> {
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        let Some(style) = styles.get(i) else {
+            continue;
+        };
+        if style.size <= 0.0 || style.mono < CODE_MONO_SHARE {
+            continue;
+        }
+        if line_is_mathish(line, style) {
+            continue;
+        }
+        if line.cells.iter().any(|c| matches!(c.kind, CellKind::Image)) {
+            continue;
+        }
+        match ranges.last_mut() {
+            Some(last) if last.1 + 1 == i => last.1 = i,
+            _ => ranges.push((i, i)),
+        }
+    }
     ranges
 }
 
@@ -2629,12 +2842,19 @@ fn table_bbox(lines: &[ContentLine], table: Rect, first: usize, last: usize) -> 
 /// Pure so that every heuristic below is unit-testable without MuPDF — which
 /// matters, because MuPDF's table detection is a heuristic itself and these
 /// guards are what keep its mistakes from reaching the caret.
+///
+/// Claim order (coarsest first): tables → images → captions → headings →
+/// equations → code → footnotes → list items. Later kinds yield to earlier ones
+/// on overlap.
+#[allow(clippy::too_many_arguments)] // claim-chain inputs stay explicit and ordered
 fn content_objects(
     lines: &[ContentLine],
     image_lines: &[usize],
     tables: &[Rect],
+    captions: &[(usize, usize)],
     headings: &[(usize, usize)],
     equations: &[(usize, usize)],
+    code: &[(usize, usize)],
     footnotes: &[(usize, usize)],
     furniture: &[ContentLine],
 ) -> Vec<ContentObject> {
@@ -2705,6 +2925,29 @@ fn content_objects(
         });
     }
 
+    // Captions sit against an image or table; they yield to those, and headings
+    // yield to captions so a short "Figure 1." is not mistaken for a heading.
+    for &(start, end) in captions {
+        if end >= lines.len()
+            || kept
+                .iter()
+                .any(|o| start <= o.end_line && end >= o.start_line)
+        {
+            continue;
+        }
+        let bbox = lines[start..=end]
+            .iter()
+            .map(|l| l.bbox)
+            .reduce(|a, b| a.union(b))
+            .unwrap_or(lines[start].bbox);
+        kept.push(ContentObject {
+            kind: ObjectKind::Caption,
+            bbox,
+            start_line: start,
+            end_line: end,
+        });
+    }
+
     // A bold, short line inside a table is a column header, not a heading, so
     // headings yield to any object already claimed.
     for &(start, end) in headings {
@@ -2746,6 +2989,30 @@ fn content_objects(
             .unwrap_or(lines[start].bbox);
         kept.push(ContentObject {
             kind: ObjectKind::Equation,
+            bbox,
+            start_line: start,
+            end_line: end,
+        });
+    }
+
+    // Code blocks yield to equations (a formula set in a mono font is still
+    // math) and claim their lines before footnotes, which look for small type
+    // at the foot of the page.
+    for &(start, end) in code {
+        if end >= lines.len()
+            || kept
+                .iter()
+                .any(|o| start <= o.end_line && end >= o.start_line)
+        {
+            continue;
+        }
+        let bbox = lines[start..=end]
+            .iter()
+            .map(|l| l.bbox)
+            .reduce(|a, b| a.union(b))
+            .unwrap_or(lines[start].bbox);
+        kept.push(ContentObject {
+            kind: ObjectKind::Code,
             bbox,
             start_line: start,
             end_line: end,
@@ -3469,7 +3736,17 @@ mod tests {
     #[test]
     fn object_ranges_cover_the_lines_inside_a_table_box() {
         let lines = stacked_lines(10);
-        let objects = content_objects(&lines, &[], &[box_over(&lines, 3..=6)], &[], &[], &[], &[]);
+        let objects = content_objects(
+            &lines,
+            &[],
+            &[box_over(&lines, 3..=6)],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+        );
         assert_eq!(objects.len(), 1);
         assert_eq!(objects[0].kind, ObjectKind::Table);
         assert_eq!((objects[0].start_line, objects[0].end_line), (3, 6));
@@ -3486,7 +3763,7 @@ mod tests {
         // Line 7 is 10pt tall; reach just past its centre, which is what makes
         // centre containment hand it over.
         table.y1 = lines[7].bbox.y0 + 6.0;
-        let objects = content_objects(&lines, &[], &[table], &[], &[], &[], &[]);
+        let objects = content_objects(&lines, &[], &[table], &[], &[], &[], &[], &[], &[]);
         assert_eq!(objects.len(), 1, "objects: {objects:?}");
         assert_eq!((objects[0].start_line, objects[0].end_line), (3, 6));
         assert!(
@@ -3508,7 +3785,7 @@ mod tests {
         lines[7].bbox.y1 += shift;
         lines[7].cells[0].bbox = lines[7].bbox;
         let table = box_over(&lines, 3..=7);
-        let objects = content_objects(&lines, &[], &[table], &[], &[], &[], &[]);
+        let objects = content_objects(&lines, &[], &[table], &[], &[], &[], &[], &[], &[]);
         assert_eq!(objects.len(), 1, "objects: {objects:?}");
         assert_eq!((objects[0].start_line, objects[0].end_line), (3, 6));
         assert!(
@@ -3542,7 +3819,17 @@ mod tests {
                 }
             })
             .collect();
-        let objects = content_objects(&lines, &[], &[box_over(&lines, 0..=4)], &[], &[], &[], &[]);
+        let objects = content_objects(
+            &lines,
+            &[],
+            &[box_over(&lines, 0..=4)],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+        );
         // The page is only the table here, so the "claims everything" guard
         // would fire; give it a sixth line of prose well clear of the box.
         assert_eq!(objects, vec![], "sanity: the page-claiming guard fires");
@@ -3571,6 +3858,8 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
+            &[],
         );
         assert_eq!(objects.len(), 1, "objects: {objects:?}");
         assert_eq!((objects[0].start_line, objects[0].end_line), (0, 4));
@@ -3582,7 +3871,7 @@ mod tests {
         let mut table = box_over(&lines, 3..=6);
         // Reach back over line 2, just past its centre.
         table.y0 = lines[2].bbox.y1 - 6.0;
-        let objects = content_objects(&lines, &[], &[table], &[], &[], &[], &[]);
+        let objects = content_objects(&lines, &[], &[table], &[], &[], &[], &[], &[], &[]);
         assert_eq!(objects.len(), 1, "objects: {objects:?}");
         assert_eq!((objects[0].start_line, objects[0].end_line), (3, 6));
         assert!(
@@ -3599,14 +3888,24 @@ mod tests {
         let lines = stacked_lines(10);
         let mut table = box_over(&lines, 4..=5);
         table.y0 = lines[4].bbox.y0 + 7.0;
-        let objects = content_objects(&lines, &[], &[table], &[], &[], &[], &[]);
+        let objects = content_objects(&lines, &[], &[table], &[], &[], &[], &[], &[], &[]);
         assert_eq!(objects, vec![]);
     }
 
     #[test]
     fn object_ranges_reject_a_single_line_table() {
         let lines = stacked_lines(10);
-        let objects = content_objects(&lines, &[], &[box_over(&lines, 4..=4)], &[], &[], &[], &[]);
+        let objects = content_objects(
+            &lines,
+            &[],
+            &[box_over(&lines, 4..=4)],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+        );
         assert_eq!(objects, vec![], "a one-line table is just a line");
     }
 
@@ -3615,7 +3914,17 @@ mod tests {
         // MuPDF's whole-page fallback fires on ordinary prose; this guard is
         // the only thing standing between it and unnavigable pages.
         let lines = stacked_lines(10);
-        let objects = content_objects(&lines, &[], &[box_over(&lines, 0..=9)], &[], &[], &[], &[]);
+        let objects = content_objects(
+            &lines,
+            &[],
+            &[box_over(&lines, 0..=9)],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+        );
         assert_eq!(objects, vec![]);
     }
 
@@ -3631,7 +3940,7 @@ mod tests {
             x1: 210.0,
             y1: 172.0,
         };
-        let objects = content_objects(&lines, &[], &[table], &[], &[], &[], &[]);
+        let objects = content_objects(&lines, &[], &[table], &[], &[], &[], &[], &[], &[]);
         assert_eq!(objects, vec![], "a gapped table must degrade, not guess");
     }
 
@@ -3646,6 +3955,8 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
+            &[],
         );
         assert_eq!(objects.len(), 1);
         assert_eq!((objects[0].start_line, objects[0].end_line), (2, 8));
@@ -3654,7 +3965,7 @@ mod tests {
     #[test]
     fn object_ranges_make_each_image_its_own_object() {
         let lines = stacked_lines(6);
-        let objects = content_objects(&lines, &[1, 4], &[], &[], &[], &[], &[]);
+        let objects = content_objects(&lines, &[1, 4], &[], &[], &[], &[], &[], &[], &[]);
         assert_eq!(objects.len(), 2);
         assert!(objects.iter().all(|o| o.kind == ObjectKind::Image));
         assert_eq!((objects[0].start_line, objects[0].end_line), (1, 1));
@@ -3664,7 +3975,17 @@ mod tests {
     #[test]
     fn object_ranges_absorb_an_image_inside_a_table() {
         let lines = stacked_lines(10);
-        let objects = content_objects(&lines, &[5], &[box_over(&lines, 3..=6)], &[], &[], &[], &[]);
+        let objects = content_objects(
+            &lines,
+            &[5],
+            &[box_over(&lines, 3..=6)],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+        );
         assert_eq!(objects.len(), 1, "the table is the enclosing unit");
         assert_eq!(objects[0].kind, ObjectKind::Table);
     }
@@ -3676,7 +3997,9 @@ mod tests {
             &lines,
             &[0, 15],
             &[box_over(&lines, 8..=11), box_over(&lines, 3..=5)],
+            &[],
             &[(17, 18)],
+            &[],
             &[],
             &[],
             &[],
@@ -3732,6 +4055,7 @@ mod tests {
                 size: 10.0,
                 bold: false,
                 math: 0.0,
+                mono: 0.0,
                 angle: Some(0.0),
                 baseline: y + 8.0,
             });
@@ -3952,6 +4276,83 @@ mod tests {
     }
 
     #[test]
+    fn a_mono_font_is_recognised_by_its_name() {
+        for name in [
+            "Courier",
+            "Courier-Bold",
+            "ABCDEF+Menlo-Regular",
+            "Consolas",
+            "DejaVuSansMono",
+            "SourceCodePro-Regular",
+        ] {
+            assert!(is_mono_font(name), "{name}");
+        }
+        for name in ["Helvetica", "Times-Roman", "Symbol", "CMMI10"] {
+            assert!(!is_mono_font(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn caption_ranges_flags_a_prefixed_line_near_an_image() {
+        let (mut lines, mut styles) = body_lines(8, 400.0);
+        // Image at line 3; caption just below within proximity.
+        lines[3].cells = vec![Cell {
+            kind: CellKind::Image,
+            bbox: lines[3].bbox,
+            synthetic: false,
+        }];
+        styles[3] = LineStyle {
+            size: 0.0,
+            bold: false,
+            math: 0.0,
+            mono: 0.0,
+            angle: None,
+            baseline: lines[3].bbox.y0 + 5.0,
+        };
+        // Place caption line 4 immediately under the image.
+        let gap = 10.0;
+        lines[4].bbox.y0 = lines[3].bbox.y1 + gap;
+        lines[4].bbox.y1 = lines[4].bbox.y0 + 10.0;
+        styles[4].baseline = lines[4].bbox.y0 + 8.0;
+        set_text(&mut lines, &mut styles, 4, "Fig. 1 An overview", 160.0, 0.0);
+        let ranges = caption_ranges(&lines, &styles, &[3], &[]);
+        assert_eq!(ranges, vec![(4, 4)]);
+    }
+
+    #[test]
+    fn caption_ranges_ignore_a_distant_prefixed_line() {
+        let (mut lines, mut styles) = body_lines(8, 400.0);
+        lines[3].cells = vec![Cell {
+            kind: CellKind::Image,
+            bbox: lines[3].bbox,
+            synthetic: false,
+        }];
+        styles[3].size = 0.0;
+        set_text(&mut lines, &mut styles, 6, "Fig. 2 Far away", 160.0, 0.0);
+        // body_lines spaces lines 12pt apart; line 6 is ~36pt below line 3.
+        assert!(lines[6].bbox.y0 - lines[3].bbox.y1 > CAPTION_PROXIMITY_PT);
+        assert_eq!(caption_ranges(&lines, &styles, &[3], &[]), vec![]);
+    }
+
+    #[test]
+    fn code_ranges_flags_a_run_of_mono_lines() {
+        let (mut lines, mut styles) = body_lines(10, 400.0);
+        for (i, text) in [(3, "fn main() {"), (4, "    println!(hi);"), (5, "}")].iter() {
+            set_text(&mut lines, &mut styles, *i, text, 120.0, 0.0);
+            styles[*i].mono = 1.0;
+        }
+        assert_eq!(code_ranges(&lines, &styles), vec![(3, 5)]);
+    }
+
+    #[test]
+    fn code_ranges_skip_mathish_mono_lines() {
+        let (mut lines, mut styles) = body_lines(8, 400.0);
+        set_text(&mut lines, &mut styles, 3, "α + β = γ", 100.0, 0.8);
+        styles[3].mono = 1.0;
+        assert_eq!(code_ranges(&lines, &styles), vec![]);
+    }
+
+    #[test]
     fn heading_ranges_flags_a_numbered_subsection_at_body_size() {
         // Shape, not typography: `1.1. Title` at body size was previously
         // invisible to the size/weight vote and split as two sentences.
@@ -4088,7 +4489,7 @@ mod tests {
         );
         let headings = heading_ranges(&lines, &styles);
         assert_eq!(headings, vec![(3, 3)]);
-        let objects = content_objects(&lines, &[], &[], &headings, &[], &[], &[]);
+        let objects = content_objects(&lines, &[], &[], &[], &headings, &[], &[], &[], &[]);
         assert_eq!(objects.len(), 1);
         assert_eq!(objects[0].kind, ObjectKind::Heading);
         assert_eq!((objects[0].start_line, objects[0].end_line), (3, 3));
@@ -4099,6 +4500,18 @@ mod tests {
         let (mut lines, mut styles) = body_lines(10, 400.0);
         set_style(&mut lines, &mut styles, 3, 18.0, true, 200.0);
         assert_eq!(heading_ranges(&lines, &styles), vec![(3, 3)]);
+    }
+
+    #[test]
+    fn heading_ranges_rejects_a_single_glyph_drop_cap() {
+        // An oversized one-letter line is a drop cap, not a heading: claiming
+        // it as one severs the chapter opener from its own sentence.
+        let (mut lines, mut styles) = body_lines(10, 400.0);
+        set_style(&mut lines, &mut styles, 0, 36.0, true, 30.0);
+        set_text(&mut lines, &mut styles, 0, "T", 30.0, 0.0);
+        styles[0].size = 36.0;
+        styles[0].bold = true;
+        assert_eq!(heading_ranges(&lines, &styles), vec![]);
     }
 
     #[test]
@@ -4182,7 +4595,9 @@ mod tests {
             &lines,
             &[],
             &[box_over(&lines, 3..=6)],
+            &[],
             &[(4, 4)],
+            &[],
             &[],
             &[],
             &[],
@@ -4198,7 +4613,9 @@ mod tests {
             &lines,
             &[],
             &[box_over(&lines, 5..=8)],
+            &[],
             &[(1, 2)],
+            &[],
             &[],
             &[],
             &[],
@@ -4423,6 +4840,7 @@ mod tests {
             size: 8.0,
             bold: false,
             math: 0.0,
+            mono: 0.0,
             angle: Some(0.0),
             baseline: y + 6.0,
         });
@@ -4439,6 +4857,7 @@ mod tests {
             size: 8.0,
             bold: false,
             math: 0.0,
+            mono: 0.0,
             angle: Some(0.0),
             baseline: y + 6.0,
         });
@@ -4480,6 +4899,7 @@ mod tests {
             size: 10.0,
             bold: false,
             math: 0.0,
+            mono: 0.0,
             angle: Some(0.0),
             baseline: y + 8.0,
         });
@@ -4525,6 +4945,7 @@ mod tests {
                 size: 10.0,
                 bold: false,
                 math: 0.0,
+                mono: 0.0,
                 angle: Some(0.0),
                 baseline: y + 8.0,
             });
@@ -4556,6 +4977,7 @@ mod tests {
                 size: 8.0,
                 bold: false,
                 math: 0.0,
+                mono: 0.0,
                 angle: Some(0.0),
                 baseline: y + 6.0,
             });
@@ -4595,12 +5017,13 @@ mod tests {
             size: 8.0,
             bold: false,
             math: 0.0,
+            mono: 0.0,
             angle: Some(0.0),
             baseline: y + 6.0,
         });
         let footnotes = footnote_ranges(&lines, &styles, 1000.0);
         assert_eq!(footnotes, vec![(10, 10)]);
-        let objects = content_objects(&lines, &[], &[], &[], &[], &footnotes, &[]);
+        let objects = content_objects(&lines, &[], &[], &[], &[], &[], &[], &footnotes, &[]);
         assert_eq!(objects.len(), 1);
         assert_eq!(objects[0].kind, ObjectKind::Footnote);
         assert_eq!((objects[0].start_line, objects[0].end_line), (10, 10));
@@ -4629,6 +5052,7 @@ mod tests {
             size: 8.0,
             bold: false,
             math: 0.0,
+            mono: 0.0,
             angle: Some(0.0),
             baseline: y,
         });
@@ -4639,7 +5063,7 @@ mod tests {
             vec![(6, 6)],
             "the footnote line itself must be detected"
         );
-        let objects = content_objects(&lines, &[], &[], &[], &[], &footnotes, &[]);
+        let objects = content_objects(&lines, &[], &[], &[], &[], &[], &[], &footnotes, &[]);
         assert!(
             objects
                 .iter()
@@ -5007,7 +5431,9 @@ mod tests {
         let matrix = [
             (ObjectKind::Image, true, true, false, true),
             (ObjectKind::Table, false, true, false, true),
+            (ObjectKind::Caption, false, true, false, true),
             (ObjectKind::Equation, false, true, true, true),
+            (ObjectKind::Code, false, true, false, true),
             (ObjectKind::Heading, false, false, true, true),
             (ObjectKind::ListItem, false, false, false, false),
             (ObjectKind::Footnote, false, true, false, true),
@@ -5254,6 +5680,7 @@ mod tests {
                 size: 10.0,
                 bold: false,
                 math: 0.0,
+                mono: 0.0,
                 angle: Some(0.0),
                 baseline: y,
             });
@@ -5548,34 +5975,75 @@ mod tests {
     }
 
     #[test]
-    fn repetition_never_takes_a_pages_last_line() {
-        // The worst failure this feature could produce is text visible on the
-        // page that the caret cannot reach, so the repetition rule always
-        // leaves something behind.
+    fn repetition_never_takes_a_pages_last_reachable_line() {
+        // Body is rotated off the dominant angle (and short, so it loses the
+        // character-count vote) and is masked first. Both margin lines match
+        // the profile; the per-line guard must leave exactly one of them
+        // reachable so the page is not emptied.
         let height = 842.0;
         let lines = vec![
-            text_line_at(42.0, "running head"),
+            text_line_at(42.0, "running head text"),
+            text_line_at(100.0, "x"),
             text_line_at(800.0, "12"),
         ];
+        let style_at = |baseline: f32, angle: Option<f32>| LineStyle {
+            size: 9.0,
+            bold: false,
+            math: 0.0,
+            mono: 0.0,
+            angle,
+            baseline,
+        };
         let styles = vec![
-            LineStyle {
-                size: 9.0,
-                bold: false,
-                math: 0.0,
-                angle: Some(0.0),
-                baseline: 42.0,
-            },
-            LineStyle {
-                size: 9.0,
-                bold: false,
-                math: 0.0,
-                angle: Some(0.0),
-                baseline: 800.0,
-            },
+            style_at(42.0, Some(0.0)),
+            style_at(100.0, Some(90.0)),
+            style_at(800.0, Some(0.0)),
         ];
-        let profile = profile_of(&[("running head", Edge::Top, 42.0), ("#", Edge::Bottom, 42.0)]);
+        let profile = profile_of(&[
+            ("running head text", Edge::Top, 42.0),
+            ("#", Edge::Bottom, 42.0),
+        ]);
         let mask = furniture_mask(&lines, &styles, height, Some(&profile));
-        assert!(mask.iter().all(|m| !m), "mask: {mask:?}");
+        assert!(mask[1], "rotated body is furniture: {mask:?}");
+        let reachable = mask.iter().filter(|m| !*m).count();
+        assert_eq!(
+            reachable, 1,
+            "exactly one margin match must stay reachable: {mask:?}"
+        );
+    }
+
+    #[test]
+    fn repetition_still_masks_a_folio_under_body_content() {
+        // The last-reachable guard must not spare a bottom folio when body
+        // lines above it keep the page non-empty.
+        let height = 842.0;
+        let lines = vec![
+            text_line_at(100.0, "body one of this page"),
+            text_line_at(112.0, "body two of this page"),
+            text_line_at(124.0, "body three of this page"),
+            text_line_at(800.0, "12"),
+        ];
+        let style_at = |baseline: f32| LineStyle {
+            size: 9.0,
+            bold: false,
+            math: 0.0,
+            mono: 0.0,
+            angle: Some(0.0),
+            baseline,
+        };
+        let styles = vec![
+            style_at(100.0),
+            style_at(112.0),
+            style_at(124.0),
+            style_at(800.0),
+        ];
+        let profile = profile_of(&[("#", Edge::Bottom, 42.0)]);
+        let mask = furniture_mask(&lines, &styles, height, Some(&profile));
+        assert!(
+            mask[3],
+            "folio under body must still be furniture: {mask:?}"
+        );
+        assert!(mask.iter().take(3).all(|m| !m), "body stays free: {mask:?}");
     }
 
     /// A line at a given left edge, otherwise like [`text_line_at`].
@@ -5667,7 +6135,7 @@ mod tests {
         ];
         // Pretend line 0 was furniture: the image at old index 2 must land at 1.
         let kept: Vec<ContentLine> = lines[1..].to_vec();
-        let objects = content_objects(&kept, &[1], &[], &[], &[], &[], &lines[..1]);
+        let objects = content_objects(&kept, &[1], &[], &[], &[], &[], &[], &[], &lines[..1]);
         let image = objects
             .iter()
             .find(|o| o.kind == ObjectKind::Image)
@@ -5683,7 +6151,7 @@ mod tests {
         let body: Vec<ContentLine> = all[..10].to_vec();
         let furniture: Vec<ContentLine> = all[10..].to_vec();
         let table = box_over(&body, 0..=9);
-        let objects = content_objects(&body, &[], &[table], &[], &[], &[], &furniture);
+        let objects = content_objects(&body, &[], &[table], &[], &[], &[], &[], &[], &furniture);
         assert_eq!(
             objects
                 .iter()
@@ -6039,6 +6507,94 @@ mod tests {
             content.lines[images[0].start_line].cells[0].kind,
             CellKind::Image
         ));
+    }
+
+    #[test]
+    fn page_content_reports_a_caption_under_an_image() {
+        let doc = Document::from_bytes(&crate::test_support::pdf_with_image()).unwrap();
+        let content = doc
+            .page_content(0, ContentOptions::default(), None)
+            .unwrap();
+        let captions: Vec<_> = content
+            .objects
+            .iter()
+            .filter(|o| o.kind == ObjectKind::Caption)
+            .collect();
+        assert_eq!(captions.len(), 1, "objects: {:?}", content.objects);
+        assert!(line_text(&content.lines[captions[0].start_line]).contains("Fig."));
+    }
+
+    #[test]
+    fn page_content_reports_a_caption_under_a_table() {
+        let doc =
+            Document::from_bytes(&crate::test_support::pdf_with_table_gap(4, 5, 8.0)).unwrap();
+        let content = doc
+            .page_content(0, ContentOptions::default(), None)
+            .unwrap();
+        let captions: Vec<_> = content
+            .objects
+            .iter()
+            .filter(|o| o.kind == ObjectKind::Caption)
+            .collect();
+        assert_eq!(captions.len(), 1, "objects: {:?}", content.objects);
+        assert!(line_text(&content.lines[captions[0].start_line]).contains("Table 1"));
+        // Caption stays outside the table object.
+        let table = content
+            .objects
+            .iter()
+            .find(|o| o.kind == ObjectKind::Table)
+            .expect("table");
+        assert!(captions[0].start_line > table.end_line);
+    }
+
+    #[test]
+    fn page_content_reports_a_courier_listing_as_code() {
+        let doc = Document::from_bytes(&crate::test_support::pdf_with_code_block()).unwrap();
+        let content = doc
+            .page_content(0, ContentOptions::default(), None)
+            .unwrap();
+        let codes: Vec<_> = content
+            .objects
+            .iter()
+            .filter(|o| o.kind == ObjectKind::Code)
+            .collect();
+        assert_eq!(codes.len(), 1, "objects: {:?}", content.objects);
+        assert!(codes[0].end_line > codes[0].start_line);
+        assert!(line_text(&content.lines[codes[0].start_line]).contains("fn main"));
+    }
+
+    #[test]
+    fn interleaved_two_column_page_keeps_stream_order_but_two_bands() {
+        // Characterisation, not a fix: row-major content streams make MuPDF
+        // report L1,R1,L2,R2,… so sequential line motion interleaves columns
+        // even though the x-bands remain two columns.
+        let doc =
+            Document::from_bytes(&crate::test_support::pdf_interleaved_two_column_page(3)).unwrap();
+        let content = doc
+            .page_content(0, ContentOptions::default(), None)
+            .unwrap();
+        let texts: Vec<String> = content.lines.iter().map(line_text).collect();
+        assert_eq!(
+            texts,
+            vec![
+                "C1L1.".to_string(),
+                "C2L1.".to_string(),
+                "C1L2.".to_string(),
+                "C2L2.".to_string(),
+                "C1L3.".to_string(),
+                "C2L3.".to_string(),
+            ],
+            "stream order changed: {texts:?}"
+        );
+        // Left centres near 72+…, right near 340+… — two x-bands.
+        let centres: Vec<f32> = content
+            .lines
+            .iter()
+            .map(|l| (l.bbox.x0 + l.bbox.x1) / 2.0)
+            .collect();
+        let left = centres.iter().filter(|&&c| c < 200.0).count();
+        let right = centres.iter().filter(|&&c| c >= 200.0).count();
+        assert_eq!((left, right), (3, 3), "centres: {centres:?}");
     }
 
     #[test]

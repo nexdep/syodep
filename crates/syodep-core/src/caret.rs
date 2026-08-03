@@ -312,7 +312,7 @@ pub fn continues_word_run(left: WordClass, right: WordClass, same_line: bool) ->
 /// terminator — see [`is_inside_number`] — but an abbreviation's full stop
 /// (`Mr.`) still is, which remains a simplification.
 pub fn is_sentence_terminator(c: char) -> bool {
-    matches!(c, '.' | '!' | '?')
+    matches!(c, '.' | '!' | '?' | '。' | '！' | '？' | '．')
 }
 
 /// Whether `c` can sit *inside* a number, holding its digits together: a
@@ -353,12 +353,13 @@ pub fn is_inside_hyphenated_word(before: Option<char>, hyphen: char, after: Opti
 /// Abbreviations whose closing full stop is usually not the end of a sentence.
 ///
 /// Lower-case and without the stop. Dotted initials (`e.g.`, `U.S.`, `Ph.D.`)
-/// are *not* here — they are recognised by shape, so they need no list and no
-/// maintenance. This is only for the ones a rule cannot infer.
+/// and single initials (`J.`) are *not* here — they are recognised by shape.
+/// Title-class forms (`Dr.`, `Mr.`) live in [`TITLE_ABBREVIATIONS`]: they
+/// precede proper nouns, so a following capital does not re-open a boundary.
 ///
-/// Several entries are also ordinary words that can genuinely close a sentence
-/// (`no.`, `min.`, `co.`). That is safe because the closing stop still ends a
-/// sentence when a capital follows it — the list only says "suspect an
+/// Several entries here are also ordinary words that can genuinely close a
+/// sentence (`no.`, `min.`, `co.`). That is safe because the closing stop still
+/// ends a sentence when a capital follows it — the list only says "suspect an
 /// abbreviation here", never "this is never an ending".
 const ABBREVIATIONS: &[&str] = &[
     // Latin and citation
@@ -366,9 +367,7 @@ const ABBREVIATIONS: &[&str] = &[
     // References into a document
     "app", "ch", "chap", "eq", "eqs", "fig", "figs", "no", "nos", "p", "para", "pp", "pt", "ref",
     "refs", "sec", "secs", "tab", "tabs", "vol", "vols", // Bibliographic
-    "ed", "eds", "orig", "repr", "rev", "suppl", "trans", "transl", // Titles
-    "capt", "col", "dr", "gen", "hon", "jr", "lt", "mr", "mrs", "ms", "prof", "sgt", "sr", "st",
-    // Months
+    "ed", "eds", "orig", "repr", "rev", "suppl", "trans", "transl", // Months
     "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept", "oct", "nov", "dec",
     // Days
     "mon", "tue", "tues", "wed", "thu", "thur", "thurs", "fri", "sat", "sun",
@@ -376,11 +375,19 @@ const ABBREVIATIONS: &[&str] = &[
     "co", "corp", "dept", "est", "excl", "incl", "inc", "ltd", "max", "min", "univ",
 ];
 
+/// Title and name abbreviations: their closing stop precedes a proper noun by
+/// nature, so a following capital must not re-enable a sentence boundary
+/// (`Dr. Smith`, `Prof. Ada`).
+const TITLE_ABBREVIATIONS: &[&str] = &[
+    "capt", "col", "dr", "gen", "hon", "jr", "lt", "mr", "mrs", "ms", "prof", "sgt", "sr", "st",
+];
+
 /// Whether `token` is a run of short letter groups joined by stops, as in
 /// `e.g.`, `i.e.`, `U.S.`, `Ph.D.` or `a.k.a.`.
 ///
 /// Recognised by shape rather than by a list: no sentence ever ends in the
-/// middle of one, and no list has to be maintained or translated.
+/// middle of one, and no list has to be maintained or translated. A lone
+/// single-letter initial (`J.`) is handled by [`is_single_initial`].
 pub fn is_dotted_initials(token: &str) -> bool {
     let body = token.strip_suffix('.').unwrap_or(token);
     let segments: Vec<&str> = body.split('.').collect();
@@ -390,16 +397,49 @@ pub fn is_dotted_initials(token: &str) -> bool {
             .all(|s| (1..=2).contains(&s.chars().count()) && s.chars().all(char::is_alphabetic))
 }
 
-/// Whether `token` — with or without its closing stop — is a known
-/// abbreviation.
-pub fn is_known_abbreviation(token: &str) -> bool {
-    let body = token.strip_suffix('.').unwrap_or(token).to_lowercase();
-    !body.is_empty() && ABBREVIATIONS.contains(&body.as_str())
+/// Whether `token` is a single letter followed by a stop (`J.`, `R.`).
+///
+/// These are name initials: `J. R. Smith` must not split at every stop. They
+/// are recognised by shape so the title list does not need every letter.
+pub fn is_single_initial(token: &str) -> bool {
+    let body = token.strip_suffix('.').unwrap_or(token);
+    let mut chars = body.chars();
+    matches!(chars.next(), Some(c) if c.is_alphabetic()) && chars.next().is_none()
 }
 
-/// Whether `token` is an abbreviation of either kind.
+/// Whether `token` — with or without its closing stop — is a known
+/// abbreviation of either the ordinary or the title class.
+pub fn is_known_abbreviation(token: &str) -> bool {
+    let body = token.strip_suffix('.').unwrap_or(token).to_lowercase();
+    !body.is_empty()
+        && (ABBREVIATIONS.contains(&body.as_str()) || TITLE_ABBREVIATIONS.contains(&body.as_str()))
+}
+
+/// Whether `token` is a title/name abbreviation (`Dr.`, `Mrs.`, …).
+///
+/// Title-class stops suppress the capital re-enable rule used for ordinary
+/// abbreviations such as `etc.`.
+pub fn is_title_abbreviation(token: &str) -> bool {
+    let body = token.strip_suffix('.').unwrap_or(token).to_lowercase();
+    !body.is_empty() && TITLE_ABBREVIATIONS.contains(&body.as_str())
+}
+
+/// Whether `token` is an initialism whose closing stop should never open a
+/// sentence boundary — multi-segment dotted initials (`U.S.`) and single
+/// letter initials (`J.`).
+pub fn is_initialism(token: &str) -> bool {
+    is_dotted_initials(token) || is_single_initial(token)
+}
+
+/// Whether `token` is an abbreviation of any kind.
 pub fn is_abbreviation(token: &str) -> bool {
-    is_dotted_initials(token) || is_known_abbreviation(token)
+    is_initialism(token) || is_known_abbreviation(token)
+}
+
+/// Whether this abbreviation's closing stop should stay inert even when a
+/// capital follows — titles and initials precede proper nouns by nature.
+pub fn suppresses_capital_boundary(token: &str) -> bool {
+    is_title_abbreviation(token) || is_initialism(token)
 }
 
 /// Punctuation that continues the sentence it is in and so can never stand
@@ -603,7 +643,10 @@ pub fn link_span(token: &str) -> Option<(usize, usize)> {
 /// Whether `c` is a closing character that stays attached to the end of a
 /// sentence after its terminator (so `."` / `.)` close together).
 pub fn is_sentence_trailer(c: char) -> bool {
-    matches!(c, '"' | '\'' | ')' | ']' | '}' | '»' | '”' | '’')
+    matches!(
+        c,
+        '"' | '\'' | ')' | ']' | '}' | '»' | '”' | '’' | '」' | '』' | '）' | '】'
+    )
 }
 
 /// Whether cell `idx` is a colon whose only followers on the line are
@@ -995,6 +1038,10 @@ pub fn page_span_rects(
             }
         }
         let Some(line) = lines.get(line_idx) else {
+            debug_assert!(
+                false,
+                "page_span_rects: line {line_idx} missing on page {page}"
+            );
             line_idx += 1;
             continue;
         };
@@ -1018,7 +1065,8 @@ pub fn page_span_rects(
         };
         // A cell index off the end of its line means the span and the content
         // disagree; skipping the line degrades to a shorter highlight, which is
-        // always safer than a wrong one.
+        // always safer than a wrong one. Debug builds assert so stale spans
+        // surface in tests (F-GEOM-1).
         if let Some((x0, x1)) = span {
             rects.push(syodep_pdf::Rect {
                 x0,
@@ -1026,6 +1074,13 @@ pub fn page_span_rects(
                 x1,
                 y1: line.bbox.y1,
             });
+        } else {
+            debug_assert!(
+                false,
+                "page_span_rects: cell out of range on page {page} line {line_idx} \
+                 (start={start:?} end={end:?}, cells={})",
+                line.cells.len()
+            );
         }
         line_idx += 1;
     }
@@ -1271,10 +1326,27 @@ mod tests {
         assert!(is_sentence_terminator('.'));
         assert!(is_sentence_terminator('!'));
         assert!(is_sentence_terminator('?'));
+        assert!(is_sentence_terminator('。'));
+        assert!(is_sentence_terminator('！'));
+        assert!(is_sentence_terminator('？'));
+        assert!(is_sentence_terminator('．'));
         assert!(!is_sentence_terminator(','));
         assert!(is_sentence_trailer('"'));
         assert!(is_sentence_trailer(')'));
+        assert!(is_sentence_trailer('」'));
+        assert!(is_sentence_trailer('）'));
         assert!(!is_sentence_trailer('a'));
+    }
+
+    #[test]
+    fn cjk_terminators_split_sentences_in_prose() {
+        // Full CJK word segmentation is out of scope; terminators alone must
+        // still end a sentence so `s` can walk Chinese prose at all.
+        assert!(is_sentence_terminator('。'));
+        let after = "下一句";
+        // A CJK terminator with no Latin capital still ends the sentence at
+        // the character level; boundary assembly is tested via app fixtures.
+        assert!(!after.chars().next().unwrap().is_ascii());
     }
 
     #[test]
@@ -1431,9 +1503,36 @@ mod tests {
     #[test]
     fn ordinary_words_are_not_dotted_initials() {
         // One stop after a whole word is not a run of initials, and a decimal
-        // is not one either.
-        for token in ["end.", "etc.", "3.14", "Fig.", "word", "."] {
+        // is not one either. A single letter is handled by is_single_initial.
+        for token in ["end.", "etc.", "3.14", "Fig.", "word", ".", "J."] {
             assert!(!is_dotted_initials(token), "{token}");
+        }
+    }
+
+    #[test]
+    fn single_initials_are_recognised_by_shape() {
+        for token in ["J.", "R.", "a.", "A"] {
+            assert!(is_single_initial(token), "{token}");
+        }
+        for token in ["Jr.", "Dr.", "end.", "U.S.", ""] {
+            assert!(!is_single_initial(token), "{token}");
+        }
+    }
+
+    #[test]
+    fn title_abbreviations_suppress_the_capital_boundary() {
+        for token in ["Dr.", "Mr.", "Mrs.", "Prof.", "Jr.", "capt"] {
+            assert!(is_title_abbreviation(token), "{token}");
+            assert!(suppresses_capital_boundary(token), "{token}");
+        }
+        // Ordinary abbreviations keep the capital rule.
+        for token in ["etc.", "Fig.", "vs."] {
+            assert!(!is_title_abbreviation(token), "{token}");
+            assert!(!suppresses_capital_boundary(token), "{token}");
+        }
+        // Initials suppress too.
+        for token in ["U.S.", "J.", "e.g."] {
+            assert!(suppresses_capital_boundary(token), "{token}");
         }
     }
 

@@ -8,8 +8,10 @@
 pub mod app;
 pub mod caret;
 pub mod command;
+pub mod content_session;
 pub mod input;
 pub mod layout;
+pub mod object_policy;
 pub mod render_cache;
 
 pub use app::{

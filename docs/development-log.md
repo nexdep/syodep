@@ -7,6 +7,140 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-08-03 — Deep-review List 3 phase 3: captions, code, reading-order fixtures
+
+### Caption detection (`ObjectKind::Caption`)
+
+Lines near an image/table bbox (≤24pt) with a `Fig.`/`Figure`/`Table`/`Tab.`+number
+prefix, or set-apart typography, become Caption objects. Claimed after
+tables/images and before headings. Block at Line/Sentence/Paragraph; auto-skipped
+by Sentence/Paragraph search (footnote-like) but still a Sentence movement unit
+(unlike Footnote). Tests: pure `caption_ranges_*`;
+`page_content_reports_a_caption_under_{an_image,a_table}`; matrix +
+`object_policy` coverage. Fixtures updated with prefixed captions near the
+figure/table.
+
+### Code-block detection (`ObjectKind::Code`)
+
+`LineStyle.mono` mirrors `math`; Courier/Mono/… via `is_mono_font`. Runs with
+mono share ≥0.6 that are not mathish become Code, claimed after equations and
+before footnotes. Block, not auto-skipped. Fixture `pdf_with_code_block` /
+`two_font_page_pdf(..., "/Courier")`; tests `code_ranges_*` and
+`page_content_reports_a_courier_listing_as_code`.
+
+### Reading-order characterisation
+
+`pdf_interleaved_two_column_page` emits L1,R1,L2,R2,…;
+`interleaved_two_column_page_keeps_stream_order_but_two_bands` pins current
+MuPDF stream order and two x-bands without claiming a reading-order fix.
+
+---
+
+## 2026-08-03 — Deep-review List 3 phase 3: capabilities (items 13–17, 14)
+
+### CJK sentence terminators
+
+`is_sentence_terminator` accepts `。！？．`; trailers include `」』）】`. Full
+CJK word segmentation remains out of scope. Tests: classifier coverage and
+`cjk_sentence_terminators_split_prose`.
+
+### Caption and code-block regions
+
+`ObjectKind::{Caption, Code}` with claim-chain slots, config
+`detect_captions` / `detect_code`, and `object_policy` entries (captions
+auto-skipped like footnotes; code blocks not).
+
+### Reading-order fixtures
+
+`pdf_interleaved_two_column_page` characterises MuPDF stream order vs column
+bands; no reading-order rewrite.
+
+### Cross-page sentences/paragraphs
+
+Documented as an accepted page-local limitation with a roadmap entry; no code.
+
+---
+
+## 2026-08-03 — Deep-review List 3 phase 2: architecture debt (items 10–12, 9)
+
+### Shared first/last nonempty line helpers
+
+Cross-page landings in the char/line steppers go through
+`first_nonempty_line` / `last_nonempty_line`. Footnote-aware sentence helpers
+stay separate.
+
+### Object/scope policy module
+
+`object_policy::{movement_unit, auto_skip_in_search}` is the single table for
+unit-hood and Sentence/Paragraph auto-skip. `unit_object_at` and the former
+`in_footnote` call sites consult it.
+
+### ContentSession + apply_motion
+
+`content_session::ContentSession` owns page content, furniture, extraction
+failures, and derived caches. `App::apply_motion` collapses the four focus/
+visual move wrappers (F-STATE-1).
+
+### Derived per-page cache
+
+`paragraph_segments` / `column_ranges` (after object splits) are memoized per
+page on `ContentSession`; `set_page_content` drops the entry. Test:
+`set_page_content_drops_memoized_derived_structure`.
+
+---
+
+## 2026-08-03 — Deep-review List 3 phase 1: traversal defect cluster (items 3–8)
+
+Six defects from the traversal/segmentation review.
+
+### Title abbreviations and initials no longer false-split sentences
+
+`TITLE_ABBREVIATIONS` (`Dr.`, `Mr.`, …) and shape-recognised initials
+(`is_dotted_initials`, new `is_single_initial` for `J.`) suppress the capital
+re-enable rule via `suppresses_capital_boundary`, so `Dr. Smith`,
+`U.S. Government` and `J. R. Smith` stay one sentence. Ordinary abbreviations
+(`etc.`) still end a sentence before a capital. Tests: classifier coverage in
+`caret.rs`; boundary cases in `app.rs` including the existing `etc.` pin.
+
+### Drop caps are no longer headings
+
+`heading_ranges` rejects typography candidates whose line text is a single
+alphanumeric glyph. Test: `heading_ranges_rejects_a_single_glyph_drop_cap`.
+
+### Footnotes are walkable at Sentence scope once inside
+
+`unit_object_at` no longer treats a footnote as a block unit at Sentence
+scope. Sentence auto-search uses `skip_footnote_in_search` so a caret already
+inside a footnote keeps walking that footnote's sentences, while body `s`/`p`
+still skip footnotes entirely. Multi-sentence fixture pins both behaviours.
+
+### Named `s`/`p` motions update the goal row
+
+`focus_scope_motion` / `visual_scope_motion` mirror the axis-aware goal update
+from `focus_move` / `visual_move`, so a column jump after `s` aims at the new
+row. Test: `named_sentence_motion_updates_the_goal_row_for_column_jumps`.
+
+### Furniture never empties a page's last reachable line
+
+`furniture_mask` refuses to mask a repeated match when it would be the last
+remaining reachable inked line (a margin needs something to be a margin *of*).
+Bottom folios under body content still mask. Tests:
+`repetition_never_takes_a_pages_last_reachable_line`,
+`repetition_still_masks_a_folio_under_body_content`.
+
+### F-GEOM-1 assert and nearest paragraph fallback
+
+`page_span_rects` `debug_assert`s on disagreeing cell indices (still shortens
+in release). `paragraph_mark_containing` picks the nearest segment by line
+distance instead of teleporting to the page's last paragraph. Test:
+`paragraph_scope_on_an_empty_line_picks_the_nearest_segment`.
+
+### Checks
+
+`cargo test` for the touched suites, docs updated in `architecture.md`.
+
+---
+
 ## 2026-08-03 — Deep-review fix batch 2: remaining List 1 bugs (items 4–11)
 
 Eight more defects from the same review.
