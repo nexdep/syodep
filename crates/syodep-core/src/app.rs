@@ -1558,9 +1558,10 @@ impl App {
     /// to end and begin with digits.
     ///
     /// Neighbours skip one synthetic-space cell so a DOI fragment drawn as
-    /// `9p4kxc2cvd` + gap + `.1` still joins for word motion. Sentence
-    /// boundaries use [`Self::is_number_interior_tight`] instead: any space
-    /// after a stop — synthetic or authored — must end the sentence.
+    /// `9p4kxc2cvd` + gap + `.1` still joins for word motion (numeric
+    /// continuations only across that gap). Sentence boundaries use
+    /// [`Self::is_number_interior_tight`] instead: any space after a stop —
+    /// synthetic or authored — must end the sentence.
     fn is_number_interior(&mut self, c: Caret) -> bool {
         self.number_interior(c, true)
     }
@@ -1583,19 +1584,36 @@ impl App {
         if !(is_numeric_separator(here) || is_exponent_sign(here)) {
             return false;
         }
+        let prev_immediate = self.prev_cell_on_line(c);
+        let next_immediate = self.next_cell_on_line(c);
+        // Only restrict dotted-token welding when we actually step across a
+        // synthetic gap. `is_number_interior` always *may* peek, but `file.txt`
+        // has no gap — the letter after `.` must still join.
+        let peeked_forward =
+            skip_synthetic && next_immediate.is_some_and(|n| self.is_synthetic_space_at(n));
         let prev = if skip_synthetic {
             self.prev_real_cell_on_line(c)
         } else {
-            self.prev_cell_on_line(c)
+            prev_immediate
         };
         let before = prev.and_then(|p| self.char_at(p));
         let after = if skip_synthetic {
             self.next_real_cell_on_line(c)
         } else {
-            self.next_cell_on_line(c)
+            next_immediate
         }
         .and_then(|n| self.char_at(n));
-        if is_inside_number(before, here, after) || is_inside_dotted_token(before, here, after) {
+        if is_inside_number(before, here, after) {
+            return true;
+        }
+        // Dotted identifiers without a gap (`file.txt`, `VII.0`) always join.
+        // Across a MuPDF synthetic gap only a *numeric* continuation is a DOI
+        // fragment (`9p4kxc2cvd .1`). A letter after that gap is a new word —
+        // `Transformers. Unlike`, `e.g. separating` — not an extension.
+        if is_inside_dotted_token(before, here, after) {
+            if peeked_forward {
+                return after.is_some_and(|ch| ch.is_ascii_digit());
+            }
             return true;
         }
         // `2.3E+5`: the sign needs the exponent marker behind it and a digit
@@ -5375,6 +5393,42 @@ mod tests {
         assert_eq!(span_text(&mut app), "reactor.");
         press(&mut app, "s");
         assert_eq!(span_text(&mut app), "Efficacy next.");
+    }
+
+    #[test]
+    fn a_word_stop_with_synthetic_space_does_not_glue_the_next_capital() {
+        // Same MuPDF shape as the sentence test above, but for word scope:
+        // peaking through the synthetic gap used to weld `Transformers.` and
+        // `Unlike` into one word (`s` + `.` + `U` looked like a dotted token).
+        // DOI fragments still join when the continuation is a digit
+        // (`9p4kxc2cvd .1`); a letter opens a new word.
+        let dir = tempfile::tempdir().unwrap();
+        let text = "Transformers. Unlike recent";
+        let synthetic_space = text.find(". ").unwrap() + 1;
+        let mut app = app_with_synthetic_line(dir.path(), text, &[synthetic_space]);
+        press(&mut app, "fw");
+        assert_eq!(span_text(&mut app), "Transformers");
+        press(&mut app, "w");
+        assert_eq!(span_text(&mut app), ".");
+        press(&mut app, "w");
+        assert_eq!(span_text(&mut app), "Unlike");
+        press(&mut app, "w");
+        assert_eq!(span_text(&mut app), "recent");
+    }
+
+    #[test]
+    fn a_word_stop_with_synthetic_space_does_not_glue_a_lowercase_continuation() {
+        // After an abbreviation, prose continues with a lowercase letter.
+        // The synthetic gap must not turn `e.g. separating` into one word.
+        let dir = tempfile::tempdir().unwrap();
+        let text = "tokens e.g. separating categories";
+        let synthetic_space = text.find(". ").unwrap() + 1;
+        let mut app = app_with_synthetic_line(dir.path(), text, &[synthetic_space]);
+        press(&mut app, "fw");
+        press(&mut app, "w"); // tokens → e.g.
+        assert_eq!(span_text(&mut app), "e.g.");
+        press(&mut app, "w");
+        assert_eq!(span_text(&mut app), "separating");
     }
 
     #[test]

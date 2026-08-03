@@ -2422,34 +2422,35 @@ fn alignment_run_bbox(
     rows: &[Vec<usize>],
     content_width: f32,
 ) -> Option<Rect> {
-    // Collect left-edge clusters that appear in ≥ half the rows (and ≥2).
-    let mut edges: Vec<f32> = rows
+    // Prefer left-edge columns (left-aligned label/value grids). When headers
+    // are left-aligned but numeric cells are right- or centre-aligned, x0
+    // clusters fall apart — fall back to centre clustering, which still lines
+    // those columns up. Two-column prose stays rejected by the cell-width gate
+    // above and the page-width fail-closed check below.
+    let min_hits = rows.len().div_ceil(2).max(2);
+    let x0s: Vec<f32> = rows
         .iter()
         .flat_map(|r| r.iter().map(|&i| lines[i].bbox.x0))
         .collect();
-    edges.sort_by(f32::total_cmp);
-    let mut clusters: Vec<(f32, usize)> = Vec::new();
-    for x in edges {
-        match clusters
-            .last_mut()
-            .filter(|(rep, _)| (x - *rep).abs() <= ALIGN_TABLE_COL_ALIGN)
-        {
-            Some((rep, n)) => {
-                *rep = (*rep * *n as f32 + x) / (*n as f32 + 1.0);
-                *n += 1;
-            }
-            None => clusters.push((x, 1)),
-        }
-    }
-    let min_hits = rows.len().div_ceil(2);
-    let cols: Vec<f32> = clusters
-        .into_iter()
-        .filter(|&(_, n)| n >= min_hits.max(2))
-        .map(|(x, _)| x)
+    let centres: Vec<f32> = rows
+        .iter()
+        .flat_map(|r| {
+            r.iter().map(|&i| {
+                let b = lines[i].bbox;
+                (b.x0 + b.x1) / 2.0
+            })
+        })
         .collect();
-    if cols.len() < ALIGN_TABLE_MIN_COLS {
-        return None;
-    }
+    let cols_x0 = alignment_stable_columns(&x0s, min_hits);
+    let (cols, use_centre) = if cols_x0.len() >= ALIGN_TABLE_MIN_COLS {
+        (cols_x0, false)
+    } else {
+        let cols_centre = alignment_stable_columns(&centres, min_hits);
+        if cols_centre.len() < ALIGN_TABLE_MIN_COLS {
+            return None;
+        }
+        (cols_centre, true)
+    };
     // Every row should land in ≥2 of those columns.
     let rows_ok = rows
         .iter()
@@ -2457,8 +2458,15 @@ fn alignment_run_bbox(
             let hits = cols
                 .iter()
                 .filter(|&&cx| {
-                    r.iter()
-                        .any(|&i| (lines[i].bbox.x0 - cx).abs() <= ALIGN_TABLE_COL_ALIGN)
+                    r.iter().any(|&i| {
+                        let b = lines[i].bbox;
+                        let key = if use_centre {
+                            (b.x0 + b.x1) / 2.0
+                        } else {
+                            b.x0
+                        };
+                        (key - cx).abs() <= ALIGN_TABLE_COL_ALIGN
+                    })
                 })
                 .count();
             hits >= ALIGN_TABLE_MIN_COLS
@@ -2472,11 +2480,38 @@ fn alignment_run_bbox(
         .iter()
         .map(|&i| lines[i].bbox)
         .reduce(|a, b| a.union(b))?;
-    // Fail closed: a "table" as wide as the page is almost certainly prose.
-    if bbox.x1 - bbox.x0 >= 0.9 * content_width {
+    // Fail closed: a page-wide two-column band is almost certainly prose
+    // columns. Result tables with three or more stable columns may span the
+    // full measure (GLUE-style benchmark grids).
+    if bbox.x1 - bbox.x0 >= 0.9 * content_width && cols.len() < 3 {
         return None;
     }
     Some(bbox)
+}
+
+/// Cluster sorted-ish scalar positions into stable column representatives that
+/// appear at least `min_hits` times within [`ALIGN_TABLE_COL_ALIGN`].
+fn alignment_stable_columns(values: &[f32], min_hits: usize) -> Vec<f32> {
+    let mut values = values.to_vec();
+    values.sort_by(f32::total_cmp);
+    let mut clusters: Vec<(f32, usize)> = Vec::new();
+    for x in values {
+        match clusters
+            .last_mut()
+            .filter(|(rep, _)| (x - *rep).abs() <= ALIGN_TABLE_COL_ALIGN)
+        {
+            Some((rep, n)) => {
+                *rep = (*rep * *n as f32 + x) / (*n as f32 + 1.0);
+                *n += 1;
+            }
+            None => clusters.push((x, 1)),
+        }
+    }
+    clusters
+        .into_iter()
+        .filter(|&(_, n)| n >= min_hits)
+        .map(|(x, _)| x)
+        .collect()
 }
 
 /// Drop the lines at the edges of `members` that belong to the prose around the
@@ -5806,6 +5841,42 @@ mod tests {
             alignment_table_bboxes(&lines).is_empty(),
             "two-column prose must not become a table"
         );
+    }
+
+    #[test]
+    fn alignment_table_bboxes_finds_right_aligned_numeric_columns() {
+        // Header left-aligned, values right-aligned under the same centre —
+        // common in benchmark tables. Left-edge clustering alone misses this;
+        // centre clustering recovers it.
+        // Score centre = 200 + 5*6/2 = 215; "80.1" at x0=203 has the same mid.
+        let mut lines = vec![
+            text_line_at_x(50.0, 100.0, "System"),
+            text_line_at_x(200.0, 100.0, "Score"),
+            text_line_at_x(350.0, 100.0, "Avg"),
+            text_line_at_x(50.0, 120.0, "Baseline"),
+            text_line_at_x(203.0, 120.0, "80.1"),
+            text_line_at_x(359.0, 120.0, "74"),
+            text_line_at_x(50.0, 140.0, "Ours"),
+            text_line_at_x(203.0, 140.0, "91.2"),
+            text_line_at_x(359.0, 140.0, "88"),
+            text_line_at_x(50.0, 160.0, "Prior"),
+            text_line_at_x(203.0, 160.0, "85.0"),
+            text_line_at_x(359.0, 160.0, "81"),
+        ];
+        lines.push(text_line_at_x(
+            50.0,
+            220.0,
+            "Prose under the table that should stay outside the detected box.",
+        ));
+        let last = lines.len() - 1;
+        lines[last].bbox.x1 = 520.0;
+        let boxes = alignment_table_bboxes(&lines);
+        assert_eq!(
+            boxes.len(),
+            1,
+            "expected right-aligned numeric grid, got {boxes:?}"
+        );
+        assert!(boxes[0].y1 < 200.0, "prose must stay outside the table");
     }
 
     #[test]

@@ -7,6 +7,34 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-08-02 — Word stops across synthetic gaps; centred table columns
+
+### Word motion: synthetic gap after `.` is not a dotted token
+
+MuPDF often flags the gap after a full stop as synthetic. Word motion still
+peeks through that gap for DOI fragments (`9p4kxc2cvd .1`), but a *letter*
+after an *actual* synthetic gap is a new word (`Transformers. Unlike`,
+`e.g. separating`), not an extension. The digit-only restriction applies only
+when a synthetic cell is crossed — adjacent `file.txt` / `VII.0` still join.
+Sentence motion was already tight here.
+
+Tests: `a_word_stop_with_synthetic_space_does_not_glue_the_next_capital`,
+`a_word_stop_with_synthetic_space_does_not_glue_a_lowercase_continuation`.
+Existing DOI synthetic-space word test unchanged.
+
+### Borderless tables: centre columns + wide multi-column grids
+
+`alignment_table_bboxes` preferred left-edge clusters, so benchmark tables
+with left-aligned headers and right-/centre-aligned numbers were missed.
+Detection now falls back to centre clustering when x0 columns are unstable.
+Page-wide bands with ≥3 stable columns are kept (GLUE-style grids); page-wide
+two-column bands still fail closed as prose.
+
+Tests: `alignment_table_bboxes_finds_right_aligned_numeric_columns`; existing
+parameter-grid and two-column-prose tests still pass.
+
+---
+
 ## 2026-08-02 — Traversal hardening (order + segmentation)
 
 Audit of focus/visual word/line/paragraph motion on a real two-column journal
