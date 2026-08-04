@@ -70,8 +70,8 @@ while IFS= read -r command; do
 done < <(awk '/pub fn default_highlight_keybindings/,/^}/' crates/syodep-config/src/lib.rs \
     | grep -oP '", "\K[a-z_]+(?="\))')
 
-# Every [view] and [input] config field must appear in docs/config.md.
-for section in ViewConfig InputConfig; do
+# Every [view], [window] and [input] config field must appear in docs/config.md.
+for section in ViewConfig WindowConfig InputConfig; do
     while IFS= read -r option; do
         grep -q "\`$option\`" docs/config.md \
             || err "config option not documented: $option"

@@ -47,6 +47,9 @@ pub struct SyoApp {
     highlight_opacity: f32,
     /// Pause before a half-typed sequence resolves, from `[input] timeout_ms`.
     key_timeout_ms: u32,
+    /// Whether the shell should open the main window fullscreen, from
+    /// `[window] start_fullscreen`.
+    start_fullscreen: bool,
 }
 
 /// An RGBA colour resolved from the config, in 0-255 components.
@@ -331,6 +334,7 @@ pub unsafe extern "C" fn syo_app_new(
         );
         warnings.extend(w);
         let key_timeout_ms = config.input.timeout_ms;
+        let start_fullscreen = config.window.start_fullscreen;
         let highlight_opacity = config.view.highlight_opacity.clamp(0.0, 1.0);
         let mut app = App::new(config, storage);
         for warning in warnings {
@@ -346,6 +350,7 @@ pub unsafe extern "C" fn syo_app_new(
             highlight_color,
             highlight_opacity,
             key_timeout_ms,
+            start_fullscreen,
         }
     });
     match result {
@@ -511,6 +516,18 @@ pub unsafe extern "C" fn syo_app_key_timeout_ms(app: *const SyoApp) -> u32 {
     match unsafe { app.as_ref() } {
         Some(app) => app.key_timeout_ms,
         None => 0,
+    }
+}
+
+/// Whether the shell should open the main window in fullscreen.
+///
+/// # Safety
+/// `app` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn syo_app_start_fullscreen(app: *const SyoApp) -> bool {
+    match unsafe { app.as_ref() } {
+        Some(app) => app.start_fullscreen,
+        None => true,
     }
 }
 
@@ -1928,6 +1945,27 @@ mod tests {
             assert_eq!((highlight.r, highlight.g, highlight.b), (0xa0, 0xb0, 0xc0));
             assert_eq!(highlight.a, 128);
 
+            syo_app_free(app);
+        }
+    }
+
+    #[test]
+    fn start_fullscreen_wires_through_config() {
+        unsafe {
+            let default_app = syo_app_new(std::ptr::null(), std::ptr::null());
+            assert!(!default_app.is_null());
+            assert!(syo_app_start_fullscreen(default_app));
+            syo_app_free(default_app);
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(&config_path, "[window]\nstart_fullscreen = false\n").unwrap();
+        let c_config = CString::new(config_path.display().to_string()).unwrap();
+        unsafe {
+            let app = syo_app_new(c_config.as_ptr(), std::ptr::null());
+            assert!(!app.is_null());
+            assert!(!syo_app_start_fullscreen(app));
             syo_app_free(app);
         }
     }

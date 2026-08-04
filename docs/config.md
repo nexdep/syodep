@@ -214,6 +214,22 @@ status line rather than leaving the overlay invisible. Only `#rrggbb` is
 accepted — opacity is a separate option, so an eight-digit value is rejected
 rather than silently interpreted.
 
+## `[window]`
+
+| Option | Type | Default | Meaning |
+|---|---|---|---|
+| `start_fullscreen` | bool | `true` | open the main window in fullscreen |
+
+When `start_fullscreen` is `true` (the default), syodep opens with a fullscreen
+main window. Set it to `false` for a normal windowed launch at the built-in
+size (960×1000). Escaping fullscreen after launch is left to the window
+manager / OS (for example Alt+F11); there is no in-app toggle yet.
+
+```toml
+[window]
+start_fullscreen = true
+```
+
 ## `[files]`
 
 | Option | Type | Default | Meaning |

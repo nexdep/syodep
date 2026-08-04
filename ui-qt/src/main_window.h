@@ -27,6 +27,9 @@ public:
 
     bool openDocument(const QString &path);
 
+    // Whether the shell should open this window fullscreen.
+    bool startFullscreen() const;
+
     AnnotationSidebar *annotationSidebar() const { return m_annotationSidebar; }
     QDockWidget *annotationsDock() const { return m_sidebarDock; }
     QAction *highlightsToggleAction() const { return m_highlightsAction; }

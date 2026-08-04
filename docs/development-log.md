@@ -7,6 +7,36 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-08-04 — Sidebar starts closed on open
+
+The Highlights/Annotations dock is hidden at `MainWindow` construction and
+again after every successful `openDocument`, so a newly opened file always
+begins with canvas focus and no sidebar. Leader toggles, View menu, and
+annotation creation (`n`) still open it on purpose.
+
+Smoke asserts the dock is closed after construct and after open, before the
+existing Highlights↔Annotations matrix.
+
+---
+
+## 2026-08-04 — Start fullscreen via `[window] start_fullscreen`
+
+The main window now opens fullscreen by default. Opt out with
+`start_fullscreen = false` in a new `[window]` config section.
+
+Config lives in `WindowConfig` (`syodep-config`); the shell reads it through
+`syo_app_start_fullscreen` → `CoreController::startFullscreen` →
+`MainWindow::startFullscreen`, and `main.cpp` calls `showFullScreen()` or
+`show()` accordingly. Window geometry stays shell-owned; the core only
+carries the preference. Smoke test still uses `show()` and is unchanged.
+
+Tests: config default/parse/unknown-field; `default_config_doc` includes
+`[window]`; FFI getter reflects config and defaults to true. Docs:
+`docs/config.md`, `config/default-config.toml`, `scripts/check-docs.sh`
+(`WindowConfig`).
+
+---
+
 ## 2026-08-03 — Deep-review List 3 phase 3: captions, code, reading-order fixtures
 
 ### Caption detection (`ObjectKind::Caption`)

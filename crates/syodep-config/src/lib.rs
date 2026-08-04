@@ -48,12 +48,31 @@ pub struct Config {
     /// implementation of reshaping a selection.
     #[serde(default)]
     pub highlight_keys: BTreeMap<String, String>,
+    /// `[window]` section: shell window behaviour at launch.
+    #[serde(default)]
+    pub window: WindowConfig,
     /// `[files]` section: file-dialog and path behaviour.
     #[serde(default)]
     pub files: FilesConfig,
     /// `[input]` section: key-sequence timing.
     #[serde(default)]
     pub input: InputConfig,
+}
+
+/// `[window]` section: shell window behaviour at launch.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields, default)]
+pub struct WindowConfig {
+    /// If true, the main window opens in fullscreen.
+    pub start_fullscreen: bool,
+}
+
+impl Default for WindowConfig {
+    fn default() -> Self {
+        Self {
+            start_fullscreen: true,
+        }
+    }
 }
 
 /// `[input]` section: how long a partial key sequence waits.
@@ -229,6 +248,7 @@ impl Default for Config {
             focus_keys: default_focus_keybindings(),
             visual_keys: default_visual_keybindings(),
             highlight_keys: default_highlight_keybindings(),
+            window: WindowConfig::default(),
             files: FilesConfig::default(),
             input: InputConfig::default(),
         }
@@ -677,6 +697,18 @@ pub fn default_config_doc() -> String {
     out.push('\n');
 
     out.push_str(
+        "[window]\n\
+         # Open the main window in fullscreen. Set to false for a normal\n\
+         # windowed launch (default size 960x1000).\n",
+    );
+    let _ = writeln!(
+        out,
+        "start_fullscreen = {}",
+        WindowConfig::default().start_fullscreen
+    );
+    out.push('\n');
+
+    out.push_str(
         "[files]\n\
          # Starting directory for the Open dialog (<leader>o). When unset, the\n\
          # dialog opens in the directory syodep was launched from. If the path below\n\
@@ -1095,6 +1127,34 @@ mod tests {
     }
 
     #[test]
+    fn window_start_fullscreen_defaults_to_true() {
+        assert!(Config::default().window.start_fullscreen);
+        let config = Config::from_toml("").unwrap();
+        assert!(config.window.start_fullscreen);
+    }
+
+    #[test]
+    fn parses_window_start_fullscreen_false() {
+        let config = Config::from_toml(
+            r#"
+            [window]
+            start_fullscreen = false
+            "#,
+        )
+        .unwrap();
+        assert!(!config.window.start_fullscreen);
+    }
+
+    #[test]
+    fn unknown_window_field_is_a_useful_error() {
+        let err = Config::from_toml("[window]\nstart_fullscrn = true\n").unwrap_err();
+        assert!(
+            err.contains("start_fullscrn"),
+            "error should name the field: {err}"
+        );
+    }
+
+    #[test]
     fn unknown_field_is_a_useful_error() {
         let err = Config::from_toml("[view]\nscrol_step = 10.0\n").unwrap_err();
         assert!(
@@ -1140,7 +1200,7 @@ mod tests {
         // silently dropped from the generated template.
         let value = toml::Value::try_from(Config::default()).unwrap();
         let table = value.as_table().unwrap();
-        for section in ["view", "input"] {
+        for section in ["view", "window", "input"] {
             for field in table[section].as_table().unwrap().keys() {
                 assert!(
                     doc.contains(field),

@@ -146,6 +146,9 @@ public:
     QString statusText() const;
     QString startupWarnings() const;
     QString openDirectory() const;
+    // Whether the shell should open the main window fullscreen ([window]
+    // start_fullscreen).
+    bool startFullscreen() const;
     // Empty when no document is open.
     QString documentPath() const;
 

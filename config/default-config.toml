@@ -10,13 +10,12 @@
 # See docs/config.md for the full reference.
 
 [view]
-# Logical pixels moved per scroll step (j / k). Scaled by the display's
-# devicePixelRatio so a 2× screen scrolls the same visual distance as 1×.
+# Pixels moved per scroll step (j / k).
 scroll_step = 60.0
-# Logical pixels moved per horizontal scroll step (h / l).
+# Pixels moved per horizontal scroll step (h / l).
 horizontal_scroll_step = 60.0
-# Logical pixels kept between the focused text and the top or bottom edge
-# while the view follows it, so there is always context past the highlight.
+# Pixels kept between the focused text and the top or bottom edge while
+# the view follows it, so there is always context past the highlight.
 # Not applied at the very start and end of the document, where there is
 # nothing to scroll to. 0.0 lets the highlight sit flush with the edge.
 scroll_off = 80.0
@@ -82,6 +81,11 @@ skip_page_furniture = true
 # into it deliberately still reads it normally.
 detect_footnotes = true
 
+[window]
+# Open the main window in fullscreen. Set to false for a normal
+# windowed launch (default size 960x1000).
+start_fullscreen = true
+
 [files]
 # Starting directory for the Open dialog (<leader>o). When unset, the
 # dialog opens in the directory syodep was launched from. If the path below
@@ -123,6 +127,8 @@ leader = "<Space>"
 "<PageUp>" = "prev_page"
 "<Right>" = "scroll_right"
 "<Up>" = "scroll_up"
+"<leader>a" = "toggle_highlights_sidebar"
+"<leader>n" = "toggle_annotations_sidebar"
 "<leader>o" = "open_file"
 "<leader>q" = "quit"
 "<leader>w" = "save_document"
@@ -140,6 +146,7 @@ leader = "<Space>"
 "j" = "scroll_down"
 "k" = "scroll_up"
 "l" = "scroll_right"
+"n" = "create_annotation"
 "v" = "visual_enter"
 "vc" = "visual_enter_char"
 "ve" = "visual_enter_line"
@@ -173,6 +180,7 @@ leader = "<Space>"
 "j" = "focus_down"
 "k" = "focus_up"
 "l" = "focus_right"
+"n" = "create_annotation"
 "p" = "focus_next_paragraph"
 "s" = "focus_next_sentence"
 "w" = "focus_next_word"
@@ -194,6 +202,7 @@ leader = "<Space>"
 "j" = "visual_down"
 "k" = "visual_up"
 "l" = "visual_right"
+"n" = "create_annotation"
 "o" = "visual_swap_ends"
 "oc" = "visual_other_char"
 "oe" = "visual_other_line"
@@ -233,6 +242,7 @@ leader = "<Space>"
 "j" = "visual_down"
 "k" = "visual_up"
 "l" = "visual_right"
+"n" = "create_annotation"
 "o" = "visual_swap_ends"
 "oc" = "visual_other_char"
 "oe" = "visual_other_line"

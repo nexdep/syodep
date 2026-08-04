@@ -327,6 +327,14 @@ QString CoreController::openDirectory() const
     return takeSyoString(syo_app_open_dir(m_app));
 }
 
+bool CoreController::startFullscreen() const
+{
+    assertGuiThread();
+    if (!m_app)
+        return true;
+    return syo_app_start_fullscreen(m_app);
+}
+
 QString CoreController::documentPath() const
 {
     assertGuiThread();

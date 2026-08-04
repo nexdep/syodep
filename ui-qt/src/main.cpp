@@ -210,9 +210,13 @@ int runSmokeTest(const QString &pdfPath)
         != syodep::AnnotationSidebar::ContentState::NoDocument) {
         smokeFail(QStringLiteral("expected no-document sidebar state"));
     }
+    if (window.visibleSidebarPage().has_value())
+        smokeFail(QStringLiteral("sidebar should start closed"));
     if (!window.openDocument(pdfPath))
         smokeFail(QStringLiteral("MainWindow open %1").arg(pdfPath));
     smokeStep("mainwindow open ok");
+    if (window.visibleSidebarPage().has_value())
+        smokeFail(QStringLiteral("sidebar should stay closed after open"));
     window.annotationSidebar()->refreshAnnotations(true);
     const auto state = window.annotationSidebar()->contentState();
     if (state != syodep::AnnotationSidebar::ContentState::EmptyHighlights
@@ -366,6 +370,9 @@ int main(int argc, char *argv[])
     syodep::MainWindow window;
     if (!args.isEmpty())
         window.openDocument(args.first());
-    window.show();
+    if (window.startFullscreen())
+        window.showFullScreen();
+    else
+        window.show();
     return app.exec();
 }

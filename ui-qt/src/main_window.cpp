@@ -116,7 +116,9 @@ MainWindow::MainWindow(QWidget *parent)
     if (!warnings.isEmpty())
         statusBar()->showMessage(warnings.section(QLatin1Char('\n'), 0, 0), 10000);
 
-    updateSidebarActions();
+    // Start with the dock closed; openDocument also hides it so a newly
+    // opened file always begins with canvas focus and no sidebar.
+    hideSidebar();
     refreshStatus();
 }
 
@@ -224,16 +226,16 @@ bool MainWindow::openDocument(const QString &path)
         && !m_annotationSidebar->confirmDiscardDirty(tr("opening another document"))) {
         return false;
     }
-    const bool sidebarWasVisible = visibleSidebarPage().has_value();
     if (!m_core->openDocument(path))
         return false;
-    if (m_annotationSidebar)
-        m_annotationSidebar->clearPendingKeys();
-    if (sidebarWasVisible)
-        m_annotationSidebar->focusActivePage();
-    else
-        focusCanvas();
+    // A newly opened file always starts with the sidebar closed.
+    hideSidebar();
     return true;
+}
+
+bool MainWindow::startFullscreen() const
+{
+    return m_core && m_core->startFullscreen();
 }
 
 void MainWindow::dragEnterEvent(QDragEnterEvent *event)
