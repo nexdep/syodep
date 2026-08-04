@@ -149,6 +149,8 @@ public:
     // Whether the shell should open the main window fullscreen ([window]
     // start_fullscreen).
     bool startFullscreen() const;
+    // Whether the Highlights sidebar starts open ([window] start_sidebar_open).
+    bool startSidebarOpen() const;
     // Empty when no document is open.
     QString documentPath() const;
 

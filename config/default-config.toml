@@ -85,6 +85,9 @@ detect_footnotes = true
 # Open the main window in fullscreen. Set to false for a normal
 # windowed launch (default size 960x1000).
 start_fullscreen = true
+# Show the Highlights sidebar when the window opens and after every
+# document open. Set to true to start with the sidebar visible.
+start_sidebar_open = false
 
 [files]
 # Starting directory for the Open dialog (<leader>o). When unset, the

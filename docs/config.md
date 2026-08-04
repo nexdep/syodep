@@ -219,15 +219,23 @@ rather than silently interpreted.
 | Option | Type | Default | Meaning |
 |---|---|---|---|
 | `start_fullscreen` | bool | `true` | open the main window in fullscreen |
+| `start_sidebar_open` | bool | `false` | show the Highlights sidebar at launch and after every document open |
 
 When `start_fullscreen` is `true` (the default), syodep opens with a fullscreen
 main window. Set it to `false` for a normal windowed launch at the built-in
 size (960×1000). Escaping fullscreen after launch is left to the window
 manager / OS (for example Alt+F11); there is no in-app toggle yet.
 
+When `start_sidebar_open` is `false` (the default), the Highlights/Annotations
+dock stays closed at launch and after every document open, so the canvas has
+focus. Set it to `true` to open the Highlights page instead. Leader toggles,
+the View menu, and annotation creation (`n`) still open or hide the sidebar
+afterwards regardless of this setting.
+
 ```toml
 [window]
 start_fullscreen = true
+start_sidebar_open = false
 ```
 
 ## `[files]`

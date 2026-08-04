@@ -335,6 +335,14 @@ bool CoreController::startFullscreen() const
     return syo_app_start_fullscreen(m_app);
 }
 
+bool CoreController::startSidebarOpen() const
+{
+    assertGuiThread();
+    if (!m_app)
+        return false;
+    return syo_app_start_sidebar_open(m_app);
+}
+
 QString CoreController::documentPath() const
 {
     assertGuiThread();

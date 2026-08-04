@@ -29,6 +29,8 @@ public:
 
     // Whether the shell should open this window fullscreen.
     bool startFullscreen() const;
+    // Whether the Highlights sidebar starts open.
+    bool startSidebarOpen() const;
 
     AnnotationSidebar *annotationSidebar() const { return m_annotationSidebar; }
     QDockWidget *annotationsDock() const { return m_sidebarDock; }
@@ -61,6 +63,8 @@ private slots:
 private:
     bool confirmQuit();
     void sanitizeDockState();
+    // Apply [window] start_sidebar_open: show Highlights or hide the dock.
+    void applyStartSidebarPreference();
 
     CoreController *m_core = nullptr;
     CanvasWidget *m_canvas = nullptr;

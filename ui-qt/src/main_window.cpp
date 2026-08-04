@@ -116,9 +116,8 @@ MainWindow::MainWindow(QWidget *parent)
     if (!warnings.isEmpty())
         statusBar()->showMessage(warnings.section(QLatin1Char('\n'), 0, 0), 10000);
 
-    // Start with the dock closed; openDocument also hides it so a newly
-    // opened file always begins with canvas focus and no sidebar.
-    hideSidebar();
+    // Apply [window] start_sidebar_open (default false → canvas-first).
+    applyStartSidebarPreference();
     refreshStatus();
 }
 
@@ -228,14 +227,27 @@ bool MainWindow::openDocument(const QString &path)
     }
     if (!m_core->openDocument(path))
         return false;
-    // A newly opened file always starts with the sidebar closed.
-    hideSidebar();
+    // Re-apply the configured start preference for each newly opened file.
+    applyStartSidebarPreference();
     return true;
 }
 
 bool MainWindow::startFullscreen() const
 {
     return m_core && m_core->startFullscreen();
+}
+
+bool MainWindow::startSidebarOpen() const
+{
+    return m_core && m_core->startSidebarOpen();
+}
+
+void MainWindow::applyStartSidebarPreference()
+{
+    if (startSidebarOpen())
+        showSidebarPage(SidebarPage::Highlights);
+    else
+        hideSidebar();
 }
 
 void MainWindow::dragEnterEvent(QDragEnterEvent *event)

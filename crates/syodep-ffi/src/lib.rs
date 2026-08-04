@@ -50,6 +50,9 @@ pub struct SyoApp {
     /// Whether the shell should open the main window fullscreen, from
     /// `[window] start_fullscreen`.
     start_fullscreen: bool,
+    /// Whether the Highlights sidebar starts open, from
+    /// `[window] start_sidebar_open`.
+    start_sidebar_open: bool,
 }
 
 /// An RGBA colour resolved from the config, in 0-255 components.
@@ -335,6 +338,7 @@ pub unsafe extern "C" fn syo_app_new(
         warnings.extend(w);
         let key_timeout_ms = config.input.timeout_ms;
         let start_fullscreen = config.window.start_fullscreen;
+        let start_sidebar_open = config.window.start_sidebar_open;
         let highlight_opacity = config.view.highlight_opacity.clamp(0.0, 1.0);
         let mut app = App::new(config, storage);
         for warning in warnings {
@@ -351,6 +355,7 @@ pub unsafe extern "C" fn syo_app_new(
             highlight_opacity,
             key_timeout_ms,
             start_fullscreen,
+            start_sidebar_open,
         }
     });
     match result {
@@ -528,6 +533,19 @@ pub unsafe extern "C" fn syo_app_start_fullscreen(app: *const SyoApp) -> bool {
     match unsafe { app.as_ref() } {
         Some(app) => app.start_fullscreen,
         None => true,
+    }
+}
+
+/// Whether the shell should show the Highlights sidebar at launch and after
+/// each document open.
+///
+/// # Safety
+/// `app` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn syo_app_start_sidebar_open(app: *const SyoApp) -> bool {
+    match unsafe { app.as_ref() } {
+        Some(app) => app.start_sidebar_open,
+        None => false,
     }
 }
 
@@ -1955,17 +1973,23 @@ mod tests {
             let default_app = syo_app_new(std::ptr::null(), std::ptr::null());
             assert!(!default_app.is_null());
             assert!(syo_app_start_fullscreen(default_app));
+            assert!(!syo_app_start_sidebar_open(default_app));
             syo_app_free(default_app);
         }
 
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("config.toml");
-        std::fs::write(&config_path, "[window]\nstart_fullscreen = false\n").unwrap();
+        std::fs::write(
+            &config_path,
+            "[window]\nstart_fullscreen = false\nstart_sidebar_open = true\n",
+        )
+        .unwrap();
         let c_config = CString::new(config_path.display().to_string()).unwrap();
         unsafe {
             let app = syo_app_new(c_config.as_ptr(), std::ptr::null());
             assert!(!app.is_null());
             assert!(!syo_app_start_fullscreen(app));
+            assert!(syo_app_start_sidebar_open(app));
             syo_app_free(app);
         }
     }

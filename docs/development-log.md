@@ -7,6 +7,16 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-08-04 — `[window] start_sidebar_open`
+
+The closed-sidebar-on-open behaviour is now a config option rather than a
+hard-coded shell policy. `start_sidebar_open` defaults to `false` (canvas
+first at launch and after every document open); set it to `true` to open the
+Highlights page instead. Wired like `start_fullscreen`: config → FFI →
+`CoreController` → `MainWindow::applyStartSidebarPreference`.
+
+---
+
 ## 2026-08-04 — Sidebar starts closed on open
 
 The Highlights/Annotations dock is hidden at `MainWindow` construction and

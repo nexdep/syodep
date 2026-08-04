@@ -65,12 +65,16 @@ pub struct Config {
 pub struct WindowConfig {
     /// If true, the main window opens in fullscreen.
     pub start_fullscreen: bool,
+    /// If true, the Highlights sidebar is visible when the window opens and
+    /// after every document open. Default false: canvas-first.
+    pub start_sidebar_open: bool,
 }
 
 impl Default for WindowConfig {
     fn default() -> Self {
         Self {
             start_fullscreen: true,
+            start_sidebar_open: false,
         }
     }
 }
@@ -706,6 +710,15 @@ pub fn default_config_doc() -> String {
         "start_fullscreen = {}",
         WindowConfig::default().start_fullscreen
     );
+    out.push_str(
+        "# Show the Highlights sidebar when the window opens and after every\n\
+         # document open. Set to true to start with the sidebar visible.\n",
+    );
+    let _ = writeln!(
+        out,
+        "start_sidebar_open = {}",
+        WindowConfig::default().start_sidebar_open
+    );
     out.push('\n');
 
     out.push_str(
@@ -1143,6 +1156,25 @@ mod tests {
         )
         .unwrap();
         assert!(!config.window.start_fullscreen);
+    }
+
+    #[test]
+    fn window_start_sidebar_open_defaults_to_false() {
+        assert!(!Config::default().window.start_sidebar_open);
+        let config = Config::from_toml("").unwrap();
+        assert!(!config.window.start_sidebar_open);
+    }
+
+    #[test]
+    fn parses_window_start_sidebar_open_true() {
+        let config = Config::from_toml(
+            r#"
+            [window]
+            start_sidebar_open = true
+            "#,
+        )
+        .unwrap();
+        assert!(config.window.start_sidebar_open);
     }
 
     #[test]

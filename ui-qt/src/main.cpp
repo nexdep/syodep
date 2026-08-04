@@ -212,6 +212,8 @@ int runSmokeTest(const QString &pdfPath)
     }
     if (window.visibleSidebarPage().has_value())
         smokeFail(QStringLiteral("sidebar should start closed"));
+    if (window.startSidebarOpen())
+        smokeFail(QStringLiteral("default start_sidebar_open should be false"));
     if (!window.openDocument(pdfPath))
         smokeFail(QStringLiteral("MainWindow open %1").arg(pdfPath));
     smokeStep("mainwindow open ok");
