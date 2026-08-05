@@ -90,8 +90,11 @@ and zoom all work while a highlight is pending, and — as in visual mode — th
 leave the highlight where it is. `center_view` scrolls so the pending highlight
 is at the viewport center without reshaping it.
 
-`toggle_keybindings_overlay` also remains available. While its overlay is open,
-the pending highlight is preserved and every non-help command is ignored.
+The application commands `open_file`, `save_document`,
+`toggle_highlights_sidebar`, `toggle_annotations_sidebar`, `close_sidebar`,
+`toggle_keybindings_overlay`, `create_annotation`, `quit` and `cancel` retain
+their normal-mode behavior. While keybinding help is open, the pending
+highlight is preserved and every non-help command is ignored.
 
 ## Customizing
 

@@ -165,6 +165,8 @@ pub enum Command {
     ToggleHighlightsSidebar,
     /// Show or hide the annotations sidebar, moving keyboard focus with it.
     ToggleAnnotationsSidebar,
+    /// Hide whichever sidebar page is visible and return focus to the canvas.
+    CloseSidebar,
     /// Capture the current focus or selection as a pending Markdown annotation
     /// and ask the shell to open the annotation editor.
     CreateAnnotation,
@@ -262,6 +264,7 @@ pub const ALL_COMMANDS: &[(&str, Command)] = &[
         "toggle_annotations_sidebar",
         Command::ToggleAnnotationsSidebar,
     ),
+    ("close_sidebar", Command::CloseSidebar),
     ("create_annotation", Command::CreateAnnotation),
     ("open_file", Command::OpenFile),
     ("save_document", Command::SaveDocument),
@@ -373,6 +376,7 @@ impl Command {
             Self::HelpBottom => "Go to the end of help",
             Self::ToggleHighlightsSidebar => "Toggle the Highlights sidebar",
             Self::ToggleAnnotationsSidebar => "Toggle the Annotations sidebar",
+            Self::CloseSidebar => "Close the sidebar",
             Self::CreateAnnotation => "Create a Markdown annotation",
             Self::OpenFile => "Open a PDF",
             Self::SaveDocument => "Save highlights into the PDF",

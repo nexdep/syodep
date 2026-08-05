@@ -16,7 +16,8 @@ pub mod render_cache;
 
 pub use app::{
     App, DocumentAnchor, Effects, HelpNavigation, Highlight, HighlightSummary, KeybindingHelp,
-    KeybindingHelpEntry, KeybindingHelpGroup, TextAnnotation, TextAnnotationSummary, VisiblePage,
+    KeybindingHelpEntry, KeybindingHelpGroup, SidebarInputResult, TextAnnotation,
+    TextAnnotationSummary, VisiblePage,
 };
 pub use caret::{Caret, Mode};
 pub use command::Command;

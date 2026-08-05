@@ -142,6 +142,9 @@ pub struct Effects {
     /// The shell should show or hide the annotations sidebar page. Same
     /// toggle-request shape as [`Self::toggle_highlights_sidebar`].
     pub toggle_annotations_sidebar: bool,
+    /// The shell should hide whichever sidebar page is visible and focus the
+    /// canvas. Sidebar visibility remains shell-owned.
+    pub close_sidebar: bool,
     /// A pending annotation anchor was captured; the shell should open the
     /// Annotations page in creation mode. Not a toggle — never hides the dock.
     pub create_annotation_requested: bool,
@@ -174,6 +177,7 @@ impl Effects {
                 || other.toggle_highlights_sidebar,
             toggle_annotations_sidebar: self.toggle_annotations_sidebar
                 || other.toggle_annotations_sidebar,
+            close_sidebar: self.close_sidebar || other.close_sidebar,
             create_annotation_requested: self.create_annotation_requested
                 || other.create_annotation_requested,
             keybindings_overlay_changed: self.keybindings_overlay_changed
@@ -184,6 +188,17 @@ impl Effects {
             pending_input: other.pending_input,
         }
     }
+}
+
+/// Result of one key event in the isolated sidebar input context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SidebarInputResult {
+    pub effects: Effects,
+    /// Whether the event belongs to a sidebar binding and should not continue
+    /// to the focused Qt widget.
+    pub handled: bool,
+    /// Whether a partial sidebar sequence remains buffered.
+    pub pending: bool,
 }
 
 /// A page to draw, in canvas pixel coordinates.
@@ -489,6 +504,9 @@ pub struct App {
     /// commands, so there is one implementation of reshaping a selection.
     highlight_keymap: Keymap,
     input: InputState,
+    /// Independent from document/help input so focus changes cannot leak a
+    /// half-typed leader sequence between the canvas and a sidebar.
+    sidebar_input: InputState,
     storage: Option<Storage>,
     session: Option<Session>,
     viewport: (f32, f32),
@@ -612,6 +630,7 @@ impl App {
             visual_keymap,
             highlight_keymap,
             input: InputState::new(),
+            sidebar_input: InputState::new(),
             storage,
             session: None,
             viewport: (800.0, 600.0),
@@ -1076,6 +1095,26 @@ impl App {
         keymap
     }
 
+    /// Sidebar focus gets the current document mode's effective toggle
+    /// bindings, but no document commands. Escape is installed last so it is
+    /// always a close operation even when a user binds it to a toggle.
+    fn sidebar_keymap(&self) -> Keymap {
+        let mut keymap = Keymap::default();
+        for (sequence, command) in self.active_document_keymap().bindings() {
+            if matches!(
+                command,
+                Command::ToggleHighlightsSidebar | Command::ToggleAnnotationsSidebar
+            ) {
+                keymap.bind(&sequence, command);
+            }
+        }
+        keymap.bind(
+            &[Chord::named(syodep_config::keys::NamedKey::Escape)],
+            Command::CloseSidebar,
+        );
+        keymap
+    }
+
     pub fn keybindings_overlay_visible(&self) -> bool {
         self.keybindings_overlay_visible
     }
@@ -1250,6 +1289,72 @@ impl App {
         self.dispatch(outcome)
     }
 
+    /// Feed a key to the isolated sidebar context.
+    ///
+    /// Only effective bindings for the two sidebar toggles are admitted.
+    /// Escape closes unconditionally, including while another sequence is
+    /// pending. Unmatched keys are reported to the shell so its local list or
+    /// editor controls can handle them.
+    pub fn handle_sidebar_key(&mut self, chord: Chord) -> SidebarInputResult {
+        if chord == Chord::named(syodep_config::keys::NamedKey::Escape) {
+            self.sidebar_input.clear();
+            return SidebarInputResult {
+                effects: self.execute(Command::CloseSidebar, None),
+                handled: true,
+                pending: false,
+            };
+        }
+        let keymap = self.sidebar_keymap();
+        let outcome = self.sidebar_input.handle_without_count(&keymap, chord);
+        self.dispatch_sidebar(outcome, &keymap)
+    }
+
+    /// Resolve a partial sidebar sequence after the shell-owned pause.
+    pub fn handle_sidebar_timeout(&mut self) -> SidebarInputResult {
+        let keymap = self.sidebar_keymap();
+        let outcome = self.sidebar_input.timeout(&keymap);
+        self.dispatch_sidebar(outcome, &keymap)
+    }
+
+    /// Drop a half-typed sidebar sequence when the dock hides, switches page,
+    /// or otherwise loses its input context.
+    pub fn cancel_sidebar_input(&mut self) {
+        self.sidebar_input.clear();
+    }
+
+    fn dispatch_sidebar(&mut self, outcome: KeyOutcome, keymap: &Keymap) -> SidebarInputResult {
+        let mut effects = Effects::default();
+        let mut handled = false;
+        let mut next = Some(outcome);
+        for _ in 0..32 {
+            let Some(outcome) = next.take() else { break };
+            match outcome {
+                KeyOutcome::Pending => handled = true,
+                KeyOutcome::Unmatched => {}
+                KeyOutcome::Command { command, count } => {
+                    handled = true;
+                    effects = effects.merge(self.execute(command, count));
+                }
+            }
+            if effects.toggle_highlights_sidebar
+                || effects.toggle_annotations_sidebar
+                || effects.close_sidebar
+            {
+                self.sidebar_input.clear_replay();
+                break;
+            }
+            next = self
+                .sidebar_input
+                .next_replay()
+                .map(|chord| self.sidebar_input.handle_without_count(keymap, chord));
+        }
+        SidebarInputResult {
+            effects,
+            handled,
+            pending: self.sidebar_input.has_pending_sequence(),
+        }
+    }
+
     /// Run one input outcome and everything the replay queue produces after it.
     fn dispatch(&mut self, outcome: KeyOutcome) -> Effects {
         let mut effects = Effects::default();
@@ -1375,6 +1480,12 @@ impl App {
                     ..Effects::default()
                 };
             }
+            Command::CloseSidebar => {
+                return Effects {
+                    close_sidebar: true,
+                    ..Effects::default()
+                };
+            }
             Command::CreateAnnotation => return self.create_annotation(),
             Command::Cancel => return Effects::redraw(),
             Command::FocusEnter => return self.enter_focus(self.focus_scope),
@@ -1493,6 +1604,7 @@ impl App {
             | Command::OpenFile
             | Command::ToggleHighlightsSidebar
             | Command::ToggleAnnotationsSidebar
+            | Command::CloseSidebar
             | Command::CreateAnnotation
             | Command::Cancel
             | Command::FocusEnter
@@ -5288,6 +5400,14 @@ mod tests {
         effects
     }
 
+    fn press_sidebar(app: &mut App, sequence: &str) -> SidebarInputResult {
+        let mut result = SidebarInputResult::default();
+        for chord in parse_sequence(sequence).unwrap() {
+            result = app.handle_sidebar_key(chord);
+        }
+        result
+    }
+
     fn assert_caret(app: &App, page: usize, line: usize, cell: usize) {
         let caret = app.caret().unwrap();
         assert_eq!((caret.page, caret.line, caret.cell), (page, line, cell));
@@ -5394,6 +5514,106 @@ mod tests {
         let effects = press(&mut app, "j");
         assert!(effects.keybindings_overlay_changed);
         assert!(!app.keybindings_overlay_visible());
+    }
+
+    #[test]
+    fn sidebar_input_admits_only_effective_toggles_and_unconditional_escape() {
+        let mut app = App::new(Config::default(), None);
+
+        let leader = press_sidebar(&mut app, "<Space>");
+        assert!(leader.handled);
+        assert!(leader.pending);
+        let highlights = press_sidebar(&mut app, "a");
+        assert!(highlights.handled);
+        assert!(!highlights.pending);
+        assert!(highlights.effects.toggle_highlights_sidebar);
+
+        let unrelated = press_sidebar(&mut app, "j");
+        assert!(!unrelated.handled);
+        assert!(!unrelated.pending);
+        assert_eq!(unrelated.effects, Effects::default());
+        let digit = press_sidebar(&mut app, "2");
+        assert!(!digit.handled, "sidebar input must not capture counts");
+
+        press_sidebar(&mut app, "<Space>");
+        let escape = press_sidebar(&mut app, "<Esc>");
+        assert!(escape.handled);
+        assert!(!escape.pending);
+        assert!(escape.effects.close_sidebar);
+    }
+
+    #[test]
+    fn sidebar_input_uses_custom_leader_and_active_mode_overrides() {
+        let mut config = Config::default();
+        config.input.leader = ",".to_owned();
+        config.focus_keys.insert(
+            "<leader>a".to_owned(),
+            Command::ScrollDown.name().to_owned(),
+        );
+        config.focus_keys.insert(
+            "<leader>x".to_owned(),
+            Command::ToggleHighlightsSidebar.name().to_owned(),
+        );
+        let mut app = App::new(config, None);
+        app.mode = Mode::Focus;
+
+        assert!(!press_sidebar(&mut app, ",a").handled);
+        assert!(
+            press_sidebar(&mut app, ",x")
+                .effects
+                .toggle_highlights_sidebar
+        );
+        assert!(
+            press_sidebar(&mut app, ",n")
+                .effects
+                .toggle_annotations_sidebar
+        );
+    }
+
+    #[test]
+    fn sidebar_prefix_timeout_and_document_input_are_independent() {
+        let mut config = Config::default();
+        config.keys.insert(
+            "<leader>ab".to_owned(),
+            Command::ToggleAnnotationsSidebar.name().to_owned(),
+        );
+        let mut app = App::new(config, None);
+
+        assert!(
+            app.handle_key(parse_sequence("<Space>").unwrap()[0])
+                .pending_input
+        );
+        assert!(press_sidebar(&mut app, "<Space>a").pending);
+        let timed_out = app.handle_sidebar_timeout();
+        assert!(timed_out.handled);
+        assert!(!timed_out.pending);
+        assert!(timed_out.effects.toggle_highlights_sidebar);
+
+        // The canvas leader remained pending while the sidebar context ran.
+        assert!(
+            app.handle_key(parse_sequence("n").unwrap()[0])
+                .toggle_annotations_sidebar
+        );
+
+        assert!(press_sidebar(&mut app, "<Space>").pending);
+        app.cancel_sidebar_input();
+        let timeout = app.handle_sidebar_timeout();
+        assert!(!timeout.pending);
+        assert_eq!(timeout.effects, Effects::default());
+    }
+
+    #[test]
+    fn sidebar_escape_overrides_a_configured_escape_toggle() {
+        let mut config = Config::default();
+        config.keys.insert(
+            "<Esc>".to_owned(),
+            Command::ToggleAnnotationsSidebar.name().to_owned(),
+        );
+        let mut app = App::new(config, None);
+        let result = press_sidebar(&mut app, "<Esc>");
+        assert!(result.handled);
+        assert!(result.effects.close_sidebar);
+        assert!(!result.effects.toggle_annotations_sidebar);
     }
 
     #[test]

@@ -26,7 +26,7 @@ use syodep_config::keys::parse_sequence;
 use syodep_config::Config;
 use syodep_core::{
     App, Effects, HelpNavigation, HighlightId, HighlightPdfState, KeybindingHelpGroup, Mode,
-    TextAnnotationId,
+    SidebarInputResult, TextAnnotationId,
 };
 use syodep_storage::Storage;
 
@@ -185,6 +185,8 @@ pub const SYO_EFFECT_HELP_PAGE_DOWN: u32 = 32768;
 pub const SYO_EFFECT_HELP_PAGE_UP: u32 = 65536;
 pub const SYO_EFFECT_HELP_TOP: u32 = 131072;
 pub const SYO_EFFECT_HELP_BOTTOM: u32 = 262144;
+/// Hide whichever sidebar page is visible and focus the canvas.
+pub const SYO_EFFECT_CLOSE_SIDEBAR: u32 = 524288;
 
 fn effects_to_bits(effects: Effects) -> u32 {
     let mut bits = 0;
@@ -221,6 +223,9 @@ fn effects_to_bits(effects: Effects) -> u32 {
     if effects.keybindings_overlay_changed {
         bits |= SYO_EFFECT_KEYBINDINGS_OVERLAY_CHANGED;
     }
+    if effects.close_sidebar {
+        bits |= SYO_EFFECT_CLOSE_SIDEBAR;
+    }
     bits |= match effects.help_navigation {
         Some(HelpNavigation::LineDown) => SYO_EFFECT_HELP_LINE_DOWN,
         Some(HelpNavigation::LineUp) => SYO_EFFECT_HELP_LINE_UP,
@@ -233,6 +238,23 @@ fn effects_to_bits(effects: Effects) -> u32 {
         None => 0,
     };
     bits
+}
+
+/// Result of feeding one key to the isolated sidebar input context.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct SyoSidebarInputResult {
+    pub effects: u32,
+    pub handled: bool,
+    pub pending: bool,
+}
+
+fn sidebar_input_result_to_ffi(result: SidebarInputResult) -> SyoSidebarInputResult {
+    SyoSidebarInputResult {
+        effects: effects_to_bits(result.effects),
+        handled: result.handled,
+        pending: result.pending,
+    }
 }
 
 /// Integer tags for keybinding-help groups.
@@ -523,6 +545,62 @@ pub unsafe extern "C" fn syo_app_key_event(app: *mut SyoApp, key: *const c_char)
         }
     }))
     .unwrap_or(0)
+}
+
+/// Feed one key chord to the isolated sidebar input context.
+///
+/// The result reports both shell effects and whether the focused sidebar
+/// widget should consume the event. Only effective sidebar-toggle bindings
+/// and Escape are handled.
+///
+/// # Safety
+/// `app` must be valid; `key` must be a valid NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn syo_app_sidebar_key_event(
+    app: *mut SyoApp,
+    key: *const c_char,
+) -> SyoSidebarInputResult {
+    let Some(app) = (unsafe { app.as_mut() }) else {
+        return SyoSidebarInputResult::default();
+    };
+    if key.is_null() {
+        return SyoSidebarInputResult::default();
+    }
+    let Ok(key) = (unsafe { CStr::from_ptr(key) }).to_str() else {
+        return SyoSidebarInputResult::default();
+    };
+    catch_unwind(AssertUnwindSafe(|| match parse_sequence(key).as_deref() {
+        // The shell sends exactly one chord per key event.
+        Ok([chord]) => sidebar_input_result_to_ffi(app.app.handle_sidebar_key(*chord)),
+        _ => SyoSidebarInputResult::default(),
+    }))
+    .unwrap_or_default()
+}
+
+/// End a pending sidebar key sequence because the shell's timer fired.
+///
+/// # Safety
+/// `app` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn syo_app_sidebar_key_timeout(app: *mut SyoApp) -> SyoSidebarInputResult {
+    let Some(app) = (unsafe { app.as_mut() }) else {
+        return SyoSidebarInputResult::default();
+    };
+    catch_unwind(AssertUnwindSafe(|| {
+        sidebar_input_result_to_ffi(app.app.handle_sidebar_timeout())
+    }))
+    .unwrap_or_default()
+}
+
+/// Clear any buffered sidebar key sequence.
+///
+/// # Safety
+/// `app` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn syo_app_sidebar_key_cancel(app: *mut SyoApp) {
+    if let Some(app) = unsafe { app.as_mut() } {
+        let _ = catch_unwind(AssertUnwindSafe(|| app.app.cancel_sidebar_input()));
+    }
 }
 
 /// Whether closing now would lose highlights not yet embedded in the PDF.
@@ -2649,6 +2727,64 @@ mod tests {
             );
             assert_eq!(bits & SYO_EFFECT_QUIT, 0);
             syo_app_free(app);
+        }
+    }
+
+    #[test]
+    fn isolated_sidebar_input_reports_handled_pending_and_close() {
+        unsafe {
+            let app = syo_app_new(std::ptr::null(), std::ptr::null());
+            let leader = CString::new("<Space>").unwrap();
+            let a = CString::new("a").unwrap();
+            let j = CString::new("j").unwrap();
+            let escape = CString::new("<Esc>").unwrap();
+
+            let prefix = syo_app_sidebar_key_event(app, leader.as_ptr());
+            assert!(prefix.handled);
+            assert!(prefix.pending);
+            assert_eq!(prefix.effects, 0);
+
+            let toggle = syo_app_sidebar_key_event(app, a.as_ptr());
+            assert!(toggle.handled);
+            assert!(!toggle.pending);
+            assert_eq!(
+                toggle.effects & SYO_EFFECT_TOGGLE_HIGHLIGHTS_SIDEBAR,
+                SYO_EFFECT_TOGGLE_HIGHLIGHTS_SIDEBAR
+            );
+
+            let unrelated = syo_app_sidebar_key_event(app, j.as_ptr());
+            assert!(!unrelated.handled);
+            assert!(!unrelated.pending);
+            assert_eq!(unrelated.effects, 0);
+
+            let _ = syo_app_sidebar_key_event(app, leader.as_ptr());
+            let close = syo_app_sidebar_key_event(app, escape.as_ptr());
+            assert!(close.handled);
+            assert!(!close.pending);
+            assert_eq!(
+                close.effects & SYO_EFFECT_CLOSE_SIDEBAR,
+                SYO_EFFECT_CLOSE_SIDEBAR
+            );
+
+            let _ = syo_app_sidebar_key_event(app, leader.as_ptr());
+            syo_app_sidebar_key_cancel(app);
+            let timed_out = syo_app_sidebar_key_timeout(app);
+            assert!(!timed_out.pending);
+            assert_eq!(timed_out.effects, 0);
+            syo_app_free(app);
+        }
+    }
+
+    #[test]
+    fn isolated_sidebar_input_is_null_safe() {
+        unsafe {
+            let result = syo_app_sidebar_key_event(std::ptr::null_mut(), std::ptr::null());
+            assert!(!result.handled);
+            assert!(!result.pending);
+            assert_eq!(result.effects, 0);
+            let timeout = syo_app_sidebar_key_timeout(std::ptr::null_mut());
+            assert_eq!(timeout.effects, 0);
+            syo_app_sidebar_key_cancel(std::ptr::null_mut());
         }
     }
 }

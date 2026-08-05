@@ -12,6 +12,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QTemporaryDir>
+#include <QTextCursor>
 #include <QTimer>
 #include <QWidget>
 
@@ -22,6 +23,7 @@
 #include <QDockWidget>
 #include <QListView>
 #include <QKeyEvent>
+#include <QPlainTextEdit>
 
 #include "canvas_widget.h"
 #include "core_controller.h"
@@ -32,6 +34,7 @@
 #include "sidebar/annotation_sidebar.h"
 #include "sidebar/annotations_panel.h"
 #include "sidebar/highlight_list_model.h"
+#include "sidebar/text_annotation_editor.h"
 #include "syodep_ffi.h"
 
 namespace {
@@ -164,6 +167,47 @@ int runSmokeTest(const QString &pdfPath, syodep::RendererBackend renderer)
     }
     smokeStep("highlight delete ok");
 
+    // Regression for the real failure mode: once a populated sidebar list has
+    // focus, leader sequences must still reach the isolated core context.
+    int highlightsToggleRequests = 0;
+    int annotationsToggleRequests = 0;
+    int closeSidebarRequests = 0;
+    QObject::connect(&annotationCore, &syodep::CoreController::toggleHighlightsSidebarRequested,
+                     &sidebar, [&]() { ++highlightsToggleRequests; });
+    QObject::connect(&annotationCore, &syodep::CoreController::toggleAnnotationsSidebarRequested,
+                     &sidebar, [&]() { ++annotationsToggleRequests; });
+    QObject::connect(&annotationCore, &syodep::CoreController::closeSidebarRequested,
+                     &sidebar, [&]() {
+                         ++closeSidebarRequests;
+                         sidebar.hide();
+                     });
+    sidebar.resize(720, 500);
+    sidebar.show();
+    sidebar.focusList();
+    QApplication::processEvents();
+    QKeyEvent sidebarLeaderA1(QEvent::KeyPress, Qt::Key_Space,
+                              Qt::NoModifier, QStringLiteral(" "));
+    QKeyEvent sidebarLeaderA2(QEvent::KeyPress, Qt::Key_A,
+                              Qt::NoModifier, QStringLiteral("a"));
+    QApplication::sendEvent(sidebar.listView(), &sidebarLeaderA1);
+    QApplication::sendEvent(sidebar.listView(), &sidebarLeaderA2);
+    if (highlightsToggleRequests != 1)
+        smokeFail(QStringLiteral("focused highlight list swallowed leader-a"));
+    QKeyEvent sidebarLeaderN1(QEvent::KeyPress, Qt::Key_Space,
+                              Qt::NoModifier, QStringLiteral(" "));
+    QKeyEvent sidebarLeaderN2(QEvent::KeyPress, Qt::Key_N,
+                              Qt::NoModifier, QStringLiteral("n"));
+    QApplication::sendEvent(sidebar.listView(), &sidebarLeaderN1);
+    QApplication::sendEvent(sidebar.listView(), &sidebarLeaderN2);
+    if (annotationsToggleRequests != 1)
+        smokeFail(QStringLiteral("focused highlight list swallowed leader-n"));
+    QKeyEvent sidebarEscape(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+    QApplication::sendEvent(sidebar.listView(), &sidebarEscape);
+    QApplication::processEvents();
+    if (closeSidebarRequests != 1 || sidebar.isVisible())
+        smokeFail(QStringLiteral("Escape did not close focused highlight sidebar"));
+    smokeStep("focused sidebar input ok");
+
     // Markdown annotation create → save → export → delete, via the same core
     // the Highlights path used (temp DB; never the user profile store).
     if (!annotationCore.hasPersistence())
@@ -198,6 +242,68 @@ int runSmokeTest(const QString &pdfPath, syodep::RendererBackend renderer)
         smokeFail(QStringLiteral("deleteTextAnnotation"));
     if (!annotationCore.allTextAnnotationsMarkdown().isEmpty())
         smokeFail(QStringLiteral("annotation survived delete"));
+
+    // Editable Markdown deliberately keeps leader-shaped prose as text, while
+    // Escape still closes the sidebar and preserves the dirty draft.
+    annotationCore.sendKey(QStringLiteral("n"));
+    qint64 draftId = 0;
+    if (!annotationCore.createTextAnnotation(QStringLiteral("draft"), &draftId)
+        || draftId == 0) {
+        smokeFail(QStringLiteral("create draft annotation"));
+    }
+    sidebar.showPage(syodep::SidebarPage::Annotations);
+    sidebar.show();
+    QApplication::processEvents();
+    auto *annotationsPanel = sidebar.annotationsPanel();
+    if (!annotationsPanel || !annotationsPanel->editor())
+        smokeFail(QStringLiteral("annotations editor construction"));
+    annotationsPanel->focusList();
+    QKeyEvent annotationLeaderA1(QEvent::KeyPress, Qt::Key_Space,
+                                  Qt::NoModifier, QStringLiteral(" "));
+    QKeyEvent annotationLeaderA2(QEvent::KeyPress, Qt::Key_A,
+                                  Qt::NoModifier, QStringLiteral("a"));
+    QApplication::sendEvent(annotationsPanel->listView(), &annotationLeaderA1);
+    QApplication::sendEvent(annotationsPanel->listView(), &annotationLeaderA2);
+    QKeyEvent annotationLeaderN1(QEvent::KeyPress, Qt::Key_Space,
+                                  Qt::NoModifier, QStringLiteral(" "));
+    QKeyEvent annotationLeaderN2(QEvent::KeyPress, Qt::Key_N,
+                                  Qt::NoModifier, QStringLiteral("n"));
+    QApplication::sendEvent(annotationsPanel->listView(), &annotationLeaderN1);
+    QApplication::sendEvent(annotationsPanel->listView(), &annotationLeaderN2);
+    if (highlightsToggleRequests != 2 || annotationsToggleRequests != 2)
+        smokeFail(QStringLiteral("focused annotation list swallowed a leader toggle"));
+    annotationsPanel->editor()->focusEditor();
+    auto *markdownEditor = annotationsPanel->editor()->findChild<QPlainTextEdit *>();
+    if (!markdownEditor)
+        smokeFail(QStringLiteral("Markdown editor not found"));
+    const QString beforeTyping = markdownEditor->toPlainText();
+    markdownEditor->moveCursor(QTextCursor::End);
+    const int togglesBeforeTyping =
+        highlightsToggleRequests + annotationsToggleRequests;
+    QKeyEvent typedSpace(QEvent::KeyPress, Qt::Key_Space,
+                         Qt::NoModifier, QStringLiteral(" "));
+    QKeyEvent typedA(QEvent::KeyPress, Qt::Key_A,
+                     Qt::NoModifier, QStringLiteral("a"));
+    QApplication::sendEvent(markdownEditor, &typedSpace);
+    QApplication::sendEvent(markdownEditor, &typedA);
+    if (markdownEditor->toPlainText() != beforeTyping + QStringLiteral(" a")
+        || highlightsToggleRequests + annotationsToggleRequests != togglesBeforeTyping) {
+        smokeFail(QStringLiteral("leader-shaped Markdown text was intercepted"));
+    }
+    const QString dirtyDraft = markdownEditor->toPlainText();
+    QKeyEvent editorEscape(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+    QApplication::sendEvent(markdownEditor, &editorEscape);
+    QApplication::processEvents();
+    if (sidebar.isVisible() || closeSidebarRequests != 2)
+        smokeFail(QStringLiteral("Escape did not close dirty annotation editor"));
+    sidebar.show();
+    sidebar.focusActivePage();
+    QApplication::processEvents();
+    if (markdownEditor->toPlainText() != dirtyDraft
+        || !annotationsPanel->editor()->isDirty()) {
+        smokeFail(QStringLiteral("dirty annotation draft did not survive sidebar close"));
+    }
+    sidebar.hide();
     smokeStep("annotation api ok");
 
     // And once through the actual widgets: construct, show, paint one frame.
@@ -279,8 +385,25 @@ int runSmokeTest(const QString &pdfPath, syodep::RendererBackend renderer)
         smokeFail(QStringLiteral("Escape did not close keybinding help"));
     smokeStep("keybinding overlay ok");
 
-    // Highlights ↔ Annotations page matrix: self-toggle hides; cross-toggle
-    // substitutes; hide leaves the canvas focused.
+    // Highlights ↔ Annotations page matrix through actual focused-sidebar key
+    // events: self-toggle hides, cross-toggle substitutes, and Escape closes.
+    auto sidebarKeyTarget = [&]() -> QWidget * {
+        QWidget *target = QApplication::focusWidget();
+        if (!target
+            || (target != window.annotationSidebar()
+                && !window.annotationSidebar()->isAncestorOf(target))) {
+            target = window.annotationSidebar();
+        }
+        return target;
+    };
+    auto sendSidebarLeader = [&](int key, const QString &text) {
+        QKeyEvent leader(QEvent::KeyPress, Qt::Key_Space,
+                         Qt::NoModifier, QStringLiteral(" "));
+        QApplication::sendEvent(sidebarKeyTarget(), &leader);
+        QKeyEvent suffix(QEvent::KeyPress, key, Qt::NoModifier, text);
+        QApplication::sendEvent(sidebarKeyTarget(), &suffix);
+        QApplication::processEvents();
+    };
     window.showSidebarPage(syodep::SidebarPage::Highlights);
     if (window.visibleSidebarPage() != syodep::SidebarPage::Highlights
         || !window.highlightsToggleAction()->isChecked()
@@ -288,25 +411,37 @@ int runSmokeTest(const QString &pdfPath, syodep::RendererBackend renderer)
         smokeFail(QStringLiteral("Highlights page not visible"));
     }
     smokeStep("highlights page ok");
-    window.toggleAnnotationsSidebar();
+    sendSidebarLeader(Qt::Key_N, QStringLiteral("n"));
     smokeStep("annotations page toggled");
     if (window.visibleSidebarPage() != syodep::SidebarPage::Annotations
         || !window.annotationsToggleAction()->isChecked()
         || window.highlightsToggleAction()->isChecked()) {
         smokeFail(QStringLiteral("Leader n substitute did not show Annotations"));
     }
-    window.toggleAnnotationsSidebar();
+    sendSidebarLeader(Qt::Key_N, QStringLiteral("n"));
     if (window.visibleSidebarPage().has_value()
         || window.annotationsToggleAction()->isChecked()
         || window.highlightsToggleAction()->isChecked()) {
         smokeFail(QStringLiteral("Annotations self-toggle did not hide"));
     }
-    window.toggleHighlightsSidebar();
+    window.showSidebarPage(syodep::SidebarPage::Highlights);
     if (window.visibleSidebarPage() != syodep::SidebarPage::Highlights)
         smokeFail(QStringLiteral("toggle did not restore Highlights"));
-    window.hideSidebar();
+    sendSidebarLeader(Qt::Key_N, QStringLiteral("n"));
+    if (window.visibleSidebarPage() != syodep::SidebarPage::Annotations)
+        smokeFail(QStringLiteral("leader-n did not substitute Annotations"));
+    sendSidebarLeader(Qt::Key_A, QStringLiteral("a"));
+    if (window.visibleSidebarPage() != syodep::SidebarPage::Highlights)
+        smokeFail(QStringLiteral("leader-a did not substitute Highlights"));
+    sendSidebarLeader(Qt::Key_A, QStringLiteral("a"));
     if (window.visibleSidebarPage().has_value())
-        smokeFail(QStringLiteral("hideSidebar left a visible page"));
+        smokeFail(QStringLiteral("leader-a self-toggle did not hide"));
+    window.showSidebarPage(syodep::SidebarPage::Annotations);
+    QKeyEvent closeSidebar(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+    QApplication::sendEvent(sidebarKeyTarget(), &closeSidebar);
+    QApplication::processEvents();
+    if (window.visibleSidebarPage().has_value())
+        smokeFail(QStringLiteral("Escape left a visible sidebar page"));
     smokeStep("sidebar matrix ok");
 
     QTimer::singleShot(0, &window, &QWidget::close);

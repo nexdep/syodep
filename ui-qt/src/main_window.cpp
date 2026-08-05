@@ -88,8 +88,11 @@ MainWindow::MainWindow(RendererBackend renderer,
     viewMenu->addAction(m_annotationsAction);
 
     connect(m_sidebarDock, &QDockWidget::visibilityChanged, this, [this](bool visible) {
-        if (!visible && isVisible())
-            focusCanvas();
+        if (!visible) {
+            m_annotationSidebar->clearPendingKeys();
+            if (isVisible())
+                focusCanvas();
+        }
         updateSidebarActions();
     });
     connect(m_annotationSidebar, &AnnotationSidebar::focusCanvasRequested,
@@ -101,6 +104,8 @@ MainWindow::MainWindow(RendererBackend renderer,
             this, &MainWindow::toggleHighlightsSidebar);
     connect(m_core, &CoreController::toggleAnnotationsSidebarRequested,
             this, &MainWindow::toggleAnnotationsSidebar);
+    connect(m_core, &CoreController::closeSidebarRequested,
+            this, &MainWindow::hideSidebar);
     connect(m_core, &CoreController::createTextAnnotationRequested,
             this, &MainWindow::openAnnotationCreation);
 

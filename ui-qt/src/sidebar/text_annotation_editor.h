@@ -10,7 +10,6 @@ class QPlainTextEdit;
 class QPushButton;
 class QTabWidget;
 class QStackedWidget;
-class QEvent;
 
 namespace syodep {
 
@@ -50,8 +49,6 @@ signals:
     // annotationId == 0 means create from pending anchor.
     void saveRequested(qint64 annotationId, const QString &markdown);
     void cancelCreateRequested();
-    // Clean Escape: leave the editor and focus the list. Dirty Escape stays.
-    void escapeToListRequested();
     void dirtyStateChanged(bool dirty);
 
 private slots:
@@ -70,8 +67,6 @@ private:
     void updateActions();
     void setDirty(bool dirty);
     void setSourceQuote(const QString &text);
-    bool eventFilter(QObject *watched, QEvent *event) override;
-
     qint64 m_annotationId = 0;
     QString m_sourceText;
     QString m_savedMarkdown;

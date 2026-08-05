@@ -7,6 +7,36 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-08-05 — Reliable focused-sidebar toggles and Escape close
+
+Sidebar focus no longer traps the keyboard away from `<leader>a` and
+`<leader>n`. The core now owns a second, isolated input state whose keymap is
+derived from the active mode's effective bindings and admits only the two
+sidebar toggles; custom leaders, overrides, prefix timeouts, and replay keep the
+same semantics as canvas input without allowing document commands to execute
+from a list. Plain Escape is unconditional and emits the new `close_sidebar`
+shell request even when another sidebar sequence is pending.
+
+The C ABI reports sidebar effects together with explicit handled/pending state,
+and `CoreController` owns a separate timer so sidebar prefixes cannot disturb a
+canvas prefix. `AnnotationSidebar` routes key events centrally for every
+focused child and lets unmatched events fall through to its existing local
+list controls. The editable Markdown box retains normal text input—important
+because the default leader is Space—but Escape still closes the dock. Closing
+preserves dirty drafts and reopening restores them; switching to the other
+page or invoking the active page continues through the existing centralized
+MainWindow toggle matrix.
+
+### Test strategy
+
+Core regressions cover filtering, custom leaders, active-mode overrides,
+prefix timeout, count rejection, independent document/sidebar state, and an
+Escape binding collision. FFI tests cover handled/pending/effect projection and
+null safety. The real-window smoke test now sends actual Space+A/Space+N/Escape
+events through a focused populated list and both page states, verifies
+leader-shaped Markdown remains text, and closes/reopens a dirty editor to prove
+the draft survives.
+
 ## 2026-08-05 — Channel-aware build versions
 
 `--version` and `--check` now distinguish what produced the binary instead of

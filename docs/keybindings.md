@@ -335,8 +335,15 @@ invoking the currently visible page hides the dock and focuses the canvas.
 Annotations in creation mode and never hides the dock.
 
 The dock can be closed and resized, but not floated or moved to another edge.
-Escape from either page clears local pending `gg`/`dd` state, focuses the
-canvas, and leaves the dock visible.
+While focus is anywhere in the dock, the current mode's effective bindings for
+`toggle_highlights_sidebar` and `toggle_annotations_sidebar` remain active,
+including a custom leader or mode override. They use an isolated input context,
+so unrelated document commands cannot run from the sidebar. The editable
+Markdown text box is the one exception: leader-shaped prose remains text there.
+
+Escape from either page, including empty states and a clean or dirty annotation
+editor, clears pending sidebar input, closes the dock, and focuses the canvas.
+A dirty draft is preserved and restored when Annotations is reopened.
 
 ### Highlights page
 
@@ -357,7 +364,7 @@ While the Highlights list has the keyboard:
 | `y` | copy the highlighted text |
 | `Y` | copy the highlight as Markdown |
 | `<C-S-e>` | export every highlight to a Markdown file |
-| `<Esc>` | give the canvas the keyboard back, leaving the sidebar open |
+| `<Esc>` | close the sidebar and give the canvas the keyboard back |
 
 These keys are not part of `[keys]` and cannot be rebound yet: they act on the
 sidebar's selection, which is the shell's, not the document's.
@@ -388,11 +395,12 @@ While the Annotations list has the keyboard:
 | `y` | copy the source text |
 | `Y` | copy the annotation as Markdown |
 | `<C-S-e>` | export every annotation to a Markdown file |
-| `<Esc>` | give the canvas the keyboard back, leaving the sidebar open |
+| `<Esc>` | close the sidebar and give the canvas the keyboard back |
 
-In the annotation editor: Escape on a clean draft returns to the list; Escape
-on a dirty draft keeps the editor focused and keeps the unsaved cue visible
-(no silent discard).
+In the annotation editor, Escape closes the sidebar without discarding or
+prompting. A dirty draft remains dirty and is still present when the page is
+reopened. Leader sequences are not intercepted by the editable text box, so a
+default Space leader does not prevent typing ordinary Markdown.
 
 Dirty drafts survive hiding the dock or substituting the Highlights page.
 Save / Discard / Cancel prompts appear when starting another annotation,

@@ -184,8 +184,6 @@ AnnotationsPanel::AnnotationsPanel(CoreController *core, QWidget *parent)
             this, &AnnotationsPanel::onSaveRequested);
     connect(m_editor, &TextAnnotationEditor::cancelCreateRequested,
             this, &AnnotationsPanel::onCancelCreate);
-    connect(m_editor, &TextAnnotationEditor::escapeToListRequested,
-            this, &AnnotationsPanel::onEditorEscapeToList);
     connect(m_editor, &TextAnnotationEditor::dirtyStateChanged,
             this, [this](bool) { updateActionState(); });
 
@@ -771,11 +769,6 @@ void AnnotationsPanel::onCancelCreate()
         m_editor->clearAnnotation();
     updateEmptyState();
     loadSelectedIntoEditor();
-    focusList();
-}
-
-void AnnotationsPanel::onEditorEscapeToList()
-{
     focusList();
 }
 

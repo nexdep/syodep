@@ -1,11 +1,16 @@
 #include "sidebar/annotation_sidebar.h"
 
+#include <QApplication>
+#include <QEvent>
+#include <QKeyEvent>
+#include <QPlainTextEdit>
 #include <QVBoxLayout>
 #include <QStackedWidget>
 #include <QListView>
 #include <QAction>
 
 #include "core_controller.h"
+#include "key_encoder.h"
 #include "sidebar/highlights_panel.h"
 #include "sidebar/annotations_panel.h"
 
@@ -35,7 +40,42 @@ AnnotationSidebar::AnnotationSidebar(CoreController *core, QWidget *parent)
         m_annotations->exportAction()->trigger();
     });
 
+    // Keyboard focus may live on any current or lazily-created sidebar child.
+    // A scoped application filter keeps the routing in one place without
+    // teaching every list, empty state, preview, and button about commands.
+    qApp->installEventFilter(this);
+
     showPage(SidebarPage::Highlights);
+}
+
+bool AnnotationSidebar::eventFilter(QObject *watched, QEvent *event)
+{
+    if (!m_core || !isVisible() || event->type() != QEvent::KeyPress)
+        return QWidget::eventFilter(watched, event);
+
+    auto *target = qobject_cast<QWidget *>(watched);
+    if (!target || (target != this && !isAncestorOf(target)))
+        return QWidget::eventFilter(watched, event);
+
+    auto *key = static_cast<QKeyEvent *>(event);
+    bool insideEditableMarkdown = false;
+    for (QWidget *widget = target; widget && widget != this; widget = widget->parentWidget()) {
+        if (qobject_cast<QPlainTextEdit *>(widget)) {
+            insideEditableMarkdown = true;
+            break;
+        }
+    }
+    const bool plainEscape = key->key() == Qt::Key_Escape
+        && (key->modifiers() & ~Qt::KeypadModifier) == Qt::NoModifier;
+    if (insideEditableMarkdown && !plainEscape)
+        return QWidget::eventFilter(watched, event);
+
+    const QString chord = encodeKeyEvent(key);
+    if (!chord.isEmpty() && m_core->sendSidebarKey(chord)) {
+        key->accept();
+        return true;
+    }
+    return QWidget::eventFilter(watched, event);
 }
 
 void AnnotationSidebar::ensureAnnotationsPanel()
@@ -95,6 +135,7 @@ bool AnnotationSidebar::confirmDiscardDirty(const QString &actionLabel)
 
 void AnnotationSidebar::clearPendingKeys()
 {
+    m_core->cancelSidebarInput();
     m_highlights->clearPendingKey();
     if (m_annotations)
         m_annotations->clearPendingKey();

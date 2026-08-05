@@ -6,6 +6,7 @@
 class QStackedWidget;
 class QListView;
 class QAction;
+class QEvent;
 
 namespace syodep {
 
@@ -62,6 +63,7 @@ private:
     // not construct QPlainTextEdit /
     // preview widgets until the Annotations page is actually shown.
     void ensureAnnotationsPanel();
+    bool eventFilter(QObject *watched, QEvent *event) override;
 
     CoreController *m_core = nullptr;
     QStackedWidget *m_stack = nullptr;

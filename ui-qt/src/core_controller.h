@@ -162,6 +162,11 @@ public:
     // Input and view
     void sendKey(const QString &chord);
     void handleKeyTimeout();
+    // Isolated input path used while keyboard focus is inside the annotation
+    // sidebar. Returns whether the focused widget should consume the event.
+    bool sendSidebarKey(const QString &chord);
+    void handleSidebarKeyTimeout();
+    void cancelSidebarInput();
     // Configured multi-key timeout, so shell-local key sequences (the
     // sidebar's `gg`/`dd`) expire on the same clock as the core's.
     int keyTimeoutMs() const { return m_pendingInputTimer.interval(); }
@@ -249,6 +254,7 @@ signals:
     // keyboard focus lands.
     void toggleHighlightsSidebarRequested();
     void toggleAnnotationsSidebarRequested();
+    void closeSidebarRequested();
     // `n` captured a pending anchor; open Annotations in creation mode.
     void createTextAnnotationRequested();
     void keybindingsOverlayChanged();
@@ -263,7 +269,9 @@ private:
 
     void assertGuiThread() const;
     bool applyEffects(uint32_t effects,
-                      QuitDelivery quitDelivery = QuitDelivery::EmitSignal);
+                      QuitDelivery quitDelivery = QuitDelivery::EmitSignal,
+                      bool updateDocumentInputTimer = true);
+    void updateSidebarInputTimer(bool pending);
 
     static QString takeSyoString(char *value);
     static QColor toQColor(uint8_t r, uint8_t g, uint8_t b, uint8_t a);
@@ -271,6 +279,7 @@ private:
 
     SyoApp *m_app = nullptr;
     QTimer m_pendingInputTimer;
+    QTimer m_sidebarInputTimer;
 };
 
 } // namespace syodep

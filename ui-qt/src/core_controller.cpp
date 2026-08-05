@@ -92,6 +92,10 @@ CoreController::CoreController(CorePersistence persistence, QObject *parent)
     if (m_app)
         m_pendingInputTimer.setInterval(int(syo_app_key_timeout_ms(m_app)));
     connect(&m_pendingInputTimer, &QTimer::timeout, this, &CoreController::handleKeyTimeout);
+    m_sidebarInputTimer.setSingleShot(true);
+    m_sidebarInputTimer.setInterval(m_pendingInputTimer.interval());
+    connect(&m_sidebarInputTimer, &QTimer::timeout,
+            this, &CoreController::handleSidebarKeyTimeout);
 }
 
 CoreController::CoreController(const QString &databasePath, QObject *parent)
@@ -108,12 +112,17 @@ CoreController::CoreController(const QString &databasePath, QObject *parent)
     if (m_app)
         m_pendingInputTimer.setInterval(int(syo_app_key_timeout_ms(m_app)));
     connect(&m_pendingInputTimer, &QTimer::timeout, this, &CoreController::handleKeyTimeout);
+    m_sidebarInputTimer.setSingleShot(true);
+    m_sidebarInputTimer.setInterval(m_pendingInputTimer.interval());
+    connect(&m_sidebarInputTimer, &QTimer::timeout,
+            this, &CoreController::handleSidebarKeyTimeout);
 }
 
 CoreController::~CoreController()
 {
     assertGuiThread();
     m_pendingInputTimer.stop();
+    m_sidebarInputTimer.stop();
     if (m_app) {
         syo_app_free(m_app);
         m_app = nullptr;
@@ -167,6 +176,44 @@ void CoreController::handleKeyTimeout()
     if (!m_app)
         return;
     applyEffects(syo_app_key_timeout(m_app));
+}
+
+bool CoreController::sendSidebarKey(const QString &chord)
+{
+    assertGuiThread();
+    if (!m_app || chord.isEmpty())
+        return false;
+    const SyoSidebarInputResult result =
+        syo_app_sidebar_key_event(m_app, chord.toUtf8().constData());
+    updateSidebarInputTimer(result.pending);
+    applyEffects(result.effects, QuitDelivery::EmitSignal, false);
+    return result.handled;
+}
+
+void CoreController::handleSidebarKeyTimeout()
+{
+    assertGuiThread();
+    if (!m_app)
+        return;
+    const SyoSidebarInputResult result = syo_app_sidebar_key_timeout(m_app);
+    updateSidebarInputTimer(result.pending);
+    applyEffects(result.effects, QuitDelivery::EmitSignal, false);
+}
+
+void CoreController::cancelSidebarInput()
+{
+    assertGuiThread();
+    m_sidebarInputTimer.stop();
+    if (m_app)
+        syo_app_sidebar_key_cancel(m_app);
+}
+
+void CoreController::updateSidebarInputTimer(bool pending)
+{
+    if (pending && m_sidebarInputTimer.interval() > 0)
+        m_sidebarInputTimer.start();
+    else
+        m_sidebarInputTimer.stop();
 }
 
 void CoreController::scrollBy(float dx, float dy)
@@ -652,22 +699,27 @@ bool CoreController::quitDiscarding()
     return applyEffects(syo_app_quit_discard(m_app), QuitDelivery::ReturnOnly);
 }
 
-bool CoreController::applyEffects(uint32_t effects, QuitDelivery quitDelivery)
+bool CoreController::applyEffects(uint32_t effects,
+                                  QuitDelivery quitDelivery,
+                                  bool updateDocumentInputTimer)
 {
     assertGuiThread();
 
     if (effects & SYO_EFFECT_QUIT) {
         m_pendingInputTimer.stop();
+        m_sidebarInputTimer.stop();
         if (quitDelivery == QuitDelivery::EmitSignal)
             emit quitRequested();
         return true;
     }
 
     // 1. Pending-key timer
-    if ((effects & SYO_EFFECT_PENDING_INPUT) && m_pendingInputTimer.interval() > 0)
-        m_pendingInputTimer.start();
-    else
-        m_pendingInputTimer.stop();
+    if (updateDocumentInputTimer) {
+        if ((effects & SYO_EFFECT_PENDING_INPUT) && m_pendingInputTimer.interval() > 0)
+            m_pendingInputTimer.start();
+        else
+            m_pendingInputTimer.stop();
+    }
 
     // 2. Cache invalidation before redraw
     if (effects & SYO_EFFECT_RELOAD)
@@ -686,6 +738,8 @@ bool CoreController::applyEffects(uint32_t effects, QuitDelivery quitDelivery)
         emit toggleHighlightsSidebarRequested();
     if (effects & SYO_EFFECT_TOGGLE_ANNOTATIONS_SIDEBAR)
         emit toggleAnnotationsSidebarRequested();
+    if (effects & SYO_EFFECT_CLOSE_SIDEBAR)
+        emit closeSidebarRequested();
     if (effects & SYO_EFFECT_CREATE_ANNOTATION_REQUESTED)
         emit createTextAnnotationRequested();
 

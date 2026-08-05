@@ -285,6 +285,20 @@ impl InputState {
 
     /// Feed one key press through the state machine.
     pub fn handle(&mut self, keymap: &Keymap, chord: Chord) -> KeyOutcome {
+        self.handle_inner(keymap, chord, true)
+    }
+
+    /// Feed one key press without interpreting leading digits as a count.
+    ///
+    /// Modal presentation contexts use the same sequence/prefix machinery as
+    /// document input, but a digit that is not part of one of their bindings
+    /// must remain available to the focused widget rather than becoming an
+    /// invisible count prefix.
+    pub fn handle_without_count(&mut self, keymap: &Keymap, chord: Chord) -> KeyOutcome {
+        self.handle_inner(keymap, chord, false)
+    }
+
+    fn handle_inner(&mut self, keymap: &Keymap, chord: Chord, allow_count: bool) -> KeyOutcome {
         // Escape always clears buffered input first; only a bare Escape
         // reaches the keymap (where it is bound to `cancel` by default).
         if chord == Chord::named(NamedKey::Escape) && self.has_pending() {
@@ -296,7 +310,7 @@ impl InputState {
         // bound sequence (so users may bind digits if they want). `0` only
         // counts when a count is already in progress, mirroring Vim where
         // a leading 0 is a motion.
-        if self.pending.is_empty() {
+        if allow_count && self.pending.is_empty() {
             if let Key::Char(c) = chord.key {
                 if let Some(digit) = c.to_digit(10) {
                     let starts_binding =

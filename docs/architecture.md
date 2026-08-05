@@ -80,7 +80,7 @@ input take plain data). Key pieces:
   (see roadmap) and will live behind the same `App::render_page` seam.
 - **`App`** (`app.rs`): glues everything; input events come in, `Effects`
   (redraw / quit / open-file-dialog / pending-input / reload / confirm-quit /
-  annotations-changed) come out. The pending-input and reload bits are state
+  annotations-changed / sidebar requests) come out. The pending-input and reload bits are state
   rather than one-shot requests: `pending_input` tells the shell whether to arm
   its pause timer, and `reload` tells it a save rewrote the document, so cached
   page bitmaps must be dropped even though nothing else about the view changed.
@@ -96,6 +96,13 @@ input take plain data). Key pieces:
   points cannot bypass the modal boundary. The underlying mode, selection and
   viewport are untouched. Common rows are factored by identical resolved
   `(chord sequence, command)` mappings across all four modes.
+- **Sidebar input context** (`input.rs` + `app.rs`): a second `InputState`,
+  independent from canvas/help input. Its keymap copies only the current
+  mode's effective Highlights and Annotations toggle bindings, then installs
+  unconditional Escape as `close_sidebar`; unrelated document commands can
+  never resolve while a sidebar child has focus. The result reports handled
+  and pending state separately from effects, letting the shell preserve its
+  local list keys and own a separate timeout without interpreting bindings.
 - **Focus mode** (`caret.rs` + `app.rs`): one highlighted position over
   page-content geometry. `Mode` has exactly four variants — `Normal`, `Focus`,
   `Visual`, `Highlight` — and *granularity is not a mode*: `Focus` carries a `Scope` (char,
@@ -556,13 +563,13 @@ Markdown, `syo_app_delete_highlight`) feeds the Qt sidebar through
 MainWindow
     native dialogs and window composition; modal KeybindingsOverlay
     status bar, quit confirmation
-    the one sidebar toggle (View → Highlights, <leader>a, dock close button)
+    the one sidebar dock (View actions, leader toggles, Escape, close button)
 
 CoreController
     owns SyoApp*
     C ABI conversion to owned Qt values
     effect-bit routing → signals
-    pending-key QTimer
+    independent document/help and sidebar pending-key QTimers
     annotation snapshot / revision / reveal / Markdown / delete
 
 CanvasWidget
@@ -579,7 +586,8 @@ KeybindingsOverlay
 AnnotationSidebar (QDockWidget "Highlights", right edge, closable only)
     HighlightListModel — disposable snapshot projection, core's order kept
     HighlightDelegate — card paint (page, state, source text)
-    keyboard navigation (j/k, gg/G, Enter, dd, y/Y, Esc)
+    keyboard navigation (j/k, gg/G, Enter, dd, y/Y)
+    isolated effective leader toggles + Escape close
     empty states (no document / no highlights)
     reveal + clipboard + delete via CoreController
     Markdown file export (QSaveFile)
@@ -628,10 +636,13 @@ Seven small components; intentionally boring:
   add an independent Markdown list + editor (`SafeMarkdownView`): full source
   and full body in the snapshot; cards derive a plain-text preview only.
   Both pages refresh on the shared `annotationRevision` and restore selection
-  by stable id. Shared list keys live in `sidebar_list_keys.h`. Escape in the
-  list focuses the canvas and leaves the dock open; Escape in a clean editor
-  returns to the list, while a dirty editor keeps focus and reinforces the
-  unsaved cue. Dirty prompts are Save / Discard / Cancel (failed Save aborts
+  by stable id. Shared list keys live in `sidebar_list_keys.h`. A scoped event
+  router mechanically encodes focused-child key events and sends them through
+  the core's isolated sidebar context; it consumes only bindings the core
+  handles, so local list keys remain local. The editable `QPlainTextEdit`
+  keeps all text input except plain Escape, avoiding collisions with the
+  default Space leader. Escape anywhere in either page closes the dock and
+  preserves a dirty draft. Dirty prompts are Save / Discard / Cancel (failed Save aborts
   the transition). Drafts survive hide and page substitution; prompts run on
   new create, document change, quit, delete of the edited row, and selection
   change that would replace the editor — not on hide, Highlights substitute,
@@ -644,7 +655,9 @@ Seven small components; intentionally boring:
   Highlights; `<leader>n` and `View → Annotations` toggle Annotations;
   `n` opens Annotations in creation mode and never hides the dock. Opening a
   document focuses the canvas unless the dock was already visible (then the
-  previous page stays active). It does not own or free `SyoApp*`. The canvas
+  previous page stays active). The `close_sidebar` effect and dock close button
+  both terminate at `hideSidebar`, sharing pending-key cleanup and canvas-focus
+  restoration. It does not own or free `SyoApp*`. The canvas
   fills the window but leaves `acceptDrops()` false, so Qt delivers drag
   events to the window; only it needs the flag.
 - `diagnostics` enforces the generic Wayland QPA on Linux, probes the real

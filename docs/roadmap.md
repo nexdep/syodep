@@ -15,7 +15,7 @@ Status legend: ✅ done · 🚧 in progress · ⬜ planned
 - ✅ SQLite database with versioned migrations
 - ✅ Save/restore last reading position (fingerprint-keyed)
 - ✅ Render cache (byte-bounded LRU)
-- ✅ Tests (680), CI (lint, Linux+Windows tests, Qt build, smoke test,
+- ✅ Tests (687), CI (lint, Linux+Windows tests, Qt build, smoke test,
   docs checks), documentation set
 
 ## Phase 2 — selection, annotation, search ⬜
@@ -48,8 +48,9 @@ Ordered roughly by dependency:
    sections; clipboard + `.md` file export). JSON export is not implemented
 10. ✅ Annotation sidebar (Qt) — one fixed-right dock with mutually exclusive
     Highlights and Annotations pages (`<leader>a` / `<leader>n`), keyboard-driven
-    lists, Markdown annotation editing, clipboard copy and file export. Agent chat,
-    filtering, and external PDF annotation import remain planned.
+    lists, focus-safe effective toggle bindings, Escape-to-close with preserved
+    drafts, Markdown annotation editing, clipboard copy and file export. Agent
+    chat, filtering, and external PDF annotation import remain planned.
 
 Delivered ahead of the rest: a **modal caret** (`c` to enter, then `hjkl`)
 navigates the content layer character- and line-wise across text and images,

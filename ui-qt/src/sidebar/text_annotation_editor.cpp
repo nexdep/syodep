@@ -1,8 +1,6 @@
 #include "sidebar/text_annotation_editor.h"
 
 #include <QHBoxLayout>
-#include <QEvent>
-#include <QKeyEvent>
 #include <QKeySequence>
 #include <QLabel>
 #include <QPlainTextEdit>
@@ -71,13 +69,11 @@ TextAnnotationEditor::TextAnnotationEditor(QWidget *parent)
     m_editor = new QPlainTextEdit(m_tabs);
     m_editor->setPlaceholderText(tr("Write a Markdown annotation…"));
     m_editor->setTabChangesFocus(false);
-    m_editor->installEventFilter(this);
     // Placeholder until the Preview tab is opened — avoids constructing a
     // QTextBrowser beside a failed GL context during graphics probing.
     m_previewPlaceholder = new QWidget(m_tabs);
     m_tabs->addTab(m_editor, tr("Edit"));
     m_tabs->addTab(m_previewPlaceholder, tr("Preview"));
-    m_tabs->installEventFilter(this);
     pageLayout->addWidget(m_tabs, 1);
 
     m_dirtyLabel = new QLabel(m_editorPage);
@@ -119,7 +115,6 @@ void TextAnnotationEditor::ensurePreview()
         return;
 
     m_preview = new SafeMarkdownView(m_tabs);
-    m_preview->installEventFilter(this);
     const int previewIndex = m_tabs->indexOf(m_previewPlaceholder);
     if (previewIndex >= 0) {
         m_tabs->removeTab(previewIndex);
@@ -269,26 +264,6 @@ void TextAnnotationEditor::focusEditor()
 {
     m_tabs->setCurrentIndex(0);
     m_editor->setFocus(Qt::OtherFocusReason);
-}
-
-bool TextAnnotationEditor::eventFilter(QObject *watched, QEvent *event)
-{
-    if (event->type() == QEvent::KeyPress
-        && (watched == m_editor || watched == m_tabs || watched == m_preview)) {
-        auto *key = static_cast<QKeyEvent *>(event);
-        if (key->key() == Qt::Key_Escape
-            && (key->modifiers() & ~Qt::KeypadModifier) == Qt::NoModifier) {
-            if (isDirty()) {
-                m_dirtyLabel->setVisible(true);
-                m_dirtyLabel->setText(tr("Unsaved changes — save or discard first"));
-                focusEditor();
-                return true;
-            }
-            emit escapeToListRequested();
-            return true;
-        }
-    }
-    return QWidget::eventFilter(watched, event);
 }
 
 void TextAnnotationEditor::onTextChanged()

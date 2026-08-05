@@ -67,7 +67,6 @@ private slots:
     void onActivated(const QModelIndex &index);
     void onSaveRequested(qint64 annotationId, const QString &markdown);
     void onCancelCreate();
-    void onEditorEscapeToList();
     void exportToFile();
     void deleteSelected();
     void revealCurrent();

@@ -79,6 +79,7 @@ focused.
 | `save_document` | overwrite the open PDF with its highlights embedded |
 | `toggle_highlights_sidebar` | toggle or activate the Highlights sidebar page |
 | `toggle_annotations_sidebar` | toggle or activate the Annotations sidebar page |
+| `close_sidebar` | hide whichever sidebar page is visible and focus the canvas |
 | `toggle_keybindings_overlay` | show or hide the modal keybinding reference |
 | `create_annotation` | capture the current Focus/Visual/Highlight source as a pending Markdown annotation and open the editor (rejected in Normal mode) |
 | `quit` | save the reading position and quit; asks first if there are highlights not yet saved to the PDF |
@@ -120,9 +121,10 @@ Two consequences worth knowing:
 - Rewriting changes the file's content hash, and syodep keys documents by hash so
   their state survives moves and renames. The document's row is moved to the new
   hash as part of the save, so the reading position carries over.
-- Once the highlights are in the PDF, syodep stops drawing them as an overlay and
-  its own records of them are dropped — the renderer draws the annotations
-  themselves, and drawing both would paint them twice. They keep the same
+- Once the highlights are in the PDF, syodep stops drawing them as an overlay
+  but keeps their database rows as Embedded records for stable sidebar ids and
+  export. The renderer draws the PDF annotations themselves, and drawing both
+  would paint them twice. They keep the same
   colour and opacity: `highlight_opacity` is written into the saved
   annotation, and the live overlay already previews it with the same Multiply
   blending every reader uses for a highlight, so a highlight looks the same
@@ -147,6 +149,14 @@ canvas. `View → Highlights` runs the same code.
 Bound to `<leader>n`. Mirrors `toggle_highlights_sidebar` for the Annotations
 page of the same dock. Cross-toggling substitutes the page without hiding the
 dock; self-toggling hides it.
+
+### `close_sidebar`
+
+Has no default document binding. The sidebar's isolated input context binds
+plain `<Esc>` to it unconditionally, so Escape hides either page and returns
+focus to the canvas even when a leader sequence is half typed. It is a shell
+request like the two toggles: when the dock is already hidden, there is nothing
+to close.
 
 ### `create_annotation`
 
