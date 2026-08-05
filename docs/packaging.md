@@ -24,8 +24,10 @@ a debug config links `/MDd` against MuPDF's `/MD` objects and fails.
 
 ## Release pipeline (specification)
 
-Target artifacts, produced by `.github/workflows/release.yml` on `v*` tags
-and on pushes to `main` for the rolling continuous prerelease:
+Target artifacts are coordinated by `.github/workflows/release.yml` on `v*`
+tags and on pushes to `main` for the rolling continuous prerelease. Its Linux
+job calls the reusable `.github/workflows/appimage.yml` builder; the same
+builder can be dispatched manually when only a test AppImage is needed.
 
 | Artifact | Tooling | Status |
 |---|---|---|
@@ -57,15 +59,17 @@ AppImage as `syodep-vX.Y.Z-x86_64.AppImage`, with generated notes.
 On `main` pushes, `publish-continuous` updates the rolling prerelease at
 `https://github.com/nexdep/syodep/releases/tag/continuous` with
 `syodep-continuous-win64.zip` and `syodep-continuous-x86_64.AppImage`.
-Manual (`workflow_dispatch`) runs stop at workflow artifacts.
+Manual `release.yml` runs stop at workflow artifacts.
 
 ### Linux AppImage (implemented)
 
-`release-build-linux` runs in an **`ubuntu:22.04` container** on the
-24.04 runner: an AppImage inherits the glibc floor of its build machine,
-and 22.04's glibc 2.35 covers Ubuntu 22.04+, Debian 12+, Fedora 36+ and
-anything newer. Qt (6.2 LTS) comes from the container's apt and is
-bundled; Rust is installed via rustup inside the container.
+The reusable AppImage builder runs in an **`ubuntu:22.04` container** on the
+24.04 runner: an AppImage inherits the glibc floor of its build machine, and
+22.04's glibc 2.35 covers Ubuntu 22.04+, Debian 12+, Fedora 36+ and anything
+newer. Qt (6.2 LTS) comes from the container's apt and is bundled; Rust is
+installed via rustup inside the container. Cargo dependencies and their native
+build outputs are cached across runs, but workspace crates are rebuilt so the
+binary always carries the selected commit's identity.
 
 Packaging uses `linuxdeploy` + `linuxdeploy-plugin-qt` (prebuilt
 binaries, run with `--appimage-extract-and-run` since containers lack
@@ -90,6 +94,19 @@ simulates WSL without a Wayland socket and must select XCB; headless Weston
 simulates WSLg and must select Wayland. Both paths construct the real
 `QOpenGLWidget` canvas and require a valid OpenGL context, so an incomplete
 bundle fails in CI before `syodep-x86_64.AppImage` is uploaded.
+
+For a Linux-only development build, open **Actions → AppImage Preview → Run
+workflow**, select the branch to build, and download the
+`syodep-x86_64-appimage` artifact when the run finishes. The preview is not a
+reduced package: it uses the exact release builder and both smoke tests. The
+artifact is retained for 14 days and does not create or update a GitHub
+release. The equivalent CLI flow is:
+
+```bash
+gh workflow run appimage.yml --ref <branch>
+gh run watch
+gh run download <run-id> -n syodep-x86_64-appimage
+```
 
 ### Scoop (implemented)
 

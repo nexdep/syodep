@@ -7,6 +7,26 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-08-05 — Reusable AppImage preview workflow
+
+The production Linux AppImage builder now lives in a reusable, manually
+dispatchable workflow. `release.yml` calls that workflow for `main` and tagged
+releases, while **AppImage Preview** can build any selected branch without
+also waiting for the Windows zip and installer. Both paths retain the same
+Ubuntu 22.04 userland, linuxdeploy bundle, plugin inspection, and XCB/Wayland
+smoke tests, and upload the same `syodep-x86_64-appimage` artifact contract.
+
+The builder caches Rust dependencies and native dependency outputs under an
+AppImage-specific key, notably avoiding repeated vendored MuPDF compilation.
+Workspace crates are excluded so git-derived application identity is rebuilt
+for every selected commit. Preview artifacts expire after 14 days.
+
+Test strategy: validate both workflow files as YAML, syntax-check their embedded
+Linux shell scripts, run the repository's full test/lint/docs/build/smoke gates,
+then exercise the GitHub-hosted builder by manually dispatching **AppImage
+Preview** and downloading the resulting artifact. The release caller preserves
+the existing artifact name consumed by both publication jobs.
+
 ## 2026-08-05 — Complete AppImage Wayland EGL integration
 
 The v0.15.1 AppImage bundled Qt's Wayland platform plugins but omitted the
