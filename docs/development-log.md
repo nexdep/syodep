@@ -7,6 +7,23 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-08-05 — Fix AppImage Wayland EGL RUNPATH
+
+The preview AppImage contained both Qt's Wayland EGL client plugin and
+`libQt6WaylandEglClientHwIntegration.so.6`, but linuxdeploy gave the manually
+seeded nested plugin a RUNPATH to the AppDir root instead of `usr/lib`. On a
+machine without that exact Qt library installed system-wide, including WSLg,
+the plugin was discoverable but failed to load and `auto` fell back to raster
+after noisy `QOpenGLWidget` errors.
+
+Packaging now patches the plugin RUNPATH to `$ORIGIN/../../lib:$ORIGIN` after
+linuxdeploy populates the AppDir. A regression script checks both the relative
+RUNPATH and that `ldd` resolves the Wayland EGL client library to the AppDir's
+own `usr/lib`; unlike the old check, it does not inject that directory through
+`LD_LIBRARY_PATH` and therefore cannot hide a broken bundle behind the build
+container's Qt installation. The extracted published artifact reproduced the
+failure before the patch; the corrected extracted tree loads OpenGL on WSLg.
+
 ## 2026-08-05 — Repair reusable release permissions
 
 The Linux release caller now grants the reusable AppImage workflow the

@@ -80,7 +80,12 @@ plugins, and Wayland's separate
 `wayland-graphics-integration-client/libqt-plugin-wayland-egl.so`. The latter
 is required for a Wayland `QOpenGLWidget`; a top-level
 `platforms/libqwayland-egl.so` alone can load while leaving Qt with no client
-buffer integration. The Qt deployment plugin adds XCB by default, so the job
+buffer integration. Because linuxdeploy assigns that manually seeded nested
+plugin a RUNPATH relative to the AppDir root, packaging corrects it to
+`$ORIGIN/../../lib:$ORIGIN` after deployment. The bundle check requires its
+`libQt6WaylandEglClientHwIntegration.so.6` dependency to resolve specifically
+from the AppDir's `usr/lib`, so a copy installed on the build host cannot mask a
+broken AppImage. The Qt deployment plugin adds XCB by default, so the job
 populates `AppDir` first, deletes every QPA plugin except the two Wayland ones,
 and only then creates the AppImage. `qt6-wayland` is installed in the build
 container so all of these plugins come from the same Qt 6.2.4 installation.

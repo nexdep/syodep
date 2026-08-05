@@ -53,7 +53,7 @@ jobs:
             build-essential clang libclang-dev cmake ninja-build \
             qt6-base-dev libqt6opengl6-dev qt6-wayland libgl1-mesa-dev \
             libfontconfig1-dev libfreetype-dev \
-            curl file ca-certificates unzip weston
+            curl file ca-certificates unzip patchelf weston
       - name: Install Rust
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
@@ -108,6 +108,12 @@ jobs:
           test -f "$platform_dir/libqwayland-generic.so"
           test ! -e "$platform_dir/libqxcb.so"
           test ! -e "$platform_dir/libqoffscreen.so"
+          # linuxdeploy calculates this nested, manually-seeded plugin's
+          # RUNPATH from the AppDir root instead of usr/lib. Correct it after
+          # deployment, then prove the dependency resolves from the bundle.
+          wayland_egl="AppDir/usr/plugins/$wayland_egl_rel"
+          patchelf --set-rpath '$ORIGIN/../../lib:$ORIGIN' "$wayland_egl"
+          scripts/check-appimage-wayland-egl.sh AppDir
           ./linuxdeploy-x86_64.AppImage --appdir AppDir --output appimage
       - name: Verify bundled Qt platform plugins
         run: |
@@ -119,18 +125,7 @@ jobs:
           test -f "$platform_dir/libqwayland-generic.so"
           test ! -e "$platform_dir/libqxcb.so"
           test ! -e "$platform_dir/libqoffscreen.so"
-          plugin_root="$(dirname "$platform_dir")"
-          wayland_egl="$plugin_root/wayland-graphics-integration-client/libqt-plugin-wayland-egl.so"
-          test -f "$wayland_egl"
-          wayland_client_lib="$(find squashfs-root -name 'libQt6WaylandEglClientHwIntegration.so.6' -print -quit)"
-          test -n "$wayland_client_lib"
-          LD_LIBRARY_PATH="$(dirname "$wayland_client_lib")" ldd "$wayland_egl" \
-            > wayland-egl-ldd.txt
-          cat wayland-egl-ldd.txt
-          if grep -q 'not found' wayland-egl-ldd.txt; then
-            echo "Wayland EGL client integration has unresolved dependencies" >&2
-            exit 1
-          fi
+          scripts/check-appimage-wayland-egl.sh squashfs-root
       # Run the actual AppImage so a missing bundled lib fails here, not on a
       # user's machine. Both presentation backends use the shipped Wayland QPA.
       - name: Smoke test the AppImage (Wayland OpenGL + raster)
