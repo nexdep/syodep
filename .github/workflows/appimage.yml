@@ -2,6 +2,12 @@ name: AppImage Preview
 
 on:
   workflow_call:
+    inputs:
+      release_call:
+        description: "True when release.yml invokes the shared builder"
+        required: false
+        type: boolean
+        default: false
   workflow_dispatch:
   # Main also calls this builder through release.yml. Run a second, independent
   # preview there so a downloadable AppImage is available as soon as Linux
@@ -169,3 +175,80 @@ jobs:
           path: syodep-x86_64.AppImage
           if-no-files-found: error
           retention-days: 14
+
+  publish-appimage-preview:
+    name: Publish raw AppImage preview
+    # Direct main pushes publish a raw release asset. release.yml passes
+    # release_call=true, so its reuse of this builder never races this job.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && !inputs.release_call
+    needs: build-appimage
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    concurrency:
+      group: appimage-preview
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Check latest main commit
+        id: freshness
+        run: |
+          git fetch origin main --depth=1
+          latest_main="$(git rev-parse origin/main)"
+          if [ "$GITHUB_SHA" = "$latest_main" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping stale AppImage preview for $GITHUB_SHA; latest main is $latest_main."
+          fi
+      - uses: actions/download-artifact@v4
+        if: steps.freshness.outputs.publish == 'true'
+        with:
+          name: syodep-x86_64-appimage
+      - name: Update raw AppImage prerelease
+        if: steps.freshness.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          asset="syodep-appimage-preview-x86_64.AppImage"
+          mv syodep-x86_64.AppImage "$asset"
+
+          built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          {
+            echo "Fast Linux AppImage preview from main."
+            echo
+            echo "- Commit: ${GITHUB_SHA}"
+            echo "- Branch: ${GITHUB_REF_NAME}"
+            echo "- Workflow run: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo "- Built at: ${built_at}"
+          } > appimage-preview-notes.md
+
+          git tag -f appimage-preview "$GITHUB_SHA"
+          git push origin refs/tags/appimage-preview --force
+
+          if gh release view appimage-preview --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit appimage-preview \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "syodep AppImage preview" \
+              --notes-file appimage-preview-notes.md \
+              --prerelease
+          else
+            gh release create appimage-preview \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --title "syodep AppImage preview" \
+              --notes-file appimage-preview-notes.md \
+              --prerelease
+          fi
+
+          release_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/appimage-preview" --jq .id)"
+          gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
+            -f make_latest=false \
+            --silent
+
+          gh release upload appimage-preview \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber \
+            "$asset"

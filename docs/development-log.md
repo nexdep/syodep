@@ -21,6 +21,14 @@ the same Ubuntu 22.04 userland, linuxdeploy bundle, plugin inspection, and
 XCB/Wayland smoke tests, and upload the same `syodep-x86_64-appimage` artifact
 contract.
 
+Automatic `main` previews also update the `appimage-preview` rolling
+prerelease with a raw `syodep-appimage-preview-x86_64.AppImage` asset. The
+publisher confirms its commit is still the tip of `main` before replacing the
+tag and asset, and is serialized so older builds cannot win a race. The
+release caller passes an explicit input that suppresses this publisher: only
+the direct preview workflow updates the fast Linux-only prerelease; the
+existing `continuous` prerelease remains all-platform and Windows-gated.
+
 The builder caches Rust dependencies and native dependency outputs under an
 AppImage-specific key, notably avoiding repeated vendored MuPDF compilation.
 Workspace crates are excluded so git-derived application identity is rebuilt

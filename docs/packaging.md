@@ -101,6 +101,12 @@ For a Linux-only development build, push a branch change under `crates/`,
 automatically. On `main`, it intentionally builds alongside the release
 workflow so its downloadable artifact is ready as soon as the Linux job
 finishes, without waiting for the Windows build and `continuous` publication.
+After a successful automatic `main` preview, the raw AppImage is available at
+`https://github.com/nexdep/syodep/releases/tag/appimage-preview` as
+`syodep-appimage-preview-x86_64.AppImage`. This rolling prerelease contains
+only the fast Linux asset; `continuous` remains the later, all-platform
+prerelease. Manual and feature-branch previews remain downloadable workflow
+artifacts.
 You can also open **Actions → AppImage Preview → Run workflow**, select any
 branch to build, and download the
 `syodep-x86_64-appimage` artifact when the run finishes. The preview is not a

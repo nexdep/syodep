@@ -24,6 +24,8 @@ jobs:
   release-build-linux:
     name: Release build (Linux AppImage)
     uses: ./.github/workflows/appimage.yml
+    with:
+      release_call: true
 
   release-build-windows:
     name: Release build (Windows portable zip)
