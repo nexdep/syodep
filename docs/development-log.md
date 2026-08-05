@@ -9,12 +9,17 @@ then `docs/roadmap.md` for what to build next.
 
 ## 2026-08-05 — Reusable AppImage preview workflow
 
-The production Linux AppImage builder now lives in a reusable, manually
-dispatchable workflow. `release.yml` calls that workflow for `main` and tagged
-releases, while **AppImage Preview** can build any selected branch without
-also waiting for the Windows zip and installer. Both paths retain the same
-Ubuntu 22.04 userland, linuxdeploy bundle, plugin inspection, and XCB/Wayland
-smoke tests, and upload the same `syodep-x86_64-appimage` artifact contract.
+The production Linux AppImage builder now lives in a reusable workflow.
+`release.yml` calls that workflow for `main` and tagged releases, while
+**AppImage Preview** automatically builds branch pushes that change `crates/`,
+`ui-qt/`, `packaging/`, or workflow files, and can manually build any selected
+branch without also waiting for the Windows zip and installer. `main` runs a
+second independent preview intentionally: its artifact is downloadable as soon
+as the Linux job completes, rather than after the Windows build allows
+`continuous` publication. Tags use only the release caller. Both paths retain
+the same Ubuntu 22.04 userland, linuxdeploy bundle, plugin inspection, and
+XCB/Wayland smoke tests, and upload the same `syodep-x86_64-appimage` artifact
+contract.
 
 The builder caches Rust dependencies and native dependency outputs under an
 AppImage-specific key, notably avoiding repeated vendored MuPDF compilation.

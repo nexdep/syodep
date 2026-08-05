@@ -3,6 +3,18 @@ name: AppImage Preview
 on:
   workflow_call:
   workflow_dispatch:
+  # Main also calls this builder through release.yml. Run a second, independent
+  # preview there so a downloadable AppImage is available as soon as Linux
+  # finishes instead of waiting for the Windows release job. Restrict this to
+  # branches: tagged releases use only release.yml's builder.
+  push:
+    branches:
+      - "**"
+    paths:
+      - "crates/**"
+      - "ui-qt/**"
+      - "packaging/**"
+      - ".github/workflows/**"
 
 permissions:
   contents: read

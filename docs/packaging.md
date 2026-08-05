@@ -27,7 +27,8 @@ a debug config links `/MDd` against MuPDF's `/MD` objects and fails.
 Target artifacts are coordinated by `.github/workflows/release.yml` on `v*`
 tags and on pushes to `main` for the rolling continuous prerelease. Its Linux
 job calls the reusable `.github/workflows/appimage.yml` builder; the same
-builder can be dispatched manually when only a test AppImage is needed.
+builder automatically runs on relevant branch pushes, including `main`, and
+can be dispatched manually when only a test AppImage is needed.
 
 | Artifact | Tooling | Status |
 |---|---|---|
@@ -95,8 +96,13 @@ simulates WSLg and must select Wayland. Both paths construct the real
 `QOpenGLWidget` canvas and require a valid OpenGL context, so an incomplete
 bundle fails in CI before `syodep-x86_64.AppImage` is uploaded.
 
-For a Linux-only development build, open **Actions → AppImage Preview → Run
-workflow**, select the branch to build, and download the
+For a Linux-only development build, push a branch change under `crates/`,
+`ui-qt/`, `packaging/`, or `.github/workflows/`; **AppImage Preview** runs
+automatically. On `main`, it intentionally builds alongside the release
+workflow so its downloadable artifact is ready as soon as the Linux job
+finishes, without waiting for the Windows build and `continuous` publication.
+You can also open **Actions → AppImage Preview → Run workflow**, select any
+branch to build, and download the
 `syodep-x86_64-appimage` artifact when the run finishes. The preview is not a
 reduced package: it uses the exact release builder and both smoke tests. The
 artifact is retained for 14 days and does not create or update a GitHub
