@@ -31,7 +31,10 @@ Ctrl+Shift+`?` event through encoding, opens and scrolls the widget, and closes
 through both supported paths. Workspace total: 680 tests.
 
 Release metadata advances the workspace to `0.15.0` for the minor release
-containing this feature.
+containing this feature. The packaged AppImage smoke test also accommodates a
+bare Xvfb server having no observable widget focus while still requiring the
+overlay to open, populate, navigate, and close; focus restoration remains
+asserted on platforms that could focus the canvas before opening help.
 
 ## 2026-08-04 — `[window] start_sidebar_open`
 
