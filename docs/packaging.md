@@ -71,18 +71,25 @@ Packaging uses `linuxdeploy` + `linuxdeploy-plugin-qt` (prebuilt
 binaries, run with `--appimage-extract-and-run` since containers lack
 FUSE) with `packaging/syodep.desktop` and `packaging/syodep.svg`.
 Bundled: the binary, Qt libs, platform plugins (xcb, wayland, plus
-`offscreen` via `EXTRA_PLATFORM_PLUGINS` for headless/smoke-test use).
-`qt6-wayland` is installed in the build container so
-`libqwayland-egl.so` and `libqwayland-generic.so` are available to bundle;
-the workflow extracts the finished AppImage and asserts the xcb, wayland
-and offscreen platform plugins are present before running the smoke test.
+`offscreen` via `EXTRA_PLATFORM_PLUGINS` for headless/smoke-test use), and
+Wayland's separate
+`wayland-graphics-integration-client/libqt-plugin-wayland-egl.so`. The latter
+is required for a Wayland `QOpenGLWidget`; a top-level
+`platforms/libqwayland-egl.so` alone can load while leaving Qt with no client
+buffer integration. `qt6-wayland` is installed in the build container so all
+of these plugins come from the same Qt 6.2.4 installation. The workflow
+extracts the finished AppImage, asserts the exact plugin and its
+`libQt6WaylandEglClientHwIntegration.so.6` dependency are present, and rejects
+unresolved dynamic-library dependencies.
 Excluded by linuxdeploy's default list and resolved from the host:
 glibc, libGL, fontconfig — exactly the libs that must match the user's
 system.
 
-The job then smoke-tests the actual AppImage (offscreen render of a
-generated PDF), so an incomplete bundle fails in CI, and uploads
-`syodep-x86_64.AppImage`.
+The job then smoke-tests the actual AppImage twice with a generated PDF. Xvfb
+simulates WSL without a Wayland socket and must select XCB; headless Weston
+simulates WSLg and must select Wayland. Both paths construct the real
+`QOpenGLWidget` canvas and require a valid OpenGL context, so an incomplete
+bundle fails in CI before `syodep-x86_64.AppImage` is uploaded.
 
 ### Scoop (implemented)
 

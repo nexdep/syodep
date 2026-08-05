@@ -637,7 +637,9 @@ Seven small components; intentionally boring:
   fills the window but leaves `acceptDrops()` false, so Qt delivers drag
   events to the window; only it needs the flag.
 - `diagnostics` detects the platform's graphics situation (WSL, software GL,
-  missing OpenGL) and produces the `--check`/`--version` reports. CLI-only
+  missing OpenGL) and produces the `--check`/`--version` reports. WSLg uses its
+  native Wayland socket when `WAYLAND_DISPLAY` is present; older WSL falls back
+  to XCB, and explicit environment overrides remain authoritative. CLI-only
   `syo_*` helpers (version, default paths, default config text) stay here and
   in `main.cpp` rather than being forced through `CoreController`.
 - `main.cpp` parses the CLI and implements `--smoke-test` for CI (exercises

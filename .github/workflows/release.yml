@@ -44,7 +44,7 @@ jobs:
             build-essential clang libclang-dev cmake ninja-build \
             qt6-base-dev libqt6opengl6-dev qt6-wayland libgl1-mesa-dev \
             libfontconfig1-dev libfreetype-dev \
-            curl file ca-certificates unzip xvfb
+            curl file ca-certificates unzip weston xvfb
       - name: Install Rust
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
@@ -70,6 +70,14 @@ jobs:
           export QMAKE=/usr/bin/qmake6
           export APPIMAGE_EXTRACT_AND_RUN=1
           export OUTPUT="syodep-x86_64.AppImage"
+          # EXTRA_PLATFORM_PLUGINS deploys the Wayland QPA plugin but not the
+          # client buffer integration it loads at runtime. Seed that exact Qt
+          # plugin into the AppDir before linuxdeploy packages it.
+          qt_plugins_dir="$("$QMAKE" -query QT_INSTALL_PLUGINS)"
+          wayland_egl_rel="wayland-graphics-integration-client/libqt-plugin-wayland-egl.so"
+          test -f "$qt_plugins_dir/$wayland_egl_rel"
+          install -D -m 0755 "$qt_plugins_dir/$wayland_egl_rel" \
+            "AppDir/usr/plugins/$wayland_egl_rel"
           ./linuxdeploy-x86_64.AppImage --appdir AppDir \
             --executable build/ui-qt/syodep \
             --desktop-file packaging/syodep.desktop \
@@ -86,16 +94,64 @@ jobs:
           test -f "$platform_dir/libqoffscreen.so"
           test -f "$platform_dir/libqwayland-egl.so"
           test -f "$platform_dir/libqwayland-generic.so"
+          plugin_root="$(dirname "$platform_dir")"
+          wayland_egl="$plugin_root/wayland-graphics-integration-client/libqt-plugin-wayland-egl.so"
+          test -f "$wayland_egl"
+          wayland_client_lib="$(find squashfs-root -name 'libQt6WaylandEglClientHwIntegration.so.6' -print -quit)"
+          test -n "$wayland_client_lib"
+          LD_LIBRARY_PATH="$(dirname "$wayland_client_lib")" ldd "$wayland_egl" \
+            > wayland-egl-ldd.txt
+          cat wayland-egl-ldd.txt
+          if grep -q 'not found' wayland-egl-ldd.txt; then
+            echo "Wayland EGL client integration has unresolved dependencies" >&2
+            exit 1
+          fi
       # Run the actual AppImage so a missing bundled lib fails here, not
       # on a user's machine (mirrors the Windows staged smoke test).
-      - name: Smoke test the AppImage
+      - name: Smoke test the AppImage (XCB)
         run: |
           cargo run -p syodep-pdf --features test-support \
             --example make_fixture -- fixture.pdf 5
           chmod +x syodep-x86_64.AppImage
-          xvfb-run -a ./syodep-x86_64.AppImage \
-            --appimage-extract-and-run --smoke-test fixture.pdf \
+          xvfb-run -a env -u WAYLAND_DISPLAY WSL_DISTRO_NAME=syodep-ci \
+            ./syodep-x86_64.AppImage --appimage-extract-and-run --check \
+            > xcb-check.txt
+          cat xcb-check.txt
+          grep -F "Qt platform:      xcb  (forced: WSL: no Wayland display; use X11)" \
+            xcb-check.txt
+          xvfb-run -a env -u WAYLAND_DISPLAY WSL_DISTRO_NAME=syodep-ci \
+            ./syodep-x86_64.AppImage --appimage-extract-and-run \
+            --smoke-test fixture.pdf \
             || { echo '--- smoke-progress.txt ---'; cat smoke-progress.txt 2>/dev/null || true; exit 1; }
+      - name: Smoke test the AppImage (Wayland)
+        run: |
+          runtime_dir="$PWD/wayland-runtime"
+          install -d -m 0700 "$runtime_dir"
+          export XDG_RUNTIME_DIR="$runtime_dir"
+          export WAYLAND_DISPLAY=wayland-syodep
+          unset DISPLAY QT_QPA_PLATFORM LIBGL_ALWAYS_SOFTWARE QT_OPENGL
+          LIBGL_ALWAYS_SOFTWARE=1 weston --backend=headless-backend.so \
+            --use-gl --idle-time=0 --socket="$WAYLAND_DISPLAY" \
+            --log=weston.log &
+          weston_pid=$!
+          trap 'kill "$weston_pid" 2>/dev/null || true; wait "$weston_pid" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 100); do
+            test -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" && break
+            sleep 0.1
+          done
+          if ! test -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY"; then
+            cat weston.log
+            exit 1
+          fi
+          WSL_DISTRO_NAME=syodep-ci ./syodep-x86_64.AppImage \
+            --appimage-extract-and-run --check > wayland-check.txt
+          cat wayland-check.txt
+          grep -F "Qt platform:      wayland  (forced: WSL: prefer native WSLg Wayland)" \
+            wayland-check.txt
+          WSL_DISTRO_NAME=syodep-ci ./syodep-x86_64.AppImage \
+            --appimage-extract-and-run --smoke-test fixture.pdf \
+            || { echo '--- weston.log ---'; cat weston.log; \
+                 echo '--- smoke-progress.txt ---'; cat smoke-progress.txt 2>/dev/null || true; exit 1; }
       - uses: actions/upload-artifact@v4
         with:
           name: syodep-x86_64-appimage

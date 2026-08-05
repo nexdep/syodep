@@ -7,6 +7,28 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-08-05 — Complete AppImage Wayland EGL integration
+
+The v0.15.1 AppImage bundled Qt's Wayland platform plugins but omitted the
+separate `wayland-graphics-integration-client/libqt-plugin-wayland-egl.so`.
+Consequently `QT_QPA_PLATFORM=wayland` could load the QPA backend while
+reporting no client buffer integrations, and the canvas `QOpenGLWidget` could
+not create a context. The release workflow now seeds that exact Qt 6.2.4
+plugin into the AppDir and verifies it, its Wayland EGL client library, and its
+dynamic dependency closure after extracting the finished AppImage.
+
+WSL backend selection now prefers native Wayland when `WAYLAND_DISPLAY` is
+present and retains XCB for WSL environments that expose only `DISPLAY`.
+Explicit graphics environment overrides still win, and the no-`/dev/dxg`
+software-OpenGL fallback is unchanged.
+
+Test strategy: the shell smoke test asserts the three backend-decision cases
+and requires a valid canvas OpenGL context on every non-offscreen platform.
+The packaged AppImage keeps its Xvfb/XCB smoke and adds a headless-Weston
+Wayland smoke; each simulates WSL and checks the selected backend in
+`--check` before exercising the real window. This is workflow and shell
+coverage because the failure is Qt plugin deployment, outside the Rust core.
+
 ## 2026-08-05 — Modal keybinding-help overlay
 
 `<C-?>` now opens a full-window semi-transparent, scrollable reference built

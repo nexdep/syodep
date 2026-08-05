@@ -22,6 +22,7 @@
 #include <QDockWidget>
 #include <QListView>
 #include <QKeyEvent>
+#include <QOpenGLContext>
 
 #include "canvas_widget.h"
 #include "core_controller.h"
@@ -58,10 +59,60 @@ void smokeStep(const char *msg)
     std::exit(1);
 }
 
+void verifyGraphicsDecisions()
+{
+    struct SavedEnvironment
+    {
+        const char *name;
+        bool wasSet;
+        QByteArray value;
+    };
+    SavedEnvironment saved[] = {
+        {"QT_QPA_PLATFORM", qEnvironmentVariableIsSet("QT_QPA_PLATFORM"),
+         qgetenv("QT_QPA_PLATFORM")},
+        {"LIBGL_ALWAYS_SOFTWARE", qEnvironmentVariableIsSet("LIBGL_ALWAYS_SOFTWARE"),
+         qgetenv("LIBGL_ALWAYS_SOFTWARE")},
+        {"QT_OPENGL", qEnvironmentVariableIsSet("QT_OPENGL"), qgetenv("QT_OPENGL")},
+    };
+    for (const SavedEnvironment &entry : saved)
+        qunsetenv(entry.name);
+
+    syodep::diag::PlatformInfo wsl;
+    wsl.isWsl = true;
+    wsl.hasDisplay = true;
+    wsl.displayValue = QStringLiteral(":0");
+    wsl.hasWaylandDisplay = true;
+    wsl.waylandValue = QStringLiteral("wayland-0");
+
+    const syodep::diag::GraphicsDecision wayland = syodep::diag::decideFallbacks(wsl);
+    if (!wayland.forcePlatform || wayland.platform != QStringLiteral("wayland"))
+        smokeFail(QStringLiteral("WSLg did not prefer Wayland"));
+
+    wsl.hasWaylandDisplay = false;
+    wsl.waylandValue.clear();
+    const syodep::diag::GraphicsDecision xcb = syodep::diag::decideFallbacks(wsl);
+    if (!xcb.forcePlatform || xcb.platform != QStringLiteral("xcb"))
+        smokeFail(QStringLiteral("WSL without Wayland did not fall back to XCB"));
+
+    qputenv("QT_QPA_PLATFORM", QByteArrayLiteral("xcb"));
+    const syodep::diag::GraphicsDecision overridden = syodep::diag::decideFallbacks(wsl);
+    if (!overridden.userOverride || overridden.forcePlatform)
+        smokeFail(QStringLiteral("explicit graphics override was not respected"));
+
+    for (const SavedEnvironment &entry : saved) {
+        if (entry.wasSet)
+            qputenv(entry.name, entry.value);
+        else
+            qunsetenv(entry.name);
+    }
+    smokeStep("graphics decisions ok");
+}
+
 int runSmokeTest(const QString &pdfPath)
 {
     std::remove("smoke-progress.txt");
     smokeStep("start");
+    verifyGraphicsDecisions();
 
     // Drive the core through CoreController without persistence so CI runs
     // do not touch the user database.
@@ -234,6 +285,15 @@ int runSmokeTest(const QString &pdfPath)
     QApplication::processEvents();
     smokeStep("mainwindow shown");
 
+    auto *canvas = window.findChild<syodep::CanvasWidget *>();
+    if (!canvas)
+        smokeFail(QStringLiteral("canvas construction"));
+    if (QGuiApplication::platformName() != QStringLiteral("offscreen")
+        && (!canvas->context() || !canvas->context()->isValid())) {
+        smokeFail(QStringLiteral("canvas OpenGL context"));
+    }
+    smokeStep("canvas context ok");
+
     // The real Qt key encoder and modal overlay: Ctrl+Shift+? is represented
     // as the config syntax `<C-?>`; help opens over the window, scrolls with
     // its isolated keymap, then returns focus to the canvas on either close
@@ -244,9 +304,8 @@ int runSmokeTest(const QString &pdfPath)
                               QStringLiteral("?"));
     if (syodep::encodeKeyEvent(&encodedQuestion) != QStringLiteral("<C-?>"))
         smokeFail(QStringLiteral("Ctrl+? key encoding"));
-    auto *canvas = window.findChild<syodep::CanvasWidget *>();
     auto *help = window.keybindingsOverlay();
-    if (!canvas || !help)
+    if (!help)
         smokeFail(QStringLiteral("keybinding overlay construction"));
     // A bare Xvfb server has no window manager, so QWidget focus may remain
     // unobservable even though setFocus() is called correctly. Preserve the

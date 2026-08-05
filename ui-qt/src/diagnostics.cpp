@@ -94,13 +94,19 @@ GraphicsDecision decideFallbacks(const PlatformInfo &info)
         return d;
     }
 
-    // WSL is the one environment that needs help: the WSLg Wayland EGL path is
-    // routinely broken, and without /dev/dxg there is no GPU to render on.
+    // WSL is the one environment that needs help choosing a backend. Prefer
+    // WSLg's native Wayland socket when it is advertised; the AppImage bundles
+    // the matching Wayland EGL client integration. Older/non-WSLg setups keep
+    // the X11 path. Without /dev/dxg there is no GPU to render on either path.
     if (info.isWsl) {
-        if (info.hasDisplay) {
+        if (info.hasWaylandDisplay) {
+            d.forcePlatform = true;
+            d.platform = QStringLiteral("wayland");
+            d.platformReason = QStringLiteral("WSL: prefer native WSLg Wayland");
+        } else if (info.hasDisplay) {
             d.forcePlatform = true;
             d.platform = QStringLiteral("xcb");
-            d.platformReason = QStringLiteral("WSL: prefer X11 over broken WSLg wayland-egl");
+            d.platformReason = QStringLiteral("WSL: no Wayland display; use X11");
         }
         if (!info.hasDxg) {
             d.forceSoftwareGl = true;

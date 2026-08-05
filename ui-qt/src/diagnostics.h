@@ -2,9 +2,10 @@
 //
 // Two responsibilities:
 //   1. Pick safe graphics fallbacks before the QApplication exists, so the app
-//      still starts on environments without a usable GPU path (notably WSL,
-//      where the WSLg wayland-egl integration is empty and there is no
-//      /dev/dxg). See decideFallbacks()/applyFallbacks().
+//      still starts on environments without a usable GPU path. WSLg prefers
+//      native Wayland when its socket is present, older WSL falls back to X11,
+//      and either path uses software GL when /dev/dxg is absent. See
+//      decideFallbacks()/applyFallbacks().
 //   2. Produce the human-readable reports for `--check` and `--version`.
 //
 // Detection is heuristic (platform signals), not a live GPU probe: Qt requires
