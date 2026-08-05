@@ -7,6 +7,15 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-08-05 — Repair reusable release permissions
+
+The Linux release caller now grants the reusable AppImage workflow the
+`contents: write` permission ceiling required by its direct-main preview
+publisher. GitHub validates that nested job permission before evaluating the
+`release_call` condition that skips the publisher during release builds, so the
+read-only caller previously failed at workflow startup. YAML parsing and a
+successful GitHub workflow start cover this CI-only fix.
+
 ## 2026-08-05 — Linux Wayland-only shell with OpenGL/raster selection
 
 Linux now selects Qt's generic `wayland` QPA before `QApplication` and rejects

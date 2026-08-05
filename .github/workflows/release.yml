@@ -23,6 +23,10 @@ on:
 jobs:
   release-build-linux:
     name: Release build (Linux AppImage)
+    # The reusable workflow contains the direct-main preview publisher, whose
+    # job-level permission is validated even though release_call skips it.
+    permissions:
+      contents: write
     uses: ./.github/workflows/appimage.yml
     with:
       release_call: true
