@@ -30,6 +30,9 @@ round-trips and effect bits. The offscreen Qt smoke test drives the real
 Ctrl+Shift+`?` event through encoding, opens and scrolls the widget, and closes
 through both supported paths. Workspace total: 680 tests.
 
+Release metadata advances the workspace to `0.15.0` for the minor release
+containing this feature.
+
 ## 2026-08-04 — `[window] start_sidebar_open`
 
 The closed-sidebar-on-open behaviour is now a config option rather than a
