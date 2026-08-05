@@ -20,12 +20,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName",      "nexdep"
             VALUE "FileDescription",  "syodep - keyboard-first PDF reader"
-            VALUE "FileVersion",      "@SYODEP_VERSION@"
+            VALUE "FileVersion",      "@SYODEP_BUILD_VERSION@"
             VALUE "InternalName",     "syodep"
             VALUE "LegalCopyright",   "AGPL-3.0-or-later"
             VALUE "OriginalFilename", "syodep.exe"
             VALUE "ProductName",      "syodep"
-            VALUE "ProductVersion",   "@SYODEP_VERSION@"
+            VALUE "ProductVersion",   "@SYODEP_BUILD_VERSION@"
         END
     END
     BLOCK "VarFileInfo"

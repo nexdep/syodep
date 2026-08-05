@@ -30,6 +30,7 @@ jobs:
     uses: ./.github/workflows/appimage.yml
     with:
       release_call: true
+      build_channel: ${{ startsWith(github.ref, 'refs/tags/v') && 'release' || (github.event_name == 'push' && github.ref == 'refs/heads/main' && 'continuous' || 'preview') }}
 
   release-build-windows:
     name: Release build (Windows portable zip)
@@ -46,8 +47,18 @@ jobs:
       - name: Set up MSVC environment
         uses: ilammy/msvc-dev-cmd@v1
       - name: Build (release)
+        shell: pwsh
         run: |
-          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          if ($env:GITHUB_REF -like 'refs/tags/v*') {
+            $channel = 'release'
+          } elseif ($env:GITHUB_EVENT_NAME -eq 'push' -and
+                    $env:GITHUB_REF -eq 'refs/heads/main') {
+            $channel = 'continuous'
+          } else {
+            $channel = 'preview'
+          }
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release `
+            "-DSYODEP_BUILD_CHANNEL=$channel"
           cmake --build build
       - name: Stage portable tree (windeployqt)
         shell: pwsh
@@ -103,18 +114,17 @@ jobs:
         shell: pwsh
         run: |
           $cargo = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          $ver = (Get-Content build/syodep-version.txt -Raw).Trim()
           if ($env:GITHUB_REF -like 'refs/tags/v*') {
-            $ver = $env:GITHUB_REF_NAME -replace '^v',''
             # A tag that disagrees with Cargo.toml would ship an installer and a
             # Scoop manifest asserting a version the binary does not report.
-            if ($ver -ne $cargo) {
+            $tagVersion = $env:GITHUB_REF_NAME -replace '^v',''
+            if ($tagVersion -ne $cargo -or $ver -ne $cargo) {
               throw "tag $env:GITHUB_REF_NAME does not match Cargo.toml version $cargo"
             }
-          } else {
-            $ver = "$cargo-continuous"
           }
           # VIProductVersion accepts exactly four numeric components.
-          $vernum = ($ver -replace '-.*','') + '.0'
+          $vernum = (($cargo -split '[-+]')[0]) + '.0'
           Write-Host "building installer for $ver ($vernum)"
           # NSIS's license control expects CRLF; convert a build-only copy so
           # the staged LICENSE (and the zip's hash) stay untouched.

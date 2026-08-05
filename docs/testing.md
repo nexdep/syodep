@@ -68,6 +68,9 @@ cargo test -p syodep-core
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 
+# release/continuous/preview/development version formatting
+cmake -P scripts/test-build-identity.cmake
+
 # shell smoke test (after a CMake build)
 cargo run -p syodep-pdf --features test-support --example make_fixture -- /tmp/f.pdf 5
 # needs `weston`; the helper creates an isolated compositor + software GL

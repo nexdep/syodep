@@ -9,10 +9,9 @@
 # CMake is only required for the desktop shell.
 
 cmake_minimum_required(VERSION 3.21)
-# Cargo.toml holds the only copy of the version; read it rather than keeping a
-# second one here. The Rust side already derives its own from CARGO_PKG_VERSION,
-# so with this there is nothing left to drift and `syodep --version` cannot
-# disagree with the core it links against.
+# Cargo.toml holds the only manually maintained base version. Read it rather
+# than keeping a second copy; the channel-aware identity derived below is
+# injected into both the Qt shell and Rust core.
 file(READ "${CMAKE_CURRENT_SOURCE_DIR}/Cargo.toml" _syodep_cargo_toml)
 # `[^[]*` stops the match at the next section header, so dependency versions in
 # [workspace.dependencies] can never be picked up by mistake.
@@ -36,6 +35,132 @@ endif()
 # manual cmake invocation.
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/Cargo.toml")
+
+# Cargo.toml remains the only manually maintained version. Distribution builds
+# add a channel and commit to that base so a rolling binary cannot masquerade
+# as the regular release with the same Cargo version.
+set(SYODEP_BUILD_CHANNEL "auto" CACHE STRING
+    "User-visible build channel: auto, release, continuous, preview, or development")
+set_property(CACHE SYODEP_BUILD_CHANNEL PROPERTY STRINGS
+    auto release continuous preview development)
+string(TOLOWER "${SYODEP_BUILD_CHANNEL}" _syodep_requested_channel)
+if(NOT _syodep_requested_channel MATCHES
+        "^(auto|release|continuous|preview|development)$")
+    message(FATAL_ERROR
+        "unknown SYODEP_BUILD_CHANNEL='${SYODEP_BUILD_CHANNEL}'")
+endif()
+
+find_package(Git QUIET)
+set(_syodep_commit "unknown")
+set(_syodep_git_available false)
+set(_syodep_git_clean false)
+set(_syodep_exact_release_tag false)
+if(Git_FOUND)
+    execute_process(
+        COMMAND "${GIT_EXECUTABLE}" -C "${CMAKE_CURRENT_SOURCE_DIR}"
+                rev-parse --short=12 HEAD
+        OUTPUT_VARIABLE _syodep_git_commit
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        RESULT_VARIABLE _syodep_git_commit_result)
+    if(_syodep_git_commit_result EQUAL 0 AND _syodep_git_commit)
+        set(_syodep_commit "${_syodep_git_commit}")
+        set(_syodep_git_available true)
+    endif()
+
+    execute_process(
+        COMMAND "${GIT_EXECUTABLE}" -C "${CMAKE_CURRENT_SOURCE_DIR}"
+                status --porcelain --untracked-files=normal
+        OUTPUT_VARIABLE _syodep_git_status
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        RESULT_VARIABLE _syodep_git_status_result)
+    if(_syodep_git_status_result EQUAL 0 AND NOT _syodep_git_status)
+        set(_syodep_git_clean true)
+    endif()
+
+    execute_process(
+        COMMAND "${GIT_EXECUTABLE}" -C "${CMAKE_CURRENT_SOURCE_DIR}"
+                describe --tags --exact-match --match "v${SYODEP_VERSION}"
+        OUTPUT_QUIET
+        ERROR_QUIET
+        RESULT_VARIABLE _syodep_release_tag_result)
+    if(_syodep_release_tag_result EQUAL 0)
+        set(_syodep_exact_release_tag true)
+    endif()
+
+    # Reconfigure after a commit/checkout so local development identities do
+    # not stay pinned to the commit that first populated the build directory.
+    execute_process(
+        COMMAND "${GIT_EXECUTABLE}" -C "${CMAKE_CURRENT_SOURCE_DIR}"
+                rev-parse --git-path HEAD
+        OUTPUT_VARIABLE _syodep_git_head
+        OUTPUT_STRIP_TRAILING_WHITESPACE)
+    execute_process(
+        COMMAND "${GIT_EXECUTABLE}" -C "${CMAKE_CURRENT_SOURCE_DIR}"
+                rev-parse --git-path index
+        OUTPUT_VARIABLE _syodep_git_index
+        OUTPUT_STRIP_TRAILING_WHITESPACE)
+    execute_process(
+        COMMAND "${GIT_EXECUTABLE}" -C "${CMAKE_CURRENT_SOURCE_DIR}"
+                symbolic-ref -q HEAD
+        OUTPUT_VARIABLE _syodep_git_ref
+        OUTPUT_STRIP_TRAILING_WHITESPACE)
+    foreach(_syodep_git_path IN ITEMS
+            "${_syodep_git_head}" "${_syodep_git_index}")
+        if(_syodep_git_path AND NOT IS_ABSOLUTE "${_syodep_git_path}")
+            set(_syodep_git_path
+                "${CMAKE_CURRENT_SOURCE_DIR}/${_syodep_git_path}")
+        endif()
+        if(EXISTS "${_syodep_git_path}")
+            set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+                "${_syodep_git_path}")
+        endif()
+    endforeach()
+    if(_syodep_git_ref)
+        execute_process(
+            COMMAND "${GIT_EXECUTABLE}" -C "${CMAKE_CURRENT_SOURCE_DIR}"
+                    rev-parse --git-path "${_syodep_git_ref}"
+            OUTPUT_VARIABLE _syodep_git_ref_path
+            OUTPUT_STRIP_TRAILING_WHITESPACE)
+        if(NOT IS_ABSOLUTE "${_syodep_git_ref_path}")
+            set(_syodep_git_ref_path
+                "${CMAKE_CURRENT_SOURCE_DIR}/${_syodep_git_ref_path}")
+        endif()
+        if(EXISTS "${_syodep_git_ref_path}")
+            set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+                "${_syodep_git_ref_path}")
+        endif()
+    endif()
+endif()
+string(LENGTH "$ENV{GITHUB_SHA}" _syodep_github_sha_length)
+if(_syodep_commit STREQUAL "unknown"
+        AND "$ENV{GITHUB_SHA}" MATCHES "^[0-9A-Fa-f]+$"
+        AND _syodep_github_sha_length GREATER_EQUAL 12)
+    string(SUBSTRING "$ENV{GITHUB_SHA}" 0 12 _syodep_commit)
+endif()
+
+if(_syodep_requested_channel STREQUAL "auto")
+    if(_syodep_exact_release_tag AND _syodep_git_clean)
+        set(_syodep_resolved_channel "release")
+    else()
+        set(_syodep_resolved_channel "development")
+    endif()
+else()
+    set(_syodep_resolved_channel "${_syodep_requested_channel}")
+endif()
+if(_syodep_resolved_channel STREQUAL "release" AND _syodep_git_available
+        AND (NOT _syodep_exact_release_tag OR NOT _syodep_git_clean))
+    message(FATAL_ERROR
+        "release builds require a clean checkout at tag v${SYODEP_VERSION}")
+endif()
+
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/SyodepBuildIdentity.cmake")
+syodep_format_build_version(
+    "${SYODEP_VERSION}" "${_syodep_resolved_channel}"
+    "${_syodep_commit}" SYODEP_BUILD_VERSION)
+message(STATUS
+    "syodep build identity: ${SYODEP_BUILD_VERSION} (${_syodep_resolved_channel})")
+file(WRITE "${CMAKE_BINARY_DIR}/syodep-version.txt"
+    "${SYODEP_BUILD_VERSION}\n")
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -74,7 +199,9 @@ file(GLOB_RECURSE SYODEP_RUST_SOURCES CONFIGURE_DEPENDS
 
 add_custom_command(
     OUTPUT "${SYODEP_FFI_LIB}"
-    COMMAND "${CARGO_EXECUTABLE}" build -p syodep-ffi ${CARGO_PROFILE_FLAG}
+    COMMAND "${CMAKE_COMMAND}" -E env
+            "SYODEP_BUILD_VERSION=${SYODEP_BUILD_VERSION}"
+            "${CARGO_EXECUTABLE}" build -p syodep-ffi ${CARGO_PROFILE_FLAG}
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
     DEPENDS ${SYODEP_RUST_SOURCES}
     COMMENT "Building Rust core (cargo build -p syodep-ffi, ${SYODEP_RUST_PROFILE})"
@@ -93,7 +220,9 @@ set_target_properties(syodep_ffi PROPERTIES
 # as a side effect, which the custom command would do anyway).
 if(WIN32)
     execute_process(
-        COMMAND "${CARGO_EXECUTABLE}" rustc --color=never -p syodep-ffi
+        COMMAND "${CMAKE_COMMAND}" -E env
+                "SYODEP_BUILD_VERSION=${SYODEP_BUILD_VERSION}"
+                "${CARGO_EXECUTABLE}" rustc --color=never -p syodep-ffi
                 ${CARGO_PROFILE_FLAG} -- --print=native-static-libs
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
         OUTPUT_VARIABLE _cargo_stdout

@@ -79,16 +79,18 @@ for section in ViewConfig WindowConfig InputConfig; do
         | grep -oP '^\s*pub \K[a-z_]+(?=:)')
 done
 
-# Cargo.toml holds the only copy of the version: CMake reads it at configure
-# time and the shell reports it via SYODEP_VERSION. Drift is impossible by
-# construction, so these two checks guard the construction itself rather than
-# comparing copies. It mattered: CMake sat at 0.3.0 through the whole 0.4.0
-# release, so shipped binaries told users the wrong version.
+# Cargo.toml holds the only manually maintained base version. CMake derives a
+# channel-aware build identity from it and injects that exact value into both
+# the shell and core. These checks guard that construction rather than compare
+# redundant version copies.
 grep -q 'project(syodep VERSION \${SYODEP_VERSION_NUMERIC}' CMakeLists.txt \
     || err "CMakeLists.txt must derive the version from Cargo.toml, not hardcode it"
 
-grep -q 'setApplicationVersion(QStringLiteral(SYODEP_VERSION))' ui-qt/src/main.cpp \
-    || err "ui-qt must report SYODEP_VERSION, not a hardcoded version string"
+grep -q 'setApplicationVersion(QStringLiteral(SYODEP_BUILD_VERSION))' ui-qt/src/main.cpp \
+    || err "ui-qt must report SYODEP_BUILD_VERSION, not a hardcoded version string"
+
+grep -q 'option_env!("SYODEP_BUILD_VERSION")' crates/syodep-ffi/src/lib.rs \
+    || err "syodep-ffi must report the injected build identity"
 
 # The installer script is a shipped artifact source, not a doc, but losing it
 # would silently drop the Windows installer from releases.

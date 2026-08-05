@@ -364,11 +364,13 @@ QString buildCheckReport(const PlatformInfo &info,
 
     line(QStringLiteral("Configuration"));
     const QString configPath = takeSyoString(syo_default_config_path());
+    const QString databasePath = takeSyoString(syo_default_db_path());
     const bool configExists = !configPath.isEmpty() && QFileInfo::exists(configPath);
     line(QStringLiteral("  Config path:      %1").arg(configPath));
     line(QStringLiteral("  Config file:      %1")
              .arg(configExists ? QStringLiteral("loaded")
                                : QStringLiteral("not found — using built-in defaults")));
+    line(QStringLiteral("  Database path:    %1").arg(databasePath));
     SyoApp *app = syo_app_new(configPath.toUtf8().constData(), nullptr);
     const QString warnings = app ? takeSyoString(syo_app_startup_warnings(app)) : QString();
     const QString openDir = app ? takeSyoString(syo_app_open_dir(app)) : QString();
@@ -392,7 +394,7 @@ QString buildCheckReport(const PlatformInfo &info,
     line(QStringLiteral("  syodep (core):    %1").arg(takeSyoString(syo_core_version())));
     line(QStringLiteral("  Qt:               %1 (built) / %2 (runtime)")
              .arg(QStringLiteral(QT_VERSION_STR), QString::fromUtf8(qVersion())));
-    line(QStringLiteral("  Build:            %1").arg(QStringLiteral(SYODEP_BUILD_TYPE)));
+    line(QStringLiteral("  Build type:       %1").arg(QStringLiteral(SYODEP_BUILD_TYPE)));
     return out;
 }
 
@@ -403,7 +405,7 @@ QString buildVersionReport(const PlatformInfo &info)
     out += QStringLiteral("  core:      %1\n").arg(takeSyoString(syo_core_version()));
     out += QStringLiteral("  Qt:        %1\n").arg(QString::fromUtf8(qVersion()));
     out += QStringLiteral("  platform:  %1\n").arg(info.osName.toLower());
-    out += QStringLiteral("  build:     %1\n").arg(QStringLiteral(SYODEP_BUILD_TYPE));
+    out += QStringLiteral("  build type: %1\n").arg(QStringLiteral(SYODEP_BUILD_TYPE));
     return out;
 }
 

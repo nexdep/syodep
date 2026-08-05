@@ -24,6 +24,9 @@ catch typos like `scrol_step`), with the field named in the error.
 bookmarks, highlights, notes, history. That lives in the SQLite database
 (`~/.local/share/syodep/syodep.sqlite3` on Linux,
 `%APPDATA%\syodep\syodep.sqlite3` on Windows).
+`syodep --check` prints the resolved config and database paths for the current
+environment under *Configuration*; reporting the database path does not create
+or open the file.
 
 ## `[view]`
 

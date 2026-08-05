@@ -352,7 +352,7 @@ int main(int argc, char *argv[])
     // These are static and safe to set before the QApplication exists; the
     // version reporters below read them without needing a display.
     QApplication::setApplicationName(QStringLiteral("syodep"));
-    QApplication::setApplicationVersion(QStringLiteral(SYODEP_VERSION));
+    QApplication::setApplicationVersion(QStringLiteral(SYODEP_BUILD_VERSION));
 
     const syodep::diag::PlatformInfo platform = syodep::diag::detectPlatform();
 

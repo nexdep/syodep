@@ -48,13 +48,12 @@ target_link_libraries(syodep PRIVATE
     Qt6::OpenGLWidgets
     syodep_ffi)
 
-# Surfaced by `--version`/`--check`. Falls back to "unknown" when unset.
-# SYODEP_VERSION is read straight out of Cargo.toml by the top-level
-# CMakeLists.txt (full string, so pre-release suffixes survive), so the shell
-# cannot report a different version from the core it links against.
+# Surfaced by `--version`/`--check`. The top-level build derives this identity
+# from Cargo.toml plus the channel and Git commit, then injects the same value
+# into the Rust static library so the shell and core cannot disagree.
 target_compile_definitions(syodep PRIVATE
     SYODEP_BUILD_TYPE="$<IF:$<BOOL:$<CONFIG>>,$<CONFIG>,unknown>"
-    SYODEP_VERSION="${SYODEP_VERSION}")
+    SYODEP_BUILD_VERSION="${SYODEP_BUILD_VERSION}")
 
 set_target_properties(syodep PROPERTIES
     WIN32_EXECUTABLE TRUE)

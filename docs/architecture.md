@@ -652,7 +652,10 @@ Seven small components; intentionally boring:
   `--check`/`--version` reports. It deliberately detects neither WSL nor WSLg:
   a working WSLg instance is just another Wayland compositor. CLI-only
   `syo_*` helpers (version, default paths, default config text) stay here and
-  in `main.cpp` rather than being forced through `CoreController`.
+  in `main.cpp` rather than being forced through `CoreController`. CMake derives
+  one channel-aware build identity from the Cargo version plus Git metadata and
+  injects it into both the shell and `syo_core_version`, so the two version
+  lines identify regular, continuous, preview and development builds alike.
 - `main.cpp` parses the CLI and implements `--smoke-test` for CI (exercises
   `CoreController` under a test compositor, then constructs `MainWindow` with the
   annotation sidebar and checks empty-state transitions).

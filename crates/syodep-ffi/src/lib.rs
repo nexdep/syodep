@@ -1762,7 +1762,11 @@ pub unsafe extern "C" fn syo_string_free(s: *mut c_char) {
 /// `syo_string_free`. Reported by the shell's `--version`/`--check`.
 #[no_mangle]
 pub extern "C" fn syo_core_version() -> *mut c_char {
-    to_c_string(env!("CARGO_PKG_VERSION").to_string())
+    const BUILD_VERSION: &str = match option_env!("SYODEP_BUILD_VERSION") {
+        Some(version) => version,
+        None => env!("CARGO_PKG_VERSION"),
+    };
+    to_c_string(BUILD_VERSION.to_string())
 }
 
 /// Default config file path for this platform (may not exist yet).
@@ -2274,6 +2278,16 @@ mod tests {
             assert!(CStr::from_ptr(db).to_str().unwrap().contains("syodep"));
             syo_string_free(config);
             syo_string_free(db);
+        }
+    }
+
+    #[test]
+    fn core_version_uses_the_injected_build_identity() {
+        let expected = option_env!("SYODEP_BUILD_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"));
+        unsafe {
+            let version = syo_core_version();
+            assert_eq!(CStr::from_ptr(version).to_str().unwrap(), expected);
+            syo_string_free(version);
         }
     }
 

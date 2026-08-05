@@ -100,8 +100,16 @@ jobs:
             libfreetype-dev weston
       - name: Configure
         run: cmake -B build -G Ninja
+      - name: Test build identity formatting
+        run: cmake -P scripts/test-build-identity.cmake
       - name: Build
         run: cmake --build build
+      - name: Check shell/core build identity
+        run: |
+          expected_version="$(tr -d '\r\n' < build/syodep-version.txt)"
+          version_report="$(./build/ui-qt/syodep --version)"
+          grep -Fqx "syodep $expected_version" <<<"$version_report"
+          grep -Fqx "  core:      $expected_version" <<<"$version_report"
       - name: Smoke test (Wayland OpenGL + raster)
         run: |
           cargo run -p syodep-pdf --features test-support \
@@ -109,7 +117,14 @@ jobs:
           bash scripts/with-headless-wayland.sh bash -euo pipefail -c '
             ./build/ui-qt/syodep --renderer=opengl --smoke-test fixture.pdf
             ./build/ui-qt/syodep --renderer=raster --smoke-test fixture.pdf
-            ./build/ui-qt/syodep --renderer=auto --check | grep -q "Selected:         opengl"
+            check_data_dir="$(mktemp -d)"
+            trap '\''rmdir "$check_data_dir"'\'' EXIT
+            check_report="$(XDG_DATA_HOME="$check_data_dir" \
+              ./build/ui-qt/syodep --renderer=auto --check)"
+            grep -q "Selected:         opengl" <<<"$check_report"
+            grep -Fqx "  Database path:    $check_data_dir/syodep/syodep.sqlite3" \
+              <<<"$check_report"
+            test ! -e "$check_data_dir/syodep"
             if QT_QPA_PLATFORM=xcb ./build/ui-qt/syodep --check; then
               echo "XCB override was not rejected" >&2
               exit 1

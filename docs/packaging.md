@@ -195,19 +195,43 @@ the twelve-minute Windows build.
 
 ## Versioning
 
-Workspace version lives in `Cargo.toml` (`workspace.package.version`) and is
-mirrored in the top-level `project(syodep VERSION …)`, which in turn defines
-`SYODEP_VERSION` for the Qt shell (`ui-qt/CMakeLists.txt`). The shell reports it
-through `QApplication::setApplicationVersion`, so `--version` and `--check`
-cannot disagree with the core they link against. **`Cargo.toml` is the only
-place to edit when bumping**; `scripts/check-docs.sh` fails if CMake drifts from
-it, or if the shell reintroduces a hardcoded version string.
+Workspace base version lives in `Cargo.toml` (`workspace.package.version`).
+**That remains the only place to edit when bumping.** CMake combines that base
+with a build channel and the first 12 characters of the Git commit:
+
+| Build | Example reported by `--version` / `--check` |
+|---|---|
+| regular version tag `v0.16.0` | `0.16.0` |
+| versioned prerelease tag `v0.16.0-rc.1` | `0.16.0-rc.1` |
+| rolling `continuous` release | `0.16.0-continuous+012345abcdef` |
+| AppImage/manual preview | `0.16.0-preview+012345abcdef` |
+| ordinary branch or local checkout | `0.16.0-dev+012345abcdef` |
+
+If the Cargo base is already a prerelease, a non-release channel extends it:
+`0.16.0-rc.1.continuous+012345abcdef`. Thus every identity remains valid
+SemVer and a rolling or preview binary cannot claim to be the regular release.
+
+`SYODEP_BUILD_CHANNEL` is `auto` for ordinary builds: a clean checkout exactly
+at `v<base-version>` resolves to `release`; everything else resolves to
+`development`. Packaging workflows pass `release`, `continuous`, or `preview`
+explicitly. CMake writes the result to `build/syodep-version.txt`, defines it
+for the Qt shell and Windows version-resource strings, and injects the same
+value into the Rust build for `syo_core_version`. The installer reads that
+generated file too, so its DisplayVersion agrees with its binary.
+
+The shell reports the identity through `QApplication::applicationVersion`.
+The core returns the injected value over the FFI, so the `shell:` and `core:`
+lines cannot disagree. Plain Cargo-only builds have no distribution channel
+and fall back to the Cargo base version. `scripts/check-docs.sh` guards this
+construction against a hardcoded version returning. The separate `build type`
+line means the CMake optimization configuration (`Release`/`Debug`), not the
+distribution channel.
 
 That check exists because the mirror was previously only a claim: CMake sat at
 `0.3.0` through the whole 0.4.0 release and the shell hardcoded `0.3.0` too, so
 shipped 0.4.0 binaries reported `syodep 0.3.0` while their own core reported
 `0.4.0`. Nothing caught it.
 
-Tags use `vX.Y.Z`. The non-version `continuous` tag is force-updated by CI to
-point at the latest successful `main` build and must not be treated as a
-semantic version.
+Tags use `vX.Y.Z` or a Cargo-compatible prerelease such as `vX.Y.Z-rc.1`. The
+non-version `continuous` and `appimage-preview` tags are force-updated by CI to
+point at rolling builds and must not be treated as semantic versions.

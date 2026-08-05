@@ -7,6 +7,46 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-08-05 — Channel-aware build versions
+
+`--version` and `--check` now distinguish what produced the binary instead of
+printing the Cargo base version for everything. A tagged release keeps the
+base (`0.16.0`, including Cargo prereleases such as `0.16.0-rc.1`), rolling
+main builds report `0.16.0-continuous+<commit>`, AppImage/manual previews use
+`0.16.0-preview+<commit>`, and ordinary builds use
+`0.16.0-dev+<commit>`. Existing prerelease identifiers are extended rather
+than malformed (`0.16.0-rc.1.continuous+<commit>`). The former `build:` field
+is now labeled `build type:` so its `Release` value cannot be mistaken for the
+distribution channel.
+
+`Cargo.toml` remains the only maintained base. CMake formats the identity,
+writes `build/syodep-version.txt`, defines it for Qt and the Windows resource,
+and passes the exact same value into the Rust compilation environment for
+`syo_core_version`. The Windows installer reads the generated value rather than
+independently guessing `-continuous`. Release and reusable AppImage workflows
+select their channel explicitly; local/branch CMake builds infer a clean exact
+version tag as `release` and everything else as `development`.
+
+### Test strategy
+
+A platform-neutral CMake script covers release, Cargo prerelease, continuous,
+preview and development formatting. The Linux Qt CI job additionally compares
+both lines of the real `--version` report with `build/syodep-version.txt`; the
+packaged AppImage check makes the same shell/core assertions. An FFI regression
+test covers the injected identity and Cargo-only fallback.
+
+## 2026-08-05 — Report the database path in `--check`
+
+The *Configuration* section of `syodep --check` now prints the resolved SQLite
+database path alongside the config path. The diagnostic calls the existing
+default-path helper only; it still constructs its short-lived core with
+persistence disabled, so checking the path cannot create or modify the user
+database.
+
+The real-shell Wayland CI check sets a temporary `XDG_DATA_HOME` and asserts the
+exact reported `syodep/syodep.sqlite3` path, covering both XDG resolution and
+the CLI output without touching user state.
+
 ## 2026-08-05 — Quiet successful GL fallback and use host xkbcommon
 
 On WSLg, Mesa can try several EGL drivers before successfully creating the
