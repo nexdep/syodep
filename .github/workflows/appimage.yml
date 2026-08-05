@@ -74,9 +74,9 @@ jobs:
           cmake --build build
       # Populate the AppDir first, then remove every non-Wayland QPA before a
       # second linuxdeploy pass creates the AppImage. System-integration libs
-      # (glibc, libGL, fontconfig) stay on linuxdeploy's exclude list and
-      # resolve from the host. --appimage-extract-and-run is set because the
-      # build container has no FUSE.
+      # (glibc, libGL, fontconfig, xkbcommon) stay on linuxdeploy's exclude
+      # list and resolve from the host. --appimage-extract-and-run is set
+      # because the build container has no FUSE.
       - name: Package AppImage (linuxdeploy)
         run: |
           curl -fsSLO https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
@@ -98,6 +98,8 @@ jobs:
             --executable build/ui-qt/syodep \
             --desktop-file packaging/syodep.desktop \
             --icon-file packaging/syodep.svg \
+            --exclude-library 'libxkbcommon.so*' \
+            --exclude-library 'libxkbcommon-x11.so*' \
             --plugin qt
           platform_dir="$(find AppDir -type d -path '*/plugins/platforms' -print -quit)"
           test -n "$platform_dir"
@@ -108,13 +110,24 @@ jobs:
           test -f "$platform_dir/libqwayland-generic.so"
           test ! -e "$platform_dir/libqxcb.so"
           test ! -e "$platform_dir/libqoffscreen.so"
+          # Compose tables are host data. Keep the xkbcommon parser on the
+          # host as well so a newer table is never parsed by an older bundled
+          # library. The explicit deletion also covers libraries copied by
+          # the Qt deployment plugin before linuxdeploy applies exclusions.
+          find AppDir \( -type f -o -type l \) \
+            \( -name 'libxkbcommon.so*' -o -name 'libxkbcommon-x11.so*' \) \
+            -delete
           # linuxdeploy calculates this nested, manually-seeded plugin's
           # RUNPATH from the AppDir root instead of usr/lib. Correct it after
           # deployment, then prove the dependency resolves from the bundle.
           wayland_egl="AppDir/usr/plugins/$wayland_egl_rel"
           patchelf --set-rpath '$ORIGIN/../../lib:$ORIGIN' "$wayland_egl"
           scripts/check-appimage-wayland-egl.sh AppDir
-          ./linuxdeploy-x86_64.AppImage --appdir AppDir --output appimage
+          scripts/check-appimage-host-libraries.sh AppDir
+          ./linuxdeploy-x86_64.AppImage --appdir AppDir \
+            --exclude-library 'libxkbcommon.so*' \
+            --exclude-library 'libxkbcommon-x11.so*' \
+            --output appimage
       - name: Verify bundled Qt platform plugins
         run: |
           chmod +x syodep-x86_64.AppImage
@@ -126,6 +139,7 @@ jobs:
           test ! -e "$platform_dir/libqxcb.so"
           test ! -e "$platform_dir/libqoffscreen.so"
           scripts/check-appimage-wayland-egl.sh squashfs-root
+          scripts/check-appimage-host-libraries.sh squashfs-root
       # Run the actual AppImage so a missing bundled lib fails here, not on a
       # user's machine. Both presentation backends use the shipped Wayland QPA.
       - name: Smoke test the AppImage (Wayland OpenGL + raster)

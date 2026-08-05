@@ -93,9 +93,15 @@ The workflow extracts the finished AppImage, asserts XCB/offscreen are absent,
 checks the exact integration plugin and its
 `libQt6WaylandEglClientHwIntegration.so.6` dependency are present, and rejects
 unresolved dynamic-library dependencies.
-Excluded by linuxdeploy's default list and resolved from the host:
-glibc, libGL, fontconfig — exactly the libs that must match the user's
-system.
+Excluded from the bundle and resolved from the host: glibc, libGL, fontconfig,
+and `libxkbcommon.so.0` — libraries that integrate with system drivers, fonts,
+or locale data. In particular, xkbcommon parses the host's X11 Compose table;
+bundling Ubuntu 22.04's older parser while reading a newer host table can emit
+keysym errors and break only the affected compose sequences. Packaging removes
+both xkbcommon and its X11 companion even if the Qt deploy plugin copied them,
+then checks the extracted AppImage still resolves xkbcommon from the host.
+Supported Wayland systems must therefore provide the stable
+`libxkbcommon.so.0` ABI in addition to the graphics libraries.
 
 The job starts headless Weston and smoke-tests the actual AppImage with both
 `--renderer=opengl` (Mesa software GL on the GPU-less runner) and

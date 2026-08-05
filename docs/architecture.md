@@ -600,7 +600,10 @@ Seven small components; intentionally boring:
   `MainWindow` and selects OpenGL only after a valid context paints a complete
   frame. A failed probe selects the raster widget without ever putting a failed
   GL child in the real window. `--renderer=opengl` makes failure fatal and
-  `--renderer=raster` skips the probe.
+  `--renderer=raster` skips the probe. On Linux the probe captures direct
+  Mesa/libEGL stderr temporarily: known failed-driver attempts are discarded
+  only after another driver completes the frame, while a failed probe and
+  unrelated messages are replayed unchanged.
   Focus and visual go into one `QPainterPath` each so overlapping rects blend
   once, then a single plain-alpha fill. Highlights are different: they arrive
   already grouped by captured colour (`highlightOverlays`), and each

@@ -8,8 +8,15 @@
 #include <QOpenGLContext>
 #include <QOpenGLFunctions>
 #include <QOpenGLWidget>
+#include <QTemporaryFile>
 #include <QTimer>
 #include <QtGlobal>
+
+#include <cstdio>
+
+#if defined(Q_OS_LINUX)
+#include <unistd.h>
+#endif
 
 #include "syodep_ffi.h"
 
@@ -59,6 +66,80 @@ protected:
 
     void paintGL() override { painted = true; }
 };
+
+#if defined(Q_OS_LINUX)
+// Mesa and libEGL can print failed-driver attempts directly to stderr even
+// when they subsequently create a valid context with another driver. Keep
+// those implementation details out of ordinary startup, but replay them when
+// the probe genuinely fails so diagnostics are not lost.
+class ProbeStderrCapture final
+{
+public:
+    ProbeStderrCapture()
+    {
+        if (!m_file.open())
+            return;
+        std::fflush(stderr);
+        m_savedFd = ::dup(STDERR_FILENO);
+        if (m_savedFd < 0)
+            return;
+        if (::dup2(m_file.handle(), STDERR_FILENO) < 0) {
+            ::close(m_savedFd);
+            m_savedFd = -1;
+            return;
+        }
+        m_active = true;
+    }
+
+    ~ProbeStderrCapture() { finish(false); }
+
+    void finish(bool probeSucceeded)
+    {
+        if (!m_active)
+            return;
+
+        std::fflush(stderr);
+        ::dup2(m_savedFd, STDERR_FILENO);
+        ::close(m_savedFd);
+        m_savedFd = -1;
+        m_active = false;
+
+        if (m_file.seek(0)) {
+            const QByteArray captured = m_file.readAll();
+            const QByteArray replay = probeSucceeded
+                ? withoutSuccessfulFallbackNoise(captured)
+                : captured;
+            if (!replay.isEmpty()) {
+                std::fwrite(replay.constData(), 1,
+                            static_cast<size_t>(replay.size()), stderr);
+                std::fflush(stderr);
+            }
+        }
+    }
+
+private:
+    static QByteArray withoutSuccessfulFallbackNoise(const QByteArray &captured)
+    {
+        QByteArray replay;
+        const QList<QByteArray> lines = captured.split('\n');
+        for (const QByteArray &line : lines) {
+            const QByteArray trimmed = line.trimmed();
+            const bool failedDriverAttempt = trimmed.isEmpty()
+                || trimmed.startsWith("libEGL warning:")
+                || trimmed == "MESA: error: ZINK: failed to choose pdev";
+            if (!failedDriverAttempt) {
+                replay.append(line);
+                replay.append('\n');
+            }
+        }
+        return replay;
+    }
+
+    QTemporaryFile m_file;
+    int m_savedFd = -1;
+    bool m_active = false;
+};
+#endif
 
 bool isPlatformArgument(const QString &arg)
 {
@@ -161,44 +242,53 @@ QString rendererBackendName(RendererBackend backend)
 
 GlProbe probeOpenGlWidget(int timeoutMs)
 {
-    ProbeWidget widget;
-    widget.result.attempted = true;
-    widget.setWindowFlags(Qt::Tool | Qt::FramelessWindowHint);
-    widget.setAttribute(Qt::WA_ShowWithoutActivating);
-    widget.resize(1, 1);
+#if defined(Q_OS_LINUX)
+    ProbeStderrCapture probeStderr;
+#endif
+    GlProbe result;
+    {
+        ProbeWidget widget;
+        widget.result.attempted = true;
+        widget.setWindowFlags(Qt::Tool | Qt::FramelessWindowHint);
+        widget.setAttribute(Qt::WA_ShowWithoutActivating);
+        widget.resize(1, 1);
 
-    QEventLoop loop;
-    QTimer timeout;
-    bool frameSwapped = false;
-    timeout.setSingleShot(true);
-    QObject::connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
-    QObject::connect(&widget, &QOpenGLWidget::frameSwapped,
-                     &loop, [&]() {
-                         frameSwapped = true;
-                         loop.quit();
-                     });
-    timeout.start(timeoutMs);
-    widget.show();
-    loop.exec();
+        QEventLoop loop;
+        QTimer timeout;
+        bool frameSwapped = false;
+        timeout.setSingleShot(true);
+        QObject::connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
+        QObject::connect(&widget, &QOpenGLWidget::frameSwapped,
+                         &loop, [&]() {
+                             frameSwapped = true;
+                             loop.quit();
+                         });
+        timeout.start(timeoutMs);
+        widget.show();
+        loop.exec();
 
-    const bool frameCompleted = widget.isValid() && widget.painted && frameSwapped;
-    widget.hide();
-    QCoreApplication::processEvents();
+        const bool frameCompleted = widget.isValid() && widget.painted && frameSwapped;
+        widget.hide();
+        QCoreApplication::processEvents();
 
-    if (!frameCompleted) {
-        if (widget.result.error.isEmpty()) {
-            widget.result.error = widget.isValid()
-                ? QStringLiteral("timed out waiting for the first composited OpenGL frame")
-                : QStringLiteral("QOpenGLWidget failed to create a valid context");
+        if (!frameCompleted) {
+            if (widget.result.error.isEmpty()) {
+                widget.result.error = widget.isValid()
+                    ? QStringLiteral("timed out waiting for the first composited OpenGL frame")
+                    : QStringLiteral("QOpenGLWidget failed to create a valid context");
+            }
+        } else if (widget.result.renderer.isEmpty()) {
+            widget.result.error = QStringLiteral("OpenGL context returned no renderer");
+        } else {
+            widget.result.ok = true;
         }
-        return widget.result;
+        result = widget.result;
     }
-    if (widget.result.renderer.isEmpty()) {
-        widget.result.error = QStringLiteral("OpenGL context returned no renderer");
-        return widget.result;
-    }
-    widget.result.ok = true;
-    return widget.result;
+    QCoreApplication::processEvents();
+#if defined(Q_OS_LINUX)
+    probeStderr.finish(result.ok);
+#endif
+    return result;
 }
 
 RendererDecision decideRenderer(RendererPreference preference, const GlProbe &probe)

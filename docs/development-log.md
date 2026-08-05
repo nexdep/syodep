@@ -7,6 +7,34 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-08-05 — Quiet successful GL fallback and use host xkbcommon
+
+On WSLg, Mesa can try several EGL drivers before successfully creating the
+startup probe with llvmpipe. Those failed attempts wrote alarming libEGL/Zink
+messages to stderr even though `--check` reported a healthy OpenGL renderer.
+The Linux probe now captures its direct stderr and, after a completed frame,
+removes only known failed-driver lines. Unrelated messages still pass through;
+if the probe fails, every captured diagnostic is replayed before auto selects
+raster or forced OpenGL exits.
+
+The AppImage also no longer bundles Ubuntu 22.04's xkbcommon parser while
+reading the user's newer host Compose table. Both `libxkbcommon` and its X11
+companion are excluded and removed after Qt deployment, and an extraction check
+proves the main executable resolves `libxkbcommon.so.0` outside the AppDir. This
+keeps keyboard code and locale data at matching host versions without any WSL
+detection, at the cost of requiring the standard `libxkbcommon.so.0` ABI on the
+host.
+
+### Test strategy
+
+On WSLg, a successful `--renderer=opengl --check` still reports Mesa llvmpipe
+and now has empty stderr. Forcing nonexistent Mesa loader and Gallium drivers
+makes the probe fail, replays the EGL/Qt messages, and exits 2. The new AppImage
+regression script fails against the published bundle containing xkbcommon,
+passes after those libraries are removed, and is run both before packing and
+after extracting the final artifact. The full Rust, lint, docs, Qt build, and
+Wayland OpenGL/raster smoke gates remain unchanged.
+
 ## 2026-08-05 — Fix AppImage Wayland EGL RUNPATH
 
 The preview AppImage contained both Qt's Wayland EGL client plugin and
