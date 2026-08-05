@@ -24,7 +24,10 @@ use std::path::PathBuf;
 
 use syodep_config::keys::parse_sequence;
 use syodep_config::Config;
-use syodep_core::{App, Effects, HighlightId, HighlightPdfState, TextAnnotationId};
+use syodep_core::{
+    App, Effects, HelpNavigation, HighlightId, HighlightPdfState, KeybindingHelpGroup, Mode,
+    TextAnnotationId,
+};
 use syodep_storage::Storage;
 
 /// Opaque application handle.
@@ -171,6 +174,17 @@ pub const SYO_EFFECT_TOGGLE_ANNOTATIONS_SIDEBAR: u32 = 256;
 /// A pending annotation anchor was captured; open the Annotations page in
 /// creation mode (see `Effects::create_annotation_requested`). Never a hide.
 pub const SYO_EFFECT_CREATE_ANNOTATION_REQUESTED: u32 = 512;
+/// The core-owned keybinding-help visibility changed; query
+/// [`syo_app_keybindings_overlay_visible`].
+pub const SYO_EFFECT_KEYBINDINGS_OVERLAY_CHANGED: u32 = 1024;
+pub const SYO_EFFECT_HELP_LINE_DOWN: u32 = 2048;
+pub const SYO_EFFECT_HELP_LINE_UP: u32 = 4096;
+pub const SYO_EFFECT_HELP_HALF_PAGE_DOWN: u32 = 8192;
+pub const SYO_EFFECT_HELP_HALF_PAGE_UP: u32 = 16384;
+pub const SYO_EFFECT_HELP_PAGE_DOWN: u32 = 32768;
+pub const SYO_EFFECT_HELP_PAGE_UP: u32 = 65536;
+pub const SYO_EFFECT_HELP_TOP: u32 = 131072;
+pub const SYO_EFFECT_HELP_BOTTOM: u32 = 262144;
 
 fn effects_to_bits(effects: Effects) -> u32 {
     let mut bits = 0;
@@ -204,7 +218,55 @@ fn effects_to_bits(effects: Effects) -> u32 {
     if effects.create_annotation_requested {
         bits |= SYO_EFFECT_CREATE_ANNOTATION_REQUESTED;
     }
+    if effects.keybindings_overlay_changed {
+        bits |= SYO_EFFECT_KEYBINDINGS_OVERLAY_CHANGED;
+    }
+    bits |= match effects.help_navigation {
+        Some(HelpNavigation::LineDown) => SYO_EFFECT_HELP_LINE_DOWN,
+        Some(HelpNavigation::LineUp) => SYO_EFFECT_HELP_LINE_UP,
+        Some(HelpNavigation::HalfPageDown) => SYO_EFFECT_HELP_HALF_PAGE_DOWN,
+        Some(HelpNavigation::HalfPageUp) => SYO_EFFECT_HELP_HALF_PAGE_UP,
+        Some(HelpNavigation::PageDown) => SYO_EFFECT_HELP_PAGE_DOWN,
+        Some(HelpNavigation::PageUp) => SYO_EFFECT_HELP_PAGE_UP,
+        Some(HelpNavigation::Top) => SYO_EFFECT_HELP_TOP,
+        Some(HelpNavigation::Bottom) => SYO_EFFECT_HELP_BOTTOM,
+        None => 0,
+    };
     bits
+}
+
+/// Integer tags for keybinding-help groups.
+pub type SyoKeybindingGroup = i32;
+pub const SYO_KEYBINDING_GROUP_HELP: SyoKeybindingGroup = 0;
+pub const SYO_KEYBINDING_GROUP_COMMON: SyoKeybindingGroup = 1;
+pub const SYO_KEYBINDING_GROUP_NORMAL: SyoKeybindingGroup = 2;
+pub const SYO_KEYBINDING_GROUP_FOCUS: SyoKeybindingGroup = 3;
+pub const SYO_KEYBINDING_GROUP_VISUAL: SyoKeybindingGroup = 4;
+pub const SYO_KEYBINDING_GROUP_HIGHLIGHT: SyoKeybindingGroup = 5;
+
+/// Integer tags for the active document mode shown by keybinding help.
+pub type SyoMode = i32;
+pub const SYO_MODE_NORMAL: SyoMode = 0;
+pub const SYO_MODE_FOCUS: SyoMode = 1;
+pub const SYO_MODE_VISUAL: SyoMode = 2;
+pub const SYO_MODE_HIGHLIGHT: SyoMode = 3;
+
+/// One owned row of the keybinding-help snapshot. `keys` is a comma-separated
+/// display string; free the whole list with [`syo_keybinding_list_free`].
+#[repr(C)]
+pub struct SyoKeybindingItem {
+    pub group: SyoKeybindingGroup,
+    pub keys: *mut c_char,
+    pub command: *mut c_char,
+    pub description: *mut c_char,
+}
+
+/// Complete keybinding-help snapshot.
+#[repr(C)]
+pub struct SyoKeybindingList {
+    pub items: *mut SyoKeybindingItem,
+    pub count: usize,
+    pub active_mode: SyoMode,
 }
 
 /// A page to draw, in canvas pixel coordinates.
@@ -1433,6 +1495,106 @@ pub unsafe extern "C" fn syo_bitmap_free(bitmap: *mut SyoBitmap) {
     }
 }
 
+fn syo_mode(mode: Mode) -> SyoMode {
+    match mode {
+        Mode::Normal => SYO_MODE_NORMAL,
+        Mode::Focus => SYO_MODE_FOCUS,
+        Mode::Visual => SYO_MODE_VISUAL,
+        Mode::Highlight => SYO_MODE_HIGHLIGHT,
+    }
+}
+
+fn syo_keybinding_group(group: KeybindingHelpGroup) -> SyoKeybindingGroup {
+    match group {
+        KeybindingHelpGroup::Help => SYO_KEYBINDING_GROUP_HELP,
+        KeybindingHelpGroup::Common => SYO_KEYBINDING_GROUP_COMMON,
+        KeybindingHelpGroup::Normal => SYO_KEYBINDING_GROUP_NORMAL,
+        KeybindingHelpGroup::Focus => SYO_KEYBINDING_GROUP_FOCUS,
+        KeybindingHelpGroup::Visual => SYO_KEYBINDING_GROUP_VISUAL,
+        KeybindingHelpGroup::Highlight => SYO_KEYBINDING_GROUP_HIGHLIGHT,
+    }
+}
+
+fn empty_keybinding_list(active_mode: SyoMode) -> *mut SyoKeybindingList {
+    Box::into_raw(Box::new(SyoKeybindingList {
+        items: std::ptr::null_mut(),
+        count: 0,
+        active_mode,
+    }))
+}
+
+/// Whether the modal keybinding-help overlay should currently be visible.
+///
+/// # Safety
+/// `app` must be NULL or valid.
+#[no_mangle]
+pub unsafe extern "C" fn syo_app_keybindings_overlay_visible(app: *const SyoApp) -> bool {
+    unsafe { app.as_ref() }
+        .and_then(|app| {
+            catch_unwind(AssertUnwindSafe(|| app.app.keybindings_overlay_visible())).ok()
+        })
+        .unwrap_or(false)
+}
+
+/// Effective keybindings for the help overlay. Owned by the caller; free with
+/// [`syo_keybinding_list_free`].
+///
+/// # Safety
+/// `app` must be NULL or valid.
+#[no_mangle]
+pub unsafe extern "C" fn syo_app_keybinding_list(app: *const SyoApp) -> *mut SyoKeybindingList {
+    let Some(app) = (unsafe { app.as_ref() }) else {
+        return empty_keybinding_list(SYO_MODE_NORMAL);
+    };
+    catch_unwind(AssertUnwindSafe(|| {
+        let help = app.app.keybinding_help();
+        let active_mode = syo_mode(help.active_mode);
+        let items: Box<[SyoKeybindingItem]> = help
+            .entries
+            .into_iter()
+            .map(|entry| SyoKeybindingItem {
+                group: syo_keybinding_group(entry.group),
+                keys: to_c_string(entry.keys.join(", ")),
+                command: to_c_string(entry.command.name().to_owned()),
+                description: to_c_string(entry.command.description().to_owned()),
+            })
+            .collect();
+        if items.is_empty() {
+            return empty_keybinding_list(active_mode);
+        }
+        let count = items.len();
+        let items = Box::into_raw(items) as *mut SyoKeybindingItem;
+        Box::into_raw(Box::new(SyoKeybindingList {
+            items,
+            count,
+            active_mode,
+        }))
+    }))
+    .unwrap_or_else(|_| empty_keybinding_list(SYO_MODE_NORMAL))
+}
+
+/// Free a list returned by [`syo_app_keybinding_list`]. A no-op for NULL.
+///
+/// # Safety
+/// `list` must be NULL or a pointer returned by [`syo_app_keybinding_list`].
+#[no_mangle]
+pub unsafe extern "C" fn syo_keybinding_list_free(list: *mut SyoKeybindingList) {
+    if list.is_null() {
+        return;
+    }
+    let _ = catch_unwind(AssertUnwindSafe(|| unsafe {
+        let list = Box::from_raw(list);
+        if !list.items.is_null() && list.count > 0 {
+            let items = Box::from_raw(std::ptr::slice_from_raw_parts_mut(list.items, list.count));
+            for item in items.iter() {
+                syo_string_free(item.keys);
+                syo_string_free(item.command);
+                syo_string_free(item.description);
+            }
+        }
+    }));
+}
+
 /// Status line text. Free with `syo_string_free`.
 ///
 /// # Safety
@@ -2295,6 +2457,61 @@ mod tests {
             syo_text_annotation_list_free(list);
             syo_text_annotation_list_free(std::ptr::null_mut());
 
+            syo_app_free(app);
+        }
+    }
+
+    #[test]
+    fn keybinding_help_round_trips_and_isolates_commands() {
+        unsafe {
+            let app = syo_app_new(std::ptr::null(), std::ptr::null());
+            assert!(!app.is_null());
+            assert!(!syo_app_keybindings_overlay_visible(app));
+
+            let toggle = CString::new("<C-?>").unwrap();
+            let bits = syo_app_key_event(app, toggle.as_ptr());
+            assert_ne!(bits & SYO_EFFECT_KEYBINDINGS_OVERLAY_CHANGED, 0);
+            assert!(syo_app_keybindings_overlay_visible(app));
+
+            let list = syo_app_keybinding_list(app);
+            assert!(!list.is_null());
+            assert!((*list).count > 0);
+            assert_eq!((*list).active_mode, SYO_MODE_NORMAL);
+            let items = std::slice::from_raw_parts((*list).items, (*list).count);
+            assert!(items.iter().any(|item| {
+                item.group == SYO_KEYBINDING_GROUP_COMMON
+                    && CStr::from_ptr(item.command).to_bytes() == b"toggle_keybindings_overlay"
+                    && CStr::from_ptr(item.keys).to_bytes().contains(&b'?')
+            }));
+            assert!(items.iter().any(|item| {
+                item.group == SYO_KEYBINDING_GROUP_HELP
+                    && CStr::from_ptr(item.command).to_bytes() == b"help_scroll_down"
+            }));
+            syo_keybinding_list_free(list);
+
+            let down = CString::new("j").unwrap();
+            let down_bits = syo_app_key_event(app, down.as_ptr());
+            assert_ne!(down_bits & SYO_EFFECT_HELP_LINE_DOWN, 0);
+            assert_eq!(down_bits & SYO_EFFECT_REDRAW, 0);
+
+            // The ordinary quit sequence is consumed by the isolated help
+            // keymap and never reaches the application command.
+            let space = CString::new("<Space>").unwrap();
+            let q = CString::new("q").unwrap();
+            let _ = syo_app_key_event(app, space.as_ptr());
+            let quit_bits = syo_app_key_event(app, q.as_ptr());
+            assert_eq!(quit_bits & (SYO_EFFECT_QUIT | SYO_EFFECT_CONFIRM_QUIT), 0);
+            assert!(syo_app_keybindings_overlay_visible(app));
+
+            let escape = CString::new("<Esc>").unwrap();
+            let close_bits = syo_app_key_event(app, escape.as_ptr());
+            assert_ne!(close_bits & SYO_EFFECT_KEYBINDINGS_OVERLAY_CHANGED, 0);
+            assert!(!syo_app_keybindings_overlay_visible(app));
+
+            syo_keybinding_list_free(std::ptr::null_mut());
+            let empty = syo_app_keybinding_list(std::ptr::null());
+            assert_eq!((*empty).count, 0);
+            syo_keybinding_list_free(empty);
             syo_app_free(app);
         }
     }

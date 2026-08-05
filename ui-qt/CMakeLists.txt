@@ -18,6 +18,8 @@ qt_add_executable(syodep
     src/diagnostics.h
     src/key_encoder.cpp
     src/key_encoder.h
+    src/keybindings_overlay.cpp
+    src/keybindings_overlay.h
     src/sidebar/annotation_sidebar.cpp
     src/sidebar/annotation_sidebar.h
     src/sidebar/highlights_panel.cpp

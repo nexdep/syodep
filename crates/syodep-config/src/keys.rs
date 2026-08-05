@@ -290,6 +290,14 @@ mod tests {
                 alt: false
             }]
         );
+        assert_eq!(
+            parse_sequence("<C-?>").unwrap(),
+            vec![Chord {
+                key: Key::Char('?'),
+                ctrl: true,
+                alt: false
+            }]
+        );
     }
 
     #[test]

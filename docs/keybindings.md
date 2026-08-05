@@ -10,7 +10,8 @@ and the internals):
 - Special keys use angle brackets: `<Esc>`, `<CR>` (Enter), `<Tab>`,
   `<Space>`, `<BS>` (Backspace), `<Up>`, `<Down>`, `<Left>`, `<Right>`,
   `<PageUp>`, `<PageDown>`, `<Home>`, `<End>`.
-- Modifiers go inside the brackets: `<C-d>` (ctrl), `<A-x>` (alt),
+- Modifiers go inside the brackets: `<C-d>` (ctrl), `<C-?>` (ctrl+question
+  mark), `<A-x>` (alt),
   `<C-A-Left>` (both). Shift on letters is expressed by case: `<C-G>`.
 - A literal `<` is written bracketed — `<<>`, or `<C-<>` with ctrl — because
   a bare `<` opens a bracket group. This is also how the shell encodes a
@@ -127,12 +128,41 @@ Application:
 | `<leader>w` | `save_document` — overwrite the PDF with the highlights embedded |
 | `<leader>a` | `toggle_highlights_sidebar` — toggle or activate the Highlights sidebar page |
 | `<leader>n` | `toggle_annotations_sidebar` — toggle or activate the Annotations sidebar page |
+| `<C-?>` | `toggle_keybindings_overlay` — show the modal keybinding reference |
 | `n` | `create_annotation` — capture Focus/Visual/Highlight source as a pending Markdown annotation (rejected in Normal) |
 | `<leader>q` | `quit` — save the reading position and quit; asks first if there are highlights not yet saved to the PDF |
 | `<Esc>` | `cancel` |
 
 The mouse wheel (and horizontal trackpad scrolling) also scrolls the view;
 this is a convenience, not the primary workflow.
+
+## Keybinding help overlay
+
+Press `<C-?>` (usually Ctrl+Shift+`/`) to show a semi-transparent,
+scrollable reference for the **effective** keybindings. It reflects valid user
+overrides and the configured leader rather than showing a static copy of the
+defaults. Bindings shared by all four document modes are listed once under
+Common; the remaining Normal, Focus, Visual and Highlight mappings are grouped
+separately, with the current mode marked.
+
+The overlay is modal. Document navigation, selection, annotation, sidebar,
+open, save and quit commands are ignored while it is visible. Only these fixed
+overlay controls and every effective binding of `toggle_keybindings_overlay`
+are accepted:
+
+| Keys | Command |
+|---|---|
+| `j`, `<Down>` | `help_scroll_down` |
+| `k`, `<Up>` | `help_scroll_up` |
+| `<C-d>` / `<C-u>` | `help_half_page_down` / `help_half_page_up` |
+| `<C-f>`, `<PageDown>` / `<C-b>`, `<PageUp>` | `help_page_down` / `help_page_up` |
+| `gg` / `G` | `help_top` / `help_bottom` |
+| `<Esc>`, `<C-?>` | close the overlay |
+
+The mouse wheel and scrollbar also navigate the overlay. Counts are ignored.
+These overlay-local navigation bindings are fixed; the open/close command can
+be rebound through `[keys]`, and its effective current-mode bindings are also
+recognized while the overlay is open.
 
 Dragging a PDF onto the window opens it. Anything that is not a `.pdf` is
 refused while still being dragged, so nothing happens on release; dropping

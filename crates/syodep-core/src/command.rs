@@ -140,6 +140,26 @@ pub enum Command {
     /// Throw the pending highlight away, restoring the mode and selection that
     /// were in effect when it was started.
     HighlightDiscard,
+    // Keybinding-help overlay. These navigation commands are only reachable
+    // through the overlay's isolated keymap.
+    /// Show or hide the modal keybinding-help overlay.
+    ToggleKeybindingsOverlay,
+    /// Scroll the keybinding-help overlay down by one row.
+    HelpScrollDown,
+    /// Scroll the keybinding-help overlay up by one row.
+    HelpScrollUp,
+    /// Scroll the keybinding-help overlay down by half a viewport.
+    HelpHalfPageDown,
+    /// Scroll the keybinding-help overlay up by half a viewport.
+    HelpHalfPageUp,
+    /// Scroll the keybinding-help overlay down by one viewport.
+    HelpPageDown,
+    /// Scroll the keybinding-help overlay up by one viewport.
+    HelpPageUp,
+    /// Scroll the keybinding-help overlay to its first row.
+    HelpTop,
+    /// Scroll the keybinding-help overlay to its last row.
+    HelpBottom,
     // Application.
     /// Show or hide the highlights sidebar, moving keyboard focus with it.
     ToggleHighlightsSidebar,
@@ -223,6 +243,18 @@ pub const ALL_COMMANDS: &[(&str, Command)] = &[
     ("highlight_commit", Command::HighlightCommit),
     ("highlight_discard", Command::HighlightDiscard),
     (
+        "toggle_keybindings_overlay",
+        Command::ToggleKeybindingsOverlay,
+    ),
+    ("help_scroll_down", Command::HelpScrollDown),
+    ("help_scroll_up", Command::HelpScrollUp),
+    ("help_half_page_down", Command::HelpHalfPageDown),
+    ("help_half_page_up", Command::HelpHalfPageUp),
+    ("help_page_down", Command::HelpPageDown),
+    ("help_page_up", Command::HelpPageUp),
+    ("help_top", Command::HelpTop),
+    ("help_bottom", Command::HelpBottom),
+    (
         "toggle_highlights_sidebar",
         Command::ToggleHighlightsSidebar,
     ),
@@ -263,6 +295,91 @@ impl Command {
             .map(|(name, _)| *name)
             .expect("every command has an entry in ALL_COMMANDS")
     }
+
+    /// Concise user-facing label for command discovery surfaces.
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::ScrollDown => "Scroll down",
+            Self::ScrollUp => "Scroll up",
+            Self::ScrollLeft => "Scroll left",
+            Self::ScrollRight => "Scroll right",
+            Self::ScrollHalfPageDown => "Scroll half a page down",
+            Self::ScrollHalfPageUp => "Scroll half a page up",
+            Self::ScrollPageDown => "Scroll one page down",
+            Self::ScrollPageUp => "Scroll one page up",
+            Self::NextPage => "Go to the next page",
+            Self::PrevPage => "Go to the previous page",
+            Self::GotoFirstPage => "Go to the first page",
+            Self::GotoLastPage => "Go to the last page",
+            Self::ZoomIn => "Zoom in",
+            Self::ZoomOut => "Zoom out",
+            Self::FitWidth => "Fit page width",
+            Self::ZoomReset => "Reset zoom",
+            Self::CenterView => "Center the current focus",
+            Self::FocusEnter => "Enter focus mode",
+            Self::FocusEnterChar => "Focus by character",
+            Self::FocusEnterWord => "Focus by word",
+            Self::FocusEnterLine => "Focus by line",
+            Self::FocusEnterSentence => "Focus by sentence",
+            Self::FocusEnterParagraph => "Focus by paragraph",
+            Self::FocusExit => "Leave focus mode",
+            Self::FocusLeft => "Move focus left",
+            Self::FocusRight => "Move focus right",
+            Self::FocusUp => "Move focus up",
+            Self::FocusDown => "Move focus down",
+            Self::FocusNextWord => "Move focus to the next word",
+            Self::FocusPrevWord => "Move focus to the previous word",
+            Self::FocusNextLine => "Move focus to the next line",
+            Self::FocusNextSentence => "Move focus to the next sentence",
+            Self::FocusNextParagraph => "Move focus to the next paragraph",
+            Self::VisualEnter => "Enter visual mode",
+            Self::VisualEnterChar => "Select by character",
+            Self::VisualEnterWord => "Select by word",
+            Self::VisualEnterLine => "Select by line",
+            Self::VisualEnterSentence => "Select by sentence",
+            Self::VisualEnterParagraph => "Select by paragraph",
+            Self::VisualExit => "Leave visual mode",
+            Self::VisualLeft => "Move the active selection end left",
+            Self::VisualRight => "Move the active selection end right",
+            Self::VisualUp => "Move the active selection end up",
+            Self::VisualDown => "Move the active selection end down",
+            Self::VisualNextWord => "Move the active end to the next word",
+            Self::VisualPrevWord => "Move the active end to the previous word",
+            Self::VisualNextLine => "Move the active end to the next line",
+            Self::VisualNextSentence => "Move the active end to the next sentence",
+            Self::VisualNextParagraph => "Move the active end to the next paragraph",
+            Self::VisualSwapEnds => "Switch the active selection end",
+            Self::VisualScopeChar => "Set the active end to character scope",
+            Self::VisualScopeWord => "Set the active end to word scope",
+            Self::VisualScopeLine => "Set the active end to line scope",
+            Self::VisualScopeSentence => "Set the active end to sentence scope",
+            Self::VisualScopeParagraph => "Set the active end to paragraph scope",
+            Self::VisualOtherChar => "Switch ends with character scope",
+            Self::VisualOtherWord => "Switch ends with word scope",
+            Self::VisualOtherLine => "Switch ends with line scope",
+            Self::VisualOtherSentence => "Switch ends with sentence scope",
+            Self::VisualOtherParagraph => "Switch ends with paragraph scope",
+            Self::HighlightEnter => "Start a highlight",
+            Self::HighlightCommit => "Keep the pending highlight",
+            Self::HighlightDiscard => "Discard the pending highlight",
+            Self::ToggleKeybindingsOverlay => "Show or hide keybinding help",
+            Self::HelpScrollDown => "Scroll help down",
+            Self::HelpScrollUp => "Scroll help up",
+            Self::HelpHalfPageDown => "Scroll help half a page down",
+            Self::HelpHalfPageUp => "Scroll help half a page up",
+            Self::HelpPageDown => "Scroll help one page down",
+            Self::HelpPageUp => "Scroll help one page up",
+            Self::HelpTop => "Go to the start of help",
+            Self::HelpBottom => "Go to the end of help",
+            Self::ToggleHighlightsSidebar => "Toggle the Highlights sidebar",
+            Self::ToggleAnnotationsSidebar => "Toggle the Annotations sidebar",
+            Self::CreateAnnotation => "Create a Markdown annotation",
+            Self::OpenFile => "Open a PDF",
+            Self::SaveDocument => "Save highlights into the PDF",
+            Self::Quit => "Quit syodep",
+            Self::Cancel => "Cancel the current action",
+        }
+    }
 }
 
 impl fmt::Display for Command {
@@ -295,6 +412,7 @@ mod tests {
         for (name, command) in ALL_COMMANDS {
             assert_eq!(command.name(), *name);
             assert_eq!(name.parse::<Command>().unwrap(), *command);
+            assert!(!command.description().is_empty());
         }
     }
 }

@@ -87,6 +87,50 @@ struct TextAnnotationSnapshot
     quint64 revision = 0;
 };
 
+enum class KeybindingGroup
+{
+    Help,
+    Common,
+    Normal,
+    Focus,
+    Visual,
+    Highlight
+};
+
+enum class DocumentMode
+{
+    Normal,
+    Focus,
+    Visual,
+    Highlight
+};
+
+struct KeybindingItem
+{
+    KeybindingGroup group = KeybindingGroup::Common;
+    QString keys;
+    QString command;
+    QString description;
+};
+
+struct KeybindingSnapshot
+{
+    QVector<KeybindingItem> items;
+    DocumentMode activeMode = DocumentMode::Normal;
+};
+
+enum class HelpNavigation
+{
+    LineDown,
+    LineUp,
+    HalfPageDown,
+    HalfPageUp,
+    PageDown,
+    PageUp,
+    Top,
+    Bottom
+};
+
 enum class CorePersistence
 {
     // Resolve default config and database paths (normal window).
@@ -153,6 +197,8 @@ public:
     bool startSidebarOpen() const;
     // Empty when no document is open.
     QString documentPath() const;
+    bool keybindingsOverlayVisible() const;
+    KeybindingSnapshot keybindingSnapshot() const;
 
     // Annotation queries (Pending + Embedded; not filtered like the overlay)
     quint64 annotationRevision() const;
@@ -205,6 +251,8 @@ signals:
     void toggleAnnotationsSidebarRequested();
     // `n` captured a pending anchor; open Annotations in creation mode.
     void createTextAnnotationRequested();
+    void keybindingsOverlayChanged();
+    void helpNavigationRequested(syodep::HelpNavigation navigation);
 
 private:
     enum class QuitDelivery

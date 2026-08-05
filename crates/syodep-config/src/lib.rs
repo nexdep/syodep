@@ -280,6 +280,7 @@ pub fn default_keybindings() -> BTreeMap<String, String> {
         ("<C-u>", "scroll_half_page_up"),
         ("<C-f>", "scroll_page_down"),
         ("<C-b>", "scroll_page_up"),
+        ("<C-?>", "toggle_keybindings_overlay"),
         ("gg", "goto_first_page"),
         ("G", "goto_last_page"),
         ("z+", "zoom_in"),
@@ -875,6 +876,10 @@ mod tests {
         assert_eq!(keys.get("j").map(String::as_str), Some("scroll_down"));
         assert_eq!(keys.get("gg").map(String::as_str), Some("goto_first_page"));
         assert_eq!(keys.get("G").map(String::as_str), Some("goto_last_page"));
+        assert_eq!(
+            keys.get("<C-?>").map(String::as_str),
+            Some("toggle_keybindings_overlay")
+        );
     }
 
     #[test]

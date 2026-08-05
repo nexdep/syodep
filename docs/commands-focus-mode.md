@@ -327,8 +327,8 @@ window center; the highlight stays on the same content.
 | `center_view` | scroll so the focus highlight is at the viewport center (Vim `zz`) | — |
 
 The application commands `open_file`, `save_document`,
-`toggle_highlights_sidebar`, `toggle_annotations_sidebar`, `create_annotation`,
-`quit` and `cancel` also keep their
+`toggle_highlights_sidebar`, `toggle_annotations_sidebar`,
+`toggle_keybindings_overlay`, `create_annotation`, `quit` and `cancel` also keep their
 normal-mode behavior. See `docs/commands-normal-mode.md` for those.
 
 ## Relationship to visual mode

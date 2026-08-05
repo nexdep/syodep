@@ -7,6 +7,29 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-08-05 — Modal keybinding-help overlay
+
+`<C-?>` now opens a full-window semi-transparent, scrollable reference built
+from the four resolved keymap tries. It shows friendly action labels plus exact
+command ids, factors bindings identical across every mode into Common, groups
+the remaining Normal/Focus/Visual/Highlight differences, marks the active mode,
+and preserves `<leader>` spelling. Invalid or superseded config entries never
+reach the snapshot.
+
+Help is an input-isolated modal context rather than a fifth document mode.
+Only `j`/`k` and arrows, half/full-page keys, `gg`/`G`, Escape, and the current
+mode's effective help-toggle bindings are accepted; wheel input scrolls the
+help viewport. `App::execute` also rejects every unrelated command and direct
+document scrolling while help is visible, so a future palette cannot bypass
+the boundary. Closing restores canvas focus without changing the underlying
+mode, selection, pending highlight, or viewport.
+
+Core tests cover effective-map factoring, custom toggle precedence, navigation
+effects, modal rejection and state preservation. FFI tests cover owned snapshot
+round-trips and effect bits. The offscreen Qt smoke test drives the real
+Ctrl+Shift+`?` event through encoding, opens and scrolls the widget, and closes
+through both supported paths. Workspace total: 680 tests.
+
 ## 2026-08-04 — `[window] start_sidebar_open`
 
 The closed-sidebar-on-open behaviour is now a config option rather than a

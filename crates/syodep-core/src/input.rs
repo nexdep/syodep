@@ -120,12 +120,52 @@ impl Keymap {
         errors
     }
 
-    fn bind(&mut self, chords: &[Chord], command: Command) {
+    pub(crate) fn bind(&mut self, chords: &[Chord], command: Command) {
         let mut node = &mut self.root;
         for chord in chords {
             node = node.children.entry(*chord).or_default();
         }
         node.command = Some(command);
+    }
+
+    /// Every effective binding after all overlays have been applied.
+    ///
+    /// This walks the trie rather than retaining the source tables, so invalid
+    /// entries and bindings superseded through equivalent spellings cannot
+    /// leak into command-discovery UIs.
+    pub fn bindings(&self) -> Vec<(Vec<Chord>, Command)> {
+        fn walk(node: &Node, prefix: &mut Vec<Chord>, out: &mut Vec<(Vec<Chord>, Command)>) {
+            if let Some(command) = node.command {
+                out.push((prefix.clone(), command));
+            }
+            for (chord, child) in &node.children {
+                prefix.push(*chord);
+                walk(child, prefix, out);
+                prefix.pop();
+            }
+        }
+
+        let mut out = Vec::new();
+        walk(&self.root, &mut Vec::new(), &mut out);
+        out
+    }
+
+    /// Canonical user-facing spelling of one effective sequence.
+    ///
+    /// A leading configured leader is folded back to `<leader>` even though
+    /// the trie stores its expanded chords. Named-key aliases are normalized
+    /// by [`Chord`]'s display implementation.
+    pub fn display_sequence(&self, chords: &[Chord]) -> String {
+        let (prefix, rest) = if !self.leader.is_empty() && chords.starts_with(&self.leader) {
+            ("<leader>", &chords[self.leader.len()..])
+        } else {
+            ("", chords)
+        };
+        let mut out = prefix.to_owned();
+        for chord in rest {
+            out.push_str(&chord.to_string());
+        }
+        out
     }
 
     fn lookup(&self, chords: &[Chord]) -> Option<&Node> {

@@ -17,6 +17,7 @@ Milestone 1 (MVP foundation) is complete:
 - continuous scrollable rendering of the entire document (MuPDF)
 - Vim-like keyboard navigation with count prefixes: `j`/`k`/`h`/`l`,
   `J`/`K` (pages), `<C-d>`/`<C-u>`/`<C-f>`/`<C-b>`, `gg`/`G`/`{n}G`
+- modal keybinding reference on `<C-?>`, including user overrides for all modes
 - zoom: `+`/`-`, `zw` fit-width, `z0` reset
 - TOML config with user keybindings
 - SQLite persistence; last reading position restored per document

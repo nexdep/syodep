@@ -41,6 +41,11 @@ Counts: most commands accept a count prefix typed before the binding
 (`5j`, `3J`, `12G`). Where a count has a special meaning it is noted on the
 per-mode page.
 
+`toggle_keybindings_overlay` opens an input-isolated command reference over
+any of the four modes. Its `help_*` navigation commands exist only in that
+overlay; opening help does not create a fifth document mode or alter the mode
+underneath it.
+
 ## Planned (not yet implemented)
 
 Phase 2 adds search/bookmark/mark/jump commands on top of the selection visual

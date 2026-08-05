@@ -90,6 +90,9 @@ and zoom all work while a highlight is pending, and — as in visual mode — th
 leave the highlight where it is. `center_view` scrolls so the pending highlight
 is at the viewport center without reshaping it.
 
+`toggle_keybindings_overlay` also remains available. While its overlay is open,
+the pending highlight is preserved and every non-help command is ignored.
+
 ## Customizing
 
 Highlight-mode bindings live in the `[highlight_keys]` config table, which

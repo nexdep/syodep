@@ -119,6 +119,7 @@ leader = "<Space>"
 # ("<C-d>" = ctrl+d, "<A-x>" = alt+x, "<C-A-Left>").
 # Command names are listed in docs/commands.md.
 [keys]
+"<C-?>" = "toggle_keybindings_overlay"
 "<C-b>" = "scroll_page_up"
 "<C-d>" = "scroll_half_page_down"
 "<C-f>" = "scroll_page_down"

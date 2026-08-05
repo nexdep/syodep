@@ -12,11 +12,13 @@
 #include <QMessageBox>
 #include <QMimeData>
 #include <QPushButton>
+#include <QResizeEvent>
 #include <QStatusBar>
 #include <QUrl>
 
 #include "canvas_widget.h"
 #include "core_controller.h"
+#include "keybindings_overlay.h"
 #include "sidebar/annotation_sidebar.h"
 #include "sidebar/annotations_panel.h"
 
@@ -99,6 +101,13 @@ MainWindow::MainWindow(QWidget *parent)
             this, &MainWindow::toggleAnnotationsSidebar);
     connect(m_core, &CoreController::createTextAnnotationRequested,
             this, &MainWindow::openAnnotationCreation);
+
+    m_keybindingsOverlay = new KeybindingsOverlay(m_core, this);
+    m_keybindingsOverlay->setGeometry(rect());
+    connect(m_core, &CoreController::keybindingsOverlayChanged,
+            this, &MainWindow::syncKeybindingsOverlay);
+    connect(m_core, &CoreController::helpNavigationRequested,
+            m_keybindingsOverlay, &KeybindingsOverlay::navigate);
 
     setAcceptDrops(true);
 
@@ -215,8 +224,26 @@ void MainWindow::focusCanvas()
 {
     if (m_annotationSidebar)
         m_annotationSidebar->clearPendingKeys();
-    if (m_canvas)
+    if (m_keybindingsOverlay && m_keybindingsOverlay->isVisible())
+        m_keybindingsOverlay->setFocus(Qt::OtherFocusReason);
+    else if (m_canvas)
         m_canvas->setFocus(Qt::OtherFocusReason);
+}
+
+void MainWindow::syncKeybindingsOverlay()
+{
+    if (!m_keybindingsOverlay || !m_core)
+        return;
+    if (!m_core->keybindingsOverlayVisible()) {
+        m_keybindingsOverlay->hide();
+        focusCanvas();
+        return;
+    }
+    m_keybindingsOverlay->setSnapshot(m_core->keybindingSnapshot());
+    m_keybindingsOverlay->setGeometry(rect());
+    m_keybindingsOverlay->show();
+    m_keybindingsOverlay->raise();
+    m_keybindingsOverlay->setFocus(Qt::ShortcutFocusReason);
 }
 
 bool MainWindow::openDocument(const QString &path)
@@ -329,6 +356,16 @@ void MainWindow::closeEvent(QCloseEvent *event)
         event->accept();
     else
         event->ignore();
+}
+
+void MainWindow::resizeEvent(QResizeEvent *event)
+{
+    QMainWindow::resizeEvent(event);
+    if (m_keybindingsOverlay) {
+        m_keybindingsOverlay->setGeometry(rect());
+        if (m_keybindingsOverlay->isVisible())
+            m_keybindingsOverlay->raise();
+    }
 }
 
 void MainWindow::onConfirmQuitRequested()

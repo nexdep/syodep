@@ -15,7 +15,7 @@ Status legend: ✅ done · 🚧 in progress · ⬜ planned
 - ✅ SQLite database with versioned migrations
 - ✅ Save/restore last reading position (fingerprint-keyed)
 - ✅ Render cache (byte-bounded LRU)
-- ✅ Tests (495), CI (lint, Linux+Windows tests, Qt build, smoke test,
+- ✅ Tests (680), CI (lint, Linux+Windows tests, Qt build, smoke test,
   docs checks), documentation set
 
 ## Phase 2 — selection, annotation, search ⬜
@@ -109,6 +109,7 @@ the same code. See the development log.
   - ✅ attach artifacts to GitHub releases on tag push
   - ✅ Scoop bucket (`bucket/syodep.json`, auto-bumped on release)
 - ⬜ Command palette (`:` / `<C-p>`) listing the command registry
+- ✅ Modal keybinding-help overlay (`<C-?>`) showing effective bindings for all modes
 - ⬜ Config hot-reload
 
 ## Explicitly out of scope

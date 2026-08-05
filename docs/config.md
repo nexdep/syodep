@@ -300,6 +300,12 @@ default keybindings (only your changes need to be listed). Key syntax and
 the default bindings: `docs/keybindings.md`. Command names:
 `docs/commands.md`.
 
+`toggle_keybindings_overlay` is bound to `<C-?>` by default. Its reference
+shows these resolved tables after validation and mode overlays, so custom
+bindings and the configured leader appear exactly as they are effective. The
+help overlay's own scrolling keys are fixed and documented in
+`docs/keybindings.md`; only its open/close command belongs in `[keys]`.
+
 ```toml
 [keys]
 "j"     = "scroll_half_page_down"  # rebind a default

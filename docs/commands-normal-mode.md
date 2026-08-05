@@ -79,9 +79,29 @@ focused.
 | `save_document` | overwrite the open PDF with its highlights embedded |
 | `toggle_highlights_sidebar` | toggle or activate the Highlights sidebar page |
 | `toggle_annotations_sidebar` | toggle or activate the Annotations sidebar page |
+| `toggle_keybindings_overlay` | show or hide the modal keybinding reference |
 | `create_annotation` | capture the current Focus/Visual/Highlight source as a pending Markdown annotation and open the editor (rejected in Normal mode) |
 | `quit` | save the reading position and quit; asks first if there are highlights not yet saved to the PDF |
 | `cancel` | clear pending count/sequence input (bound to `<Esc>`; Esc also clears pending input implicitly mid-sequence) |
+
+### Keybinding-help navigation
+
+These commands are reachable only through the help overlay's isolated keymap.
+Every other command is ignored while the overlay is visible.
+
+| Command | Effect |
+|---|---|
+| `help_scroll_down` | scroll the help rows down |
+| `help_scroll_up` | scroll the help rows up |
+| `help_half_page_down` | scroll help down half a viewport |
+| `help_half_page_up` | scroll help up half a viewport |
+| `help_page_down` | scroll help down one viewport |
+| `help_page_up` | scroll help up one viewport |
+| `help_top` | scroll to the first help row |
+| `help_bottom` | scroll to the last help row |
+
+`toggle_keybindings_overlay` and `cancel` close the overlay. See
+`docs/keybindings.md` for the fixed navigation bindings.
 
 ### `save_document`
 

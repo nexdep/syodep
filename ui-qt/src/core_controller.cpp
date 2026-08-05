@@ -16,6 +16,35 @@ void logUnexpectedHighlightState(int state)
     std::fprintf(stderr, "syodep: ignoring highlight with unknown pdf_state %d\n", state);
 }
 
+KeybindingGroup keybindingGroupFromFfi(int group, bool *ok)
+{
+    if (ok)
+        *ok = true;
+    switch (group) {
+    case SYO_KEYBINDING_GROUP_HELP: return KeybindingGroup::Help;
+    case SYO_KEYBINDING_GROUP_COMMON: return KeybindingGroup::Common;
+    case SYO_KEYBINDING_GROUP_NORMAL: return KeybindingGroup::Normal;
+    case SYO_KEYBINDING_GROUP_FOCUS: return KeybindingGroup::Focus;
+    case SYO_KEYBINDING_GROUP_VISUAL: return KeybindingGroup::Visual;
+    case SYO_KEYBINDING_GROUP_HIGHLIGHT: return KeybindingGroup::Highlight;
+    default:
+        if (ok)
+            *ok = false;
+        return KeybindingGroup::Common;
+    }
+}
+
+DocumentMode documentModeFromFfi(int mode)
+{
+    switch (mode) {
+    case SYO_MODE_FOCUS: return DocumentMode::Focus;
+    case SYO_MODE_VISUAL: return DocumentMode::Visual;
+    case SYO_MODE_HIGHLIGHT: return DocumentMode::Highlight;
+    case SYO_MODE_NORMAL:
+    default: return DocumentMode::Normal;
+    }
+}
+
 CoreOverlay takeOverlay(SyoOverlay overlay)
 {
     CoreOverlay out;
@@ -351,6 +380,41 @@ QString CoreController::documentPath() const
     return takeSyoString(syo_app_document_path(m_app));
 }
 
+bool CoreController::keybindingsOverlayVisible() const
+{
+    assertGuiThread();
+    return m_app && syo_app_keybindings_overlay_visible(m_app);
+}
+
+KeybindingSnapshot CoreController::keybindingSnapshot() const
+{
+    assertGuiThread();
+    KeybindingSnapshot snapshot;
+    if (!m_app)
+        return snapshot;
+
+    SyoKeybindingList *list = syo_app_keybinding_list(m_app);
+    if (!list)
+        return snapshot;
+    snapshot.activeMode = documentModeFromFfi(list->active_mode);
+    snapshot.items.reserve(qsizetype(list->count));
+    for (size_t i = 0; i < list->count; ++i) {
+        const SyoKeybindingItem &item = list->items[i];
+        bool ok = false;
+        const KeybindingGroup group = keybindingGroupFromFfi(item.group, &ok);
+        if (!ok)
+            continue;
+        snapshot.items.push_back(KeybindingItem{
+            group,
+            item.keys ? QString::fromUtf8(item.keys) : QString(),
+            item.command ? QString::fromUtf8(item.command) : QString(),
+            item.description ? QString::fromUtf8(item.description) : QString(),
+        });
+    }
+    syo_keybinding_list_free(list);
+    return snapshot;
+}
+
 quint64 CoreController::annotationRevision() const
 {
     assertGuiThread();
@@ -624,6 +688,26 @@ bool CoreController::applyEffects(uint32_t effects, QuitDelivery quitDelivery)
         emit toggleAnnotationsSidebarRequested();
     if (effects & SYO_EFFECT_CREATE_ANNOTATION_REQUESTED)
         emit createTextAnnotationRequested();
+
+    // 4c. Modal keybinding-help presentation and its shell-owned scrollbar.
+    if (effects & SYO_EFFECT_KEYBINDINGS_OVERLAY_CHANGED)
+        emit keybindingsOverlayChanged();
+    if (effects & SYO_EFFECT_HELP_LINE_DOWN)
+        emit helpNavigationRequested(HelpNavigation::LineDown);
+    if (effects & SYO_EFFECT_HELP_LINE_UP)
+        emit helpNavigationRequested(HelpNavigation::LineUp);
+    if (effects & SYO_EFFECT_HELP_HALF_PAGE_DOWN)
+        emit helpNavigationRequested(HelpNavigation::HalfPageDown);
+    if (effects & SYO_EFFECT_HELP_HALF_PAGE_UP)
+        emit helpNavigationRequested(HelpNavigation::HalfPageUp);
+    if (effects & SYO_EFFECT_HELP_PAGE_DOWN)
+        emit helpNavigationRequested(HelpNavigation::PageDown);
+    if (effects & SYO_EFFECT_HELP_PAGE_UP)
+        emit helpNavigationRequested(HelpNavigation::PageUp);
+    if (effects & SYO_EFFECT_HELP_TOP)
+        emit helpNavigationRequested(HelpNavigation::Top);
+    if (effects & SYO_EFFECT_HELP_BOTTOM)
+        emit helpNavigationRequested(HelpNavigation::Bottom);
 
     // 5. Canvas redraw
     if (effects & SYO_EFFECT_REDRAW)

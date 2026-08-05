@@ -21,10 +21,14 @@
 #include <QAction>
 #include <QDockWidget>
 #include <QListView>
+#include <QKeyEvent>
 
+#include "canvas_widget.h"
 #include "core_controller.h"
 #include "diagnostics.h"
 #include "main_window.h"
+#include "key_encoder.h"
+#include "keybindings_overlay.h"
 #include "sidebar/annotation_sidebar.h"
 #include "sidebar/annotations_panel.h"
 #include "sidebar/highlight_list_model.h"
@@ -229,6 +233,46 @@ int runSmokeTest(const QString &pdfPath)
     window.show();
     QApplication::processEvents();
     smokeStep("mainwindow shown");
+
+    // The real Qt key encoder and modal overlay: Ctrl+Shift+? is represented
+    // as the config syntax `<C-?>`; help opens over the window, scrolls with
+    // its isolated keymap, then returns focus to the canvas on either close
+    // path.
+    QKeyEvent encodedQuestion(QEvent::KeyPress,
+                              Qt::Key_Question,
+                              Qt::ControlModifier | Qt::ShiftModifier,
+                              QStringLiteral("?"));
+    if (syodep::encodeKeyEvent(&encodedQuestion) != QStringLiteral("<C-?>"))
+        smokeFail(QStringLiteral("Ctrl+? key encoding"));
+    auto *canvas = window.findChild<syodep::CanvasWidget *>();
+    auto *help = window.keybindingsOverlay();
+    if (!canvas || !help)
+        smokeFail(QStringLiteral("keybinding overlay construction"));
+    QApplication::sendEvent(canvas, &encodedQuestion);
+    QApplication::processEvents();
+    if (!help->isVisible() || help->bindingCount() == 0)
+        smokeFail(QStringLiteral("Ctrl+? did not show populated keybinding help"));
+    QKeyEvent helpBottom(QEvent::KeyPress, Qt::Key_G, Qt::ShiftModifier, QStringLiteral("G"));
+    QApplication::sendEvent(help, &helpBottom);
+    QApplication::processEvents();
+    if (help->scrollValue() != help->maximumScrollValue())
+        smokeFail(QStringLiteral("G did not navigate help to the bottom"));
+    QKeyEvent closeQuestion(QEvent::KeyPress,
+                            Qt::Key_Question,
+                            Qt::ControlModifier | Qt::ShiftModifier,
+                            QStringLiteral("?"));
+    QApplication::sendEvent(help, &closeQuestion);
+    QApplication::processEvents();
+    if (help->isVisible() || !canvas->hasFocus())
+        smokeFail(QStringLiteral("Ctrl+? did not close help and restore canvas focus"));
+    QApplication::sendEvent(canvas, &encodedQuestion);
+    QApplication::processEvents();
+    QKeyEvent escapeHelp(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+    QApplication::sendEvent(help, &escapeHelp);
+    QApplication::processEvents();
+    if (help->isVisible())
+        smokeFail(QStringLiteral("Escape did not close keybinding help"));
+    smokeStep("keybinding overlay ok");
 
     // Highlights ↔ Annotations page matrix: self-toggle hides; cross-toggle
     // substitutes; hide leaves the canvas focused.

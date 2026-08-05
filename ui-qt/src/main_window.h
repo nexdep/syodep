@@ -12,11 +12,13 @@
 class QAction;
 class QCloseEvent;
 class QDockWidget;
+class QResizeEvent;
 
 namespace syodep {
 
 class CanvasWidget;
 class CoreController;
+class KeybindingsOverlay;
 
 class MainWindow : public QMainWindow
 {
@@ -36,6 +38,7 @@ public:
     QDockWidget *annotationsDock() const { return m_sidebarDock; }
     QAction *highlightsToggleAction() const { return m_highlightsAction; }
     QAction *annotationsToggleAction() const { return m_annotationsAction; }
+    KeybindingsOverlay *keybindingsOverlay() const { return m_keybindingsOverlay; }
 
     // Single read model for which sidebar page is visible (nullopt when hidden).
     std::optional<SidebarPage> visibleSidebarPage() const;
@@ -53,12 +56,14 @@ protected:
     void dragEnterEvent(QDragEnterEvent *event) override;
     void dropEvent(QDropEvent *event) override;
     void closeEvent(QCloseEvent *event) override;
+    void resizeEvent(QResizeEvent *event) override;
 
 private slots:
     void refreshStatus();
     void showOpenDialog();
     void onConfirmQuitRequested();
     void updateSidebarActions();
+    void syncKeybindingsOverlay();
 
 private:
     bool confirmQuit();
@@ -69,6 +74,7 @@ private:
     CoreController *m_core = nullptr;
     CanvasWidget *m_canvas = nullptr;
     AnnotationSidebar *m_annotationSidebar = nullptr;
+    KeybindingsOverlay *m_keybindingsOverlay = nullptr;
     QDockWidget *m_sidebarDock = nullptr;
     QAction *m_highlightsAction = nullptr;
     QAction *m_annotationsAction = nullptr;

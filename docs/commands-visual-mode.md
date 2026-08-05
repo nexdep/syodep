@@ -145,7 +145,8 @@ they drop the anchor and leave you focused on the moving end at the scope you
 named. Leaving by a `f` chord and leaving by `<Esc>` differ only in whether you
 also change the scope.
 
-The application commands `open_file`, `quit` and `cancel` also keep their
+The application commands `open_file`, `toggle_keybindings_overlay`, `quit` and
+`cancel` also keep their
 normal-mode behavior. See `docs/commands-normal-mode.md` for those.
 
 ## Customizing

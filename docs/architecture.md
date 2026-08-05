@@ -87,6 +87,15 @@ input take plain data). Key pieces:
   `annotations_changed` is distinct from `redraw`: a canvas refresh and a
   sidebar list refresh are different requests. Persists the reading position
   after every navigation command and on drop.
+- **Keybinding help** (`input.rs` + `app.rs`): an overlay orthogonal to the four
+  document modes. Its snapshot is derived from the resolved keymap tries, so
+  invalid and superseded config entries cannot appear. While visible, a
+  dedicated keymap admits only help scrolling, Escape, and the current mode's
+  effective `toggle_keybindings_overlay` shortcuts; `App::execute`
+  independently rejects every other command so future direct command entry
+  points cannot bypass the modal boundary. The underlying mode, selection and
+  viewport are untouched. Common rows are factored by identical resolved
+  `(chord sequence, command)` mappings across all four modes.
 - **Focus mode** (`caret.rs` + `app.rs`): one highlighted position over
   page-content geometry. `Mode` has exactly four variants — `Normal`, `Focus`,
   `Visual`, `Highlight` — and *granularity is not a mode*: `Focus` carries a `Scope` (char,
@@ -545,7 +554,7 @@ Markdown, `syo_app_delete_highlight`) feeds the Qt sidebar through
 
 ```
 MainWindow
-    native dialogs and window composition
+    native dialogs and window composition; modal KeybindingsOverlay
     status bar, quit confirmation
     the one sidebar toggle (View → Highlights, <leader>a, dock close button)
 
@@ -562,6 +571,10 @@ CanvasWidget
     device-pixel-ratio conversion
     forwards keyboard/wheel/resize through CoreController
 
+KeybindingsOverlay
+    translucent full-window help snapshot
+    forwards keys; applies core help-navigation effects to its scrollbar
+
 AnnotationSidebar (QDockWidget "Highlights", right edge, closable only)
     HighlightListModel — disposable snapshot projection, core's order kept
     HighlightDelegate — card paint (page, state, source text)
@@ -571,7 +584,7 @@ AnnotationSidebar (QDockWidget "Highlights", right edge, closable only)
     Markdown file export (QSaveFile)
 ```
 
-Six small components; intentionally boring:
+Seven small components; intentionally boring:
 
 - `CoreController` is the only live-window owner of `SyoApp*` and the only
   interpreter of `SYO_EFFECT_*`. Widgets receive owned Qt values and signals.
@@ -594,6 +607,10 @@ Six small components; intentionally boring:
   is in the core. Tiled GL texture rendering is planned for phase 3 (roadmap).
   Canvas overlays stay Pending-only; Embedded highlights are drawn by MuPDF
   inside the page bitmap and must not be double-painted by the overlay.
+- `KeybindingsOverlay` is a full-window translucent Qt presentation of the
+  core-owned help snapshot. It forwards keys mechanically, applies only the
+  core's help-navigation effects to its `QScrollArea`, and owns no document or
+  command-dispatch logic. Mouse-wheel scrolling stays inside that scroll area.
 - `AnnotationSidebar` owns a stacked Highlights / Annotations page in one
   fixed-right dock (`DockWidgetClosable`, `RightDockWidgetArea` only — never
   floated or moved). Highlights keep the Step 6 list behaviour. Annotations
@@ -664,6 +681,7 @@ Six small components; intentionally boring:
 | 11 | Modal caret over content geometry (mode-selected keymap) | Vim-like `hjkl` caret without losing `hjkl` scrolling; one stop per image; goal-column vertical motion | always-on caret, or richer text objects (phase 3) |
 | 14 | Atomicity is a property of the content, layered over the motion table rather than built into it | `step_scope` stays the pure per-scope description of a word/line/sentence/paragraph; one wrapper makes every scope treat a table or image as one unit, so counts and all six call sites keep working unchanged | ✅ done: unit-hood became per-scope in decision 19, and the wrapper now asks `unit_object_at(.., scope)` rather than a single category |
 | 22 | Quitting with unsaved highlights asks (Save & Quit / Discard & Quit / Cancel) instead of quitting silently or refusing outright | highlights already outlive the session in the database, so "unsaved" only means "not yet embedded in the PDF bytes"; losing that silently on one careless keystroke (or window-manager Alt+F4) was the bug being fixed, and the existing `save_document`/`quit_discarding_highlights` split made the confirm-then-branch trivial to add without a new `Command` | a command palette or scripting API needs to trigger Save & Quit / Discard & Quit outside of the dialog flow (then promote them to `Command` variants) |
+| 23 | Keybinding help is modal state orthogonal to the four document modes, with an isolated keymap and an `App::execute` guard | help must preserve an in-progress focus, selection or highlight while making it impossible for hidden document/save/quit commands to run; deriving its rows from the resolved tries keeps the reference truthful under user overrides | help gains editable bindings or another interactive surface that needs state beyond scrolling |
 | 20 | Document order is defined once in the core (`(page, y0, x0, id)` over normalized rectangles) and Qt sorts nothing | the sidebar list, the clipboard, the file export and any future palette have to agree on "the next highlight"; a `QSortFilterProxyModel` would agree only by coincidence, and would put half the definition in C++ where the core cannot test it. Rectangles are normalized where they enter the app (load and commit), so `rects.first()` means "where this starts" everywhere downstream | a view needs an order the core does not define (grouping by colour, filtering by state) — then it is a *view* concern and a proxy is right, but document order stays the model's |
 | 21 | An Embedded highlight is deleted from the PDF first, matched by the `/NM` name written when it was embedded, and refused outright when no annotation carries that name | the PDF copy is the one the user sees, so it must go first: the reverse order can leave an annotation syodep no longer knows about and can no longer identify. Matching on a name syodep itself wrote is the only identification that is not a guess — geometry and subtype repeat, and a wrong guess deletes an annotation somebody else made. A multi-page highlight shares one name across its per-page annotations, so they are removed together | importing external annotations (`External` state) needs deletion of things syodep did not name — those need their own identification story, not a looser match here |
 | 19 | Unit-hood is per scope: `is_atomic()` from word scope up, `is_block()` from line scope up | a table's rows and an equation's rows are not reading lines, so both should be one stop for `e`/`s`/`p` and paint as one box — but their contents *are* worth a word at a time, which a single category could not express without losing one or the other. Two nested categories say it in two `matches!` lines, and `page_span_rects` needs no scope at all because covering an object end to end already happens exactly at the scopes where it is one unit | a kind needs a third boundary (say, one unit from sentence scope up but not line), at which point the two booleans should become one "smallest scope at which this is a unit" — which requires moving the mapping into `syodep-core`, since `syodep-pdf` cannot name `Scope` |

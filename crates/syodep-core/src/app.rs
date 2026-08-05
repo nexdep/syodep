@@ -10,6 +10,7 @@
 //! (redraw, quit, show a file dialog). The shell never interprets keys or
 //! touches document state itself.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use syodep_config::keys::Chord;
@@ -34,7 +35,7 @@ use crate::caret::{
     ParagraphMark, PendingHighlight, Scope, SentenceMark, VisualAnchor, VisualSelection, WordClass,
     WordMark,
 };
-use crate::command::Command;
+use crate::command::{Command, ALL_COMMANDS};
 use crate::content_session::ContentSession;
 use crate::input::{InputState, KeyOutcome, Keymap, KeymapError};
 use crate::layout::{DocumentLayout, PageSize, ScreenRect, View};
@@ -52,6 +53,61 @@ const MAX_ATOMIC_STEPS: usize = 4096;
 /// this exists only so a pathological line cannot make one caret query
 /// visibly slow.
 const MAX_LINK_FRAGMENTS: usize = 20;
+
+/// A shell presentation action requested by the keybinding-help keymap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HelpNavigation {
+    LineDown,
+    LineUp,
+    HalfPageDown,
+    HalfPageUp,
+    PageDown,
+    PageUp,
+    Top,
+    Bottom,
+}
+
+impl HelpNavigation {
+    fn for_command(command: Command) -> Option<Self> {
+        Some(match command {
+            Command::HelpScrollDown => Self::LineDown,
+            Command::HelpScrollUp => Self::LineUp,
+            Command::HelpHalfPageDown => Self::HalfPageDown,
+            Command::HelpHalfPageUp => Self::HalfPageUp,
+            Command::HelpPageDown => Self::PageDown,
+            Command::HelpPageUp => Self::PageUp,
+            Command::HelpTop => Self::Top,
+            Command::HelpBottom => Self::Bottom,
+            _ => return None,
+        })
+    }
+}
+
+/// Section of the keybinding-help overlay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum KeybindingHelpGroup {
+    Help,
+    Common,
+    Normal,
+    Focus,
+    Visual,
+    Highlight,
+}
+
+/// One help row: every key in one section that resolves to the same command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeybindingHelpEntry {
+    pub group: KeybindingHelpGroup,
+    pub keys: Vec<String>,
+    pub command: Command,
+}
+
+/// Complete disposable snapshot for the keybinding-help overlay.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeybindingHelp {
+    pub active_mode: Mode,
+    pub entries: Vec<KeybindingHelpEntry>,
+}
 
 /// Side effects the UI shell must perform after an input event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -89,6 +145,11 @@ pub struct Effects {
     /// A pending annotation anchor was captured; the shell should open the
     /// Annotations page in creation mode. Not a toggle — never hides the dock.
     pub create_annotation_requested: bool,
+    /// The core-owned keybinding-help visibility changed. The shell should
+    /// query [`App::keybindings_overlay_visible`] and synchronize its widget.
+    pub keybindings_overlay_changed: bool,
+    /// Scroll request for the shell-owned help viewport.
+    pub help_navigation: Option<HelpNavigation>,
 }
 
 impl Effects {
@@ -115,6 +176,9 @@ impl Effects {
                 || other.toggle_annotations_sidebar,
             create_annotation_requested: self.create_annotation_requested
                 || other.create_annotation_requested,
+            keybindings_overlay_changed: self.keybindings_overlay_changed
+                || other.keybindings_overlay_changed,
+            help_navigation: other.help_navigation.or(self.help_navigation),
             // Not a request like the others: it describes the state left
             // behind, so the later value wins rather than OR-ing.
             pending_input: other.pending_input,
@@ -430,6 +494,9 @@ pub struct App {
     viewport: (f32, f32),
     /// Whether `hjkl` scroll, move the focus, or grow a selection.
     mode: Mode,
+    /// Modal help is orthogonal to document mode: opening it must not disturb
+    /// focus, selection, highlight placement, or the mode restored on close.
+    keybindings_overlay_visible: bool,
     /// The live position, remembered across mode toggles. A single point: what
     /// is *highlighted* is derived from it by [`Self::scope_span`], so changing
     /// the scope cannot leave the highlight somewhere else.
@@ -549,6 +616,7 @@ impl App {
             session: None,
             viewport: (800.0, 600.0),
             mode: Mode::Normal,
+            keybindings_overlay_visible: false,
             focus: None,
             focus_scope: Scope::Char,
             focus_span: None,
@@ -967,8 +1035,146 @@ impl App {
         self.device_pixel_ratio
     }
 
+    fn active_document_keymap(&self) -> &Keymap {
+        match self.mode {
+            Mode::Normal => &self.keymap,
+            Mode::Focus => &self.focus_keymap,
+            Mode::Visual => &self.visual_keymap,
+            Mode::Highlight => &self.highlight_keymap,
+        }
+    }
+
+    /// The overlay gets a separate input context. Fixed navigation bindings
+    /// are installed first; every effective shortcut for the toggle command in
+    /// the current document mode is then installed last, so a user override
+    /// always remains a way out even when it collides with navigation.
+    fn keybindings_overlay_keymap(&self) -> Keymap {
+        let (mut keymap, errors) = Keymap::from_entries(
+            [
+                ("j", "help_scroll_down"),
+                ("<Down>", "help_scroll_down"),
+                ("k", "help_scroll_up"),
+                ("<Up>", "help_scroll_up"),
+                ("<C-d>", "help_half_page_down"),
+                ("<C-u>", "help_half_page_up"),
+                ("<C-f>", "help_page_down"),
+                ("<PageDown>", "help_page_down"),
+                ("<C-b>", "help_page_up"),
+                ("<PageUp>", "help_page_up"),
+                ("gg", "help_top"),
+                ("G", "help_bottom"),
+                ("<Esc>", "cancel"),
+            ],
+            &[],
+        );
+        debug_assert!(errors.is_empty(), "built-in help bindings are valid");
+        for (sequence, command) in self.active_document_keymap().bindings() {
+            if command == Command::ToggleKeybindingsOverlay {
+                keymap.bind(&sequence, command);
+            }
+        }
+        keymap
+    }
+
+    pub fn keybindings_overlay_visible(&self) -> bool {
+        self.keybindings_overlay_visible
+    }
+
+    fn toggle_keybindings_overlay(&mut self) -> Effects {
+        self.keybindings_overlay_visible = !self.keybindings_overlay_visible;
+        self.input.clear();
+        Effects {
+            keybindings_overlay_changed: true,
+            ..Effects::default()
+        }
+    }
+
+    /// Effective bindings grouped for display. A sequence is Common only when
+    /// it resolves to the same command in every document mode; every other
+    /// resolved mapping appears under the modes where it is active.
+    pub fn keybinding_help(&self) -> KeybindingHelp {
+        let keymaps = [
+            &self.keymap,
+            &self.focus_keymap,
+            &self.visual_keymap,
+            &self.highlight_keymap,
+        ];
+        let mode_groups = [
+            KeybindingHelpGroup::Normal,
+            KeybindingHelpGroup::Focus,
+            KeybindingHelpGroup::Visual,
+            KeybindingHelpGroup::Highlight,
+        ];
+        let mut resolved: HashMap<Vec<Chord>, [Option<Command>; 4]> = HashMap::new();
+        for (mode_index, keymap) in keymaps.iter().enumerate() {
+            for (sequence, command) in keymap.bindings() {
+                resolved.entry(sequence).or_insert([None; 4])[mode_index] = Some(command);
+            }
+        }
+
+        let mut grouped: HashMap<(KeybindingHelpGroup, Command), Vec<String>> = HashMap::new();
+        let mut add = |group: KeybindingHelpGroup, command: Command, sequence: &[Chord]| {
+            grouped
+                .entry((group, command))
+                .or_default()
+                .push(self.keymap.display_sequence(sequence));
+        };
+
+        for (sequence, commands) in resolved {
+            if let Some(command) = commands[0] {
+                if commands.iter().all(|candidate| *candidate == Some(command)) {
+                    add(KeybindingHelpGroup::Common, command, &sequence);
+                    continue;
+                }
+            }
+            for (mode_index, command) in commands.into_iter().enumerate() {
+                if let Some(command) = command {
+                    add(mode_groups[mode_index], command, &sequence);
+                }
+            }
+        }
+        for (sequence, command) in self.keybindings_overlay_keymap().bindings() {
+            add(KeybindingHelpGroup::Help, command, &sequence);
+        }
+
+        let groups = [
+            KeybindingHelpGroup::Help,
+            KeybindingHelpGroup::Common,
+            KeybindingHelpGroup::Normal,
+            KeybindingHelpGroup::Focus,
+            KeybindingHelpGroup::Visual,
+            KeybindingHelpGroup::Highlight,
+        ];
+        let mut entries = Vec::new();
+        for group in groups {
+            for (_, command) in ALL_COMMANDS {
+                let Some(mut keys) = grouped.remove(&(group, *command)) else {
+                    continue;
+                };
+                keys.sort_by(|a, b| {
+                    a.starts_with('<')
+                        .cmp(&b.starts_with('<'))
+                        .then_with(|| a.cmp(b))
+                });
+                keys.dedup();
+                entries.push(KeybindingHelpEntry {
+                    group,
+                    keys,
+                    command: *command,
+                });
+            }
+        }
+        KeybindingHelp {
+            active_mode: self.mode,
+            entries,
+        }
+    }
+
     /// Direct pixel scrolling (mouse wheel / trackpad).
     pub fn scroll_by_px(&mut self, dx: f32, dy: f32) -> Effects {
+        if self.keybindings_overlay_visible {
+            return self.stamp_pending_input(Effects::default());
+        }
         let effects = if let Some(session) = &mut self.session {
             session.view.scroll_by_px(dx, dy);
             self.save_position();
@@ -995,6 +1201,18 @@ impl App {
     /// chords. The keymap is re-selected on every iteration, so a
     /// mode-changing command applies to the chords that follow it.
     pub fn handle_key(&mut self, chord: Chord) -> Effects {
+        if self.keybindings_overlay_visible {
+            // Escape is unconditional while help is open. In particular it
+            // must not inherit focus_exit / visual_exit / highlight_discard
+            // from the document mode hidden underneath the overlay.
+            if chord == Chord::named(syodep_config::keys::NamedKey::Escape) {
+                self.input.clear();
+                return self.execute(Command::Cancel, None);
+            }
+            let keymap = self.keybindings_overlay_keymap();
+            let outcome = self.input.handle(&keymap, chord);
+            return self.dispatch(outcome);
+        }
         // Scoped so the keymap borrow ends before `dispatch`. Borrowing the
         // field directly (rather than through a `&self` helper) keeps it
         // disjoint from `self.input`.
@@ -1016,13 +1234,18 @@ impl App {
     /// [`Effects::pending_input`] says a pause could resolve something.
     pub fn handle_timeout(&mut self) -> Effects {
         let outcome = {
-            let keymap = match self.mode {
-                Mode::Normal => &self.keymap,
-                Mode::Focus => &self.focus_keymap,
-                Mode::Visual => &self.visual_keymap,
-                Mode::Highlight => &self.highlight_keymap,
-            };
-            self.input.timeout(keymap)
+            if self.keybindings_overlay_visible {
+                let keymap = self.keybindings_overlay_keymap();
+                self.input.timeout(&keymap)
+            } else {
+                let keymap = match self.mode {
+                    Mode::Normal => &self.keymap,
+                    Mode::Focus => &self.focus_keymap,
+                    Mode::Visual => &self.visual_keymap,
+                    Mode::Highlight => &self.highlight_keymap,
+                };
+                self.input.timeout(keymap)
+            }
         };
         self.dispatch(outcome)
     }
@@ -1048,17 +1271,29 @@ impl App {
                 self.input.clear_replay();
                 break;
             }
+            if effects.keybindings_overlay_changed {
+                // Opening/closing help is a modal boundary. The command itself
+                // clears pending input; do not let a longest-prefix leftover
+                // escape into the other input context.
+                self.input.clear_replay();
+                break;
+            }
             // Re-select the keymap each pass: the command just run may have
             // changed the mode, and the replayed chords must use the new one.
             next = match self.input.next_replay() {
                 Some(chord) => {
-                    let keymap = match self.mode {
-                        Mode::Normal => &self.keymap,
-                        Mode::Focus => &self.focus_keymap,
-                        Mode::Visual => &self.visual_keymap,
-                        Mode::Highlight => &self.highlight_keymap,
-                    };
-                    Some(self.input.handle(keymap, chord))
+                    if self.keybindings_overlay_visible {
+                        let keymap = self.keybindings_overlay_keymap();
+                        Some(self.input.handle(&keymap, chord))
+                    } else {
+                        let keymap = match self.mode {
+                            Mode::Normal => &self.keymap,
+                            Mode::Focus => &self.focus_keymap,
+                            Mode::Visual => &self.visual_keymap,
+                            Mode::Highlight => &self.highlight_keymap,
+                        };
+                        Some(self.input.handle(keymap, chord))
+                    }
                 }
                 None => None,
             };
@@ -1071,6 +1306,26 @@ impl App {
 
     /// Execute a command. Public so a future command palette can reuse it.
     pub fn execute(&mut self, command: Command, count: Option<u32>) -> Effects {
+        if command == Command::ToggleKeybindingsOverlay {
+            return self.toggle_keybindings_overlay();
+        }
+        if self.keybindings_overlay_visible {
+            if command == Command::Cancel {
+                return self.toggle_keybindings_overlay();
+            }
+            if let Some(navigation) = HelpNavigation::for_command(command) {
+                return Effects {
+                    help_navigation: Some(navigation),
+                    ..Effects::default()
+                };
+            }
+            // Direct execution (a future command palette, scripting API, or a
+            // test) obeys the same modal boundary as keyboard dispatch.
+            return Effects::default();
+        }
+        if HelpNavigation::for_command(command).is_some() {
+            return Effects::default();
+        }
         // Feedback belongs to the key that produced it, so the next command
         // clears it rather than leaving a stale "saved" or ERROR sitting on
         // the status line.
@@ -1226,6 +1481,15 @@ impl App {
             Command::FitWidth => view.fit_width(),
             Command::ZoomReset => view.set_zoom(1.0),
             Command::Quit
+            | Command::ToggleKeybindingsOverlay
+            | Command::HelpScrollDown
+            | Command::HelpScrollUp
+            | Command::HelpHalfPageDown
+            | Command::HelpHalfPageUp
+            | Command::HelpPageDown
+            | Command::HelpPageUp
+            | Command::HelpTop
+            | Command::HelpBottom
             | Command::OpenFile
             | Command::ToggleHighlightsSidebar
             | Command::ToggleAnnotationsSidebar
@@ -5037,6 +5301,99 @@ mod tests {
         assert_eq!(app.current_page(), 0);
         // fit_width_on_open with viewport width == page width => zoom 1.0.
         assert!((app.zoom() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn keybinding_help_opens_without_a_document_and_has_grouped_effective_bindings() {
+        let mut app = App::new(Config::default(), None);
+        let effects = press(&mut app, "<C-?>");
+        assert!(effects.keybindings_overlay_changed);
+        assert!(app.keybindings_overlay_visible());
+
+        let help = app.keybinding_help();
+        assert_eq!(help.active_mode, Mode::Normal);
+        assert!(help.entries.iter().any(|entry| {
+            entry.group == KeybindingHelpGroup::Common
+                && entry.command == Command::ToggleKeybindingsOverlay
+                && entry.keys == ["<C-?>"]
+        }));
+        assert!(help.entries.iter().any(|entry| {
+            entry.group == KeybindingHelpGroup::Help
+                && entry.command == Command::HelpScrollDown
+                && entry.keys.iter().any(|key| key == "j")
+        }));
+        assert!(help.entries.iter().any(|entry| {
+            entry.group == KeybindingHelpGroup::Common
+                && entry.command == Command::OpenFile
+                && entry.keys.iter().any(|key| key == "<leader>o")
+        }));
+        assert!(help.entries.iter().any(|entry| {
+            entry.group == KeybindingHelpGroup::Normal
+                && entry.command == Command::ScrollDown
+                && entry.keys.iter().any(|key| key == "j")
+        }));
+        assert!(help.entries.iter().any(|entry| {
+            entry.group == KeybindingHelpGroup::Focus
+                && entry.command == Command::FocusDown
+                && entry.keys.iter().any(|key| key == "j")
+        }));
+    }
+
+    #[test]
+    fn help_is_modal_and_preserves_the_underlying_document_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_doc(dir.path(), 3);
+        press(&mut app, "fw");
+        let mode = app.mode();
+        let focus = app.focus_span();
+        let page = app.current_page();
+        let scroll = app.session.as_ref().unwrap().view.scroll();
+
+        press(&mut app, "<C-?>");
+        assert!(app.keybindings_overlay_visible());
+        assert_eq!(
+            press(&mut app, "j").help_navigation,
+            Some(HelpNavigation::LineDown)
+        );
+        assert_eq!(
+            press(&mut app, "<C-d>").help_navigation,
+            Some(HelpNavigation::HalfPageDown)
+        );
+        assert_eq!(
+            press(&mut app, "G").help_navigation,
+            Some(HelpNavigation::Bottom)
+        );
+        let ignored_quit_binding = press(&mut app, "<Space>q");
+        assert!(!ignored_quit_binding.quit);
+        assert!(!ignored_quit_binding.confirm_quit);
+        assert!(!ignored_quit_binding.open_file_dialog);
+        assert_eq!(app.execute(Command::Quit, None), Effects::default());
+        assert_eq!(app.scroll_by_px(0.0, 500.0), Effects::default());
+        assert_eq!(app.mode(), mode);
+        assert_eq!(app.focus_span(), focus);
+        assert_eq!(app.current_page(), page);
+        assert_eq!(app.session.as_ref().unwrap().view.scroll(), scroll);
+
+        let effects = press(&mut app, "<Esc>");
+        assert!(effects.keybindings_overlay_changed);
+        assert!(!app.keybindings_overlay_visible());
+        assert_eq!(app.mode(), mode);
+        assert_eq!(app.focus_span(), focus);
+    }
+
+    #[test]
+    fn configured_help_toggle_overrides_a_navigation_key_inside_help() {
+        let mut config = Config::default();
+        config.keys.insert(
+            "j".to_owned(),
+            Command::ToggleKeybindingsOverlay.name().to_owned(),
+        );
+        let mut app = App::new(config, None);
+        press(&mut app, "j");
+        assert!(app.keybindings_overlay_visible());
+        let effects = press(&mut app, "j");
+        assert!(effects.keybindings_overlay_changed);
+        assert!(!app.keybindings_overlay_visible());
     }
 
     #[test]
