@@ -73,7 +73,7 @@ TextAnnotationEditor::TextAnnotationEditor(QWidget *parent)
     m_editor->setTabChangesFocus(false);
     m_editor->installEventFilter(this);
     // Placeholder until the Preview tab is opened — avoids constructing a
-    // QTextBrowser beside a failed offscreen GL context during smoke tests.
+    // QTextBrowser beside a failed GL context during graphics probing.
     m_previewPlaceholder = new QWidget(m_tabs);
     m_tabs->addTab(m_editor, tr("Edit"));
     m_tabs->addTab(m_previewPlaceholder, tr("Preview"));

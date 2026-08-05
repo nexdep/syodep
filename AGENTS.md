@@ -54,7 +54,10 @@ cargo clippy --workspace --all-targets -- -D warnings
 # Qt shell (cmake drives cargo for the syodep-ffi staticlib):
 cmake -B build -G Ninja && cmake --build build
 cargo run -p syodep-pdf --features test-support --example make_fixture -- /tmp/f.pdf 5
-QT_QPA_PLATFORM=offscreen ./build/ui-qt/syodep --smoke-test /tmp/f.pdf
+bash scripts/with-headless-wayland.sh \
+  ./build/ui-qt/syodep --renderer=opengl --smoke-test /tmp/f.pdf
+bash scripts/with-headless-wayland.sh \
+  ./build/ui-qt/syodep --renderer=raster --smoke-test /tmp/f.pdf
 ```
 
 ## Build artifacts & releases

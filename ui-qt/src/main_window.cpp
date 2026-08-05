@@ -41,19 +41,21 @@ QStringList droppablePdfs(const QMimeData *mime)
 
 } // namespace
 
-MainWindow::MainWindow(QWidget *parent)
+MainWindow::MainWindow(RendererBackend renderer,
+                       const QString &rendererWarning,
+                       QWidget *parent)
     : QMainWindow(parent)
 {
     setWindowTitle(QStringLiteral("syodep"));
     resize(960, 1000);
 
     m_core = new CoreController(this);
-    m_canvas = new CanvasWidget(m_core, this);
+    m_canvas = createCanvasWidget(renderer, m_core, this);
     m_canvas->setBackgroundColor(m_core->backgroundColor());
     m_canvas->setFocusColor(m_core->focusColor());
     m_canvas->setVisualColor(m_core->visualColor());
     m_canvas->setHighlightColor(m_core->highlightColor());
-    setCentralWidget(m_canvas);
+    setCentralWidget(m_canvas->widget());
 
     m_sidebarDock = new QDockWidget(tr("Highlights"), this);
     m_sidebarDock->setObjectName(QStringLiteral("annotationDock"));
@@ -121,13 +123,23 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_core, &CoreController::confirmQuitRequested,
             this, &MainWindow::onConfirmQuitRequested);
 
-    const QString warnings = m_core->startupWarnings();
-    if (!warnings.isEmpty())
-        statusBar()->showMessage(warnings.section(QLatin1Char('\n'), 0, 0), 10000);
+    QString shellWarning = m_core->startupWarnings().section(QLatin1Char('\n'), 0, 0);
+    if (!rendererWarning.isEmpty()) {
+        if (!shellWarning.isEmpty())
+            shellWarning += QStringLiteral(" | ");
+        shellWarning += rendererWarning;
+    }
+    if (!shellWarning.isEmpty())
+        statusBar()->showMessage(shellWarning, 10000);
 
     // Apply [window] start_sidebar_open (default false → canvas-first).
     applyStartSidebarPreference();
     refreshStatus();
+}
+
+QWidget *MainWindow::canvasWidget() const
+{
+    return m_canvas ? m_canvas->widget() : nullptr;
 }
 
 void MainWindow::sanitizeDockState()
@@ -227,7 +239,7 @@ void MainWindow::focusCanvas()
     if (m_keybindingsOverlay && m_keybindingsOverlay->isVisible())
         m_keybindingsOverlay->setFocus(Qt::OtherFocusReason);
     else if (m_canvas)
-        m_canvas->setFocus(Qt::OtherFocusReason);
+        m_canvas->widget()->setFocus(Qt::OtherFocusReason);
 }
 
 void MainWindow::syncKeybindingsOverlay()
@@ -342,7 +354,7 @@ bool MainWindow::confirmQuit()
         return false;
 
     if (!quit) {
-        m_canvas->update();
+        m_canvas->widget()->update();
         refreshStatus();
         return false;
     }

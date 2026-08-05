@@ -58,8 +58,8 @@ signals:
     void focusCanvasRequested();
 
 private:
-    // Annotations UI is created on first use so offscreen smoke (and first
-    // paint beside a failed QOpenGLWidget) does not construct QPlainTextEdit /
+    // Annotations UI is created on first use so a graphics probe/fallback does
+    // not construct QPlainTextEdit /
     // preview widgets until the Annotations page is actually shown.
     void ensureAnnotationsPanel();
 

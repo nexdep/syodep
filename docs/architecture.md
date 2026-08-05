@@ -8,7 +8,7 @@ joined by a small C ABI:
 ```
  ┌────────────────────────── ui-qt (C++, Qt 6) ──────────────────────────┐
  │ MainWindow ── status line, file dialog, View menu, annotation dock          │
- │ CanvasWidget (QOpenGLWidget) ── paints bitmaps, forwards input              │
+ │ CanvasWidget (OpenGL/raster) ── paints bitmaps, forwards input              │
  │ AnnotationSidebar ── HighlightsPanel + AnnotationsPanel (stacked pages)     │
  │ CoreController ── owns SyoApp*, owned Qt values, effect → signals           │
  │ key_encoder ── QKeyEvent → "j" / "G" / "<C-d>" strings                      │
@@ -566,6 +566,7 @@ CoreController
     annotation snapshot / revision / reveal / Markdown / delete
 
 CanvasWidget
+    startup-selected OpenGL or raster QWidget backend
     page and overlay painting
     small QImage page cache
     device-pixel-ratio conversion
@@ -590,16 +591,23 @@ Seven small components; intentionally boring:
   interpreter of `SYO_EFFECT_*`. Widgets receive owned Qt values and signals.
 - `key_encoder` translates `QKeyEvent` to the chord syntax (the shell's
   only input knowledge).
-- `CanvasWidget` (a `QOpenGLWidget`) forwards keys/wheel/resizes through
-  `CoreController`, asks for visible page rects + bitmaps + overlays via the
-  controller, and paints them with `QPainter` on the GL-backed surface.
+- `CanvasWidget` is a renderer-neutral interface over OpenGL and raster
+  `QWidget` implementations. Both forward keys/wheel/resizes through
+  `CoreController`, ask for visible page rects + bitmaps + overlays via the
+  controller, and call one shared `CanvasState` painter/cache implementation;
+  the only backend difference is `paintGL` versus `paintEvent`.
+  `--renderer=auto` shows a one-pixel probe `QOpenGLWidget` before constructing
+  `MainWindow` and selects OpenGL only after a valid context paints a complete
+  frame. A failed probe selects the raster widget without ever putting a failed
+  GL child in the real window. `--renderer=opengl` makes failure fatal and
+  `--renderer=raster` skips the probe.
   Focus and visual go into one `QPainterPath` each so overlapping rects blend
   once, then a single plain-alpha fill. Highlights are different: they arrive
   already grouped by captured colour (`highlightOverlays`), and each
   rectangle is composited with Multiply blending in that colour onto a copy
   of the page pixels it covers (a `QImage`, so the always-correct raster paint
-  engine does the blending) before being drawn, because `QOpenGLWidget`'s own
-  GL paint engine cannot be trusted with that composition mode — confirmed by
+  engine does the blending) before being drawn, because the OpenGL paint
+  engine cannot be trusted with that composition mode — confirmed by
   testing, where a GPU/driver without the needed blend-equation extension
   painted solid black instead of blending at all. It keeps a tiny per-page
   `QImage` cache only to avoid re-copying bitmaps across the FFI every repaint
@@ -636,14 +644,14 @@ Seven small components; intentionally boring:
   previous page stays active). It does not own or free `SyoApp*`. The canvas
   fills the window but leaves `acceptDrops()` false, so Qt delivers drag
   events to the window; only it needs the flag.
-- `diagnostics` detects the platform's graphics situation (WSL, software GL,
-  missing OpenGL) and produces the `--check`/`--version` reports. WSLg uses its
-  native Wayland socket when `WAYLAND_DISPLAY` is present; older WSL falls back
-  to XCB, and explicit environment overrides remain authoritative. CLI-only
+- `diagnostics` enforces the generic Wayland QPA on Linux, probes the real
+  OpenGL widget path, resolves the renderer, and produces the
+  `--check`/`--version` reports. It deliberately detects neither WSL nor WSLg:
+  a working WSLg instance is just another Wayland compositor. CLI-only
   `syo_*` helpers (version, default paths, default config text) stay here and
   in `main.cpp` rather than being forced through `CoreController`.
 - `main.cpp` parses the CLI and implements `--smoke-test` for CI (exercises
-  `CoreController` headlessly, then constructs `MainWindow` with the
+  `CoreController` under a test compositor, then constructs `MainWindow` with the
   annotation sidebar and checks empty-state transitions).
 
 ## Data flow example: pressing `5j`
@@ -657,8 +665,8 @@ Seven small components; intentionally boring:
 4. The FFI returns `SYO_EFFECT_REDRAW`; `CoreController::applyEffects` emits
    `redrawRequested` and `statusChanged`; the canvas updates and the status
    line refreshes.
-5. `paintGL` asks the controller for visible pages and bitmaps (core render
-   cache), draws them.
+5. The selected canvas painter asks the controller for visible pages and
+   bitmaps (core render cache), then draws them.
 
 ## Decisions log
 
@@ -684,6 +692,7 @@ Seven small components; intentionally boring:
 | 14 | Atomicity is a property of the content, layered over the motion table rather than built into it | `step_scope` stays the pure per-scope description of a word/line/sentence/paragraph; one wrapper makes every scope treat a table or image as one unit, so counts and all six call sites keep working unchanged | ✅ done: unit-hood became per-scope in decision 19, and the wrapper now asks `unit_object_at(.., scope)` rather than a single category |
 | 22 | Quitting with unsaved highlights asks (Save & Quit / Discard & Quit / Cancel) instead of quitting silently or refusing outright | highlights already outlive the session in the database, so "unsaved" only means "not yet embedded in the PDF bytes"; losing that silently on one careless keystroke (or window-manager Alt+F4) was the bug being fixed, and the existing `save_document`/`quit_discarding_highlights` split made the confirm-then-branch trivial to add without a new `Command` | a command palette or scripting API needs to trigger Save & Quit / Discard & Quit outside of the dialog flow (then promote them to `Command` variants) |
 | 23 | Keybinding help is modal state orthogonal to the four document modes, with an isolated keymap and an `App::execute` guard | help must preserve an in-progress focus, selection or highlight while making it impossible for hidden document/save/quit commands to run; deriving its rows from the resolved tries keeps the reference truthful under user overrides | help gains editable bindings or another interactive surface that needs state beyond scrolling |
+| 24 | Linux is Wayland-only; OpenGL is probed with a real frame before `MainWindow`, with a shared-code raster canvas fallback | WSLg and native compositors should use one standard path; XCB/software-GL environment heuristics hid driver failures and made GL context creation a launch requirement even though the shell currently paints `QImage`s | Linux distribution targets require X11 again, or tiled GL rendering makes raster parity prohibitively expensive |
 | 20 | Document order is defined once in the core (`(page, y0, x0, id)` over normalized rectangles) and Qt sorts nothing | the sidebar list, the clipboard, the file export and any future palette have to agree on "the next highlight"; a `QSortFilterProxyModel` would agree only by coincidence, and would put half the definition in C++ where the core cannot test it. Rectangles are normalized where they enter the app (load and commit), so `rects.first()` means "where this starts" everywhere downstream | a view needs an order the core does not define (grouping by colour, filtering by state) — then it is a *view* concern and a proxy is right, but document order stays the model's |
 | 21 | An Embedded highlight is deleted from the PDF first, matched by the `/NM` name written when it was embedded, and refused outright when no annotation carries that name | the PDF copy is the one the user sees, so it must go first: the reverse order can leave an annotation syodep no longer knows about and can no longer identify. Matching on a name syodep itself wrote is the only identification that is not a guess — geometry and subtype repeat, and a wrong guess deletes an annotation somebody else made. A multi-page highlight shares one name across its per-page annotations, so they are removed together | importing external annotations (`External` state) needs deletion of things syodep did not name — those need their own identification story, not a looser match here |
 | 19 | Unit-hood is per scope: `is_atomic()` from word scope up, `is_block()` from line scope up | a table's rows and an equation's rows are not reading lines, so both should be one stop for `e`/`s`/`p` and paint as one box — but their contents *are* worth a word at a time, which a single category could not express without losing one or the other. Two nested categories say it in two `matches!` lines, and `page_span_rects` needs no scope at all because covering an object end to end already happens exactly at the scopes where it is one unit | a kind needs a third boundary (say, one unit from sentence scope up but not line), at which point the two booleans should become one "smallest scope at which this is a unit" — which requires moving the mapping into `syodep-core`, since `syodep-pdf` cannot name `Scope` |

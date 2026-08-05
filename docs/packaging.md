@@ -75,29 +75,39 @@ binary always carries the selected commit's identity.
 Packaging uses `linuxdeploy` + `linuxdeploy-plugin-qt` (prebuilt
 binaries, run with `--appimage-extract-and-run` since containers lack
 FUSE) with `packaging/syodep.desktop` and `packaging/syodep.svg`.
-Bundled: the binary, Qt libs, platform plugins (xcb, wayland, plus
-`offscreen` via `EXTRA_PLATFORM_PLUGINS` for headless/smoke-test use), and
-Wayland's separate
+Bundled: the binary, Qt libs, only the generic Wayland and Wayland-EGL QPA
+plugins, and Wayland's separate
 `wayland-graphics-integration-client/libqt-plugin-wayland-egl.so`. The latter
 is required for a Wayland `QOpenGLWidget`; a top-level
 `platforms/libqwayland-egl.so` alone can load while leaving Qt with no client
-buffer integration. `qt6-wayland` is installed in the build container so all
-of these plugins come from the same Qt 6.2.4 installation. The workflow
-extracts the finished AppImage, asserts the exact plugin and its
+buffer integration. The Qt deployment plugin adds XCB by default, so the job
+populates `AppDir` first, deletes every QPA plugin except the two Wayland ones,
+and only then creates the AppImage. `qt6-wayland` is installed in the build
+container so all of these plugins come from the same Qt 6.2.4 installation.
+The workflow extracts the finished AppImage, asserts XCB/offscreen are absent,
+checks the exact integration plugin and its
 `libQt6WaylandEglClientHwIntegration.so.6` dependency are present, and rejects
 unresolved dynamic-library dependencies.
 Excluded by linuxdeploy's default list and resolved from the host:
 glibc, libGL, fontconfig — exactly the libs that must match the user's
 system.
 
-The job then smoke-tests the actual AppImage twice with a generated PDF. Xvfb
-simulates WSL without a Wayland socket and must select XCB; headless Weston
-simulates WSLg and must select Wayland. Both paths construct the real
-`QOpenGLWidget` canvas and require a valid OpenGL context, so an incomplete
-bundle fails in CI before `syodep-x86_64.AppImage` is uploaded.
+The job starts headless Weston and smoke-tests the actual AppImage with both
+`--renderer=opengl` (Mesa software GL on the GPU-less runner) and
+`--renderer=raster`. It also checks that `auto` selects OpenGL there and that
+an XCB override is rejected before Qt starts. An incomplete bundle or a
+backend-specific paint failure therefore fails before upload.
+
+The Linux artifact intentionally cannot run on an Xorg-only desktop or through
+X11-only remote display. Raster is an OpenGL fallback, not a Wayland fallback:
+no compositor/socket, an unloadable Qt Wayland plugin, or an unusable Wayland
+shared-memory backing store still prevents startup. A forced OpenGL renderer
+also exits when the one-frame probe fails; `auto` and `raster` remain usable in
+that case when the Wayland raster path works.
 
 For a Linux-only development build, push a branch change under `crates/`,
-`ui-qt/`, `packaging/`, or `.github/workflows/`; **AppImage Preview** runs
+`ui-qt/`, `packaging/`, `scripts/`, or `.github/workflows/`; **AppImage
+Preview** runs
 automatically. On `main`, it intentionally builds alongside the release
 workflow so its downloadable artifact is ready as soon as the Linux job
 finishes, without waiting for the Windows build and `continuous` publication.

@@ -108,6 +108,8 @@ the same code. See the development log.
   - ⬜ Windows code signing (unsigned builds trip SmartScreen)
   - ✅ attach artifacts to GitHub releases on tag push
   - ✅ Scoop bucket (`bucket/syodep.json`, auto-bumped on release)
+- ✅ Linux Wayland-only shell with a probed OpenGL canvas, shared-code raster
+  fallback, and Weston-based CI/AppImage smoke tests
 - ⬜ Command palette (`:` / `<C-p>`) listing the command registry
 - ✅ Modal keybinding-help overlay (`<C-?>`) showing effective bindings for all modes
 - ⬜ Config hot-reload

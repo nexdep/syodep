@@ -2,11 +2,10 @@
 //
 // Usage:
 //   syodep [file.pdf]            open a window (optionally with a document)
-//   syodep --smoke-test file.pdf headless render check, exits 0 on success
+//   syodep --smoke-test file.pdf Wayland render check, exits 0 on success
 //
 // The smoke-test mode exists for CI: it exercises window construction, the
-// FFI boundary, document opening and a first paint without needing a real
-// display (run with QT_QPA_PLATFORM=offscreen).
+// FFI boundary, document opening and a first paint under a real compositor.
 
 #include <QApplication>
 #include <QCommandLineParser>
@@ -14,6 +13,7 @@
 #include <QFileInfo>
 #include <QTemporaryDir>
 #include <QTimer>
+#include <QWidget>
 
 #include <cstdio>
 #include <cstdlib>
@@ -22,7 +22,6 @@
 #include <QDockWidget>
 #include <QListView>
 #include <QKeyEvent>
-#include <QOpenGLContext>
 
 #include "canvas_widget.h"
 #include "core_controller.h"
@@ -59,60 +58,10 @@ void smokeStep(const char *msg)
     std::exit(1);
 }
 
-void verifyGraphicsDecisions()
-{
-    struct SavedEnvironment
-    {
-        const char *name;
-        bool wasSet;
-        QByteArray value;
-    };
-    SavedEnvironment saved[] = {
-        {"QT_QPA_PLATFORM", qEnvironmentVariableIsSet("QT_QPA_PLATFORM"),
-         qgetenv("QT_QPA_PLATFORM")},
-        {"LIBGL_ALWAYS_SOFTWARE", qEnvironmentVariableIsSet("LIBGL_ALWAYS_SOFTWARE"),
-         qgetenv("LIBGL_ALWAYS_SOFTWARE")},
-        {"QT_OPENGL", qEnvironmentVariableIsSet("QT_OPENGL"), qgetenv("QT_OPENGL")},
-    };
-    for (const SavedEnvironment &entry : saved)
-        qunsetenv(entry.name);
-
-    syodep::diag::PlatformInfo wsl;
-    wsl.isWsl = true;
-    wsl.hasDisplay = true;
-    wsl.displayValue = QStringLiteral(":0");
-    wsl.hasWaylandDisplay = true;
-    wsl.waylandValue = QStringLiteral("wayland-0");
-
-    const syodep::diag::GraphicsDecision wayland = syodep::diag::decideFallbacks(wsl);
-    if (!wayland.forcePlatform || wayland.platform != QStringLiteral("wayland"))
-        smokeFail(QStringLiteral("WSLg did not prefer Wayland"));
-
-    wsl.hasWaylandDisplay = false;
-    wsl.waylandValue.clear();
-    const syodep::diag::GraphicsDecision xcb = syodep::diag::decideFallbacks(wsl);
-    if (!xcb.forcePlatform || xcb.platform != QStringLiteral("xcb"))
-        smokeFail(QStringLiteral("WSL without Wayland did not fall back to XCB"));
-
-    qputenv("QT_QPA_PLATFORM", QByteArrayLiteral("xcb"));
-    const syodep::diag::GraphicsDecision overridden = syodep::diag::decideFallbacks(wsl);
-    if (!overridden.userOverride || overridden.forcePlatform)
-        smokeFail(QStringLiteral("explicit graphics override was not respected"));
-
-    for (const SavedEnvironment &entry : saved) {
-        if (entry.wasSet)
-            qputenv(entry.name, entry.value);
-        else
-            qunsetenv(entry.name);
-    }
-    smokeStep("graphics decisions ok");
-}
-
-int runSmokeTest(const QString &pdfPath)
+int runSmokeTest(const QString &pdfPath, syodep::RendererBackend renderer)
 {
     std::remove("smoke-progress.txt");
     smokeStep("start");
-    verifyGraphicsDecisions();
 
     // Drive the core through CoreController without persistence so CI runs
     // do not touch the user database.
@@ -253,7 +202,7 @@ int runSmokeTest(const QString &pdfPath)
 
     // And once through the actual widgets: construct, show, paint one frame.
     smokeStep("mainwindow construct");
-    syodep::MainWindow window;
+    syodep::MainWindow window(renderer);
     smokeStep("mainwindow constructed");
     if (!window.annotationSidebar() || !window.annotationsDock())
         smokeFail(QStringLiteral("annotation sidebar not constructed"));
@@ -285,15 +234,6 @@ int runSmokeTest(const QString &pdfPath)
     QApplication::processEvents();
     smokeStep("mainwindow shown");
 
-    auto *canvas = window.findChild<syodep::CanvasWidget *>();
-    if (!canvas)
-        smokeFail(QStringLiteral("canvas construction"));
-    if (QGuiApplication::platformName() != QStringLiteral("offscreen")
-        && (!canvas->context() || !canvas->context()->isValid())) {
-        smokeFail(QStringLiteral("canvas OpenGL context"));
-    }
-    smokeStep("canvas context ok");
-
     // The real Qt key encoder and modal overlay: Ctrl+Shift+? is represented
     // as the config syntax `<C-?>`; help opens over the window, scrolls with
     // its isolated keymap, then returns focus to the canvas on either close
@@ -304,11 +244,12 @@ int runSmokeTest(const QString &pdfPath)
                               QStringLiteral("?"));
     if (syodep::encodeKeyEvent(&encodedQuestion) != QStringLiteral("<C-?>"))
         smokeFail(QStringLiteral("Ctrl+? key encoding"));
+    QWidget *canvas = window.canvasWidget();
     auto *help = window.keybindingsOverlay();
-    if (!help)
+    if (!canvas || !help)
         smokeFail(QStringLiteral("keybinding overlay construction"));
-    // A bare Xvfb server has no window manager, so QWidget focus may remain
-    // unobservable even though setFocus() is called correctly. Preserve the
+    // A headless Weston session may leave QWidget focus unobservable even
+    // though setFocus() is called correctly. Preserve the
     // focus-restoration assertion on platforms that could focus the canvas
     // before help opened; closure itself is mandatory everywhere.
     const bool canvasFocusIsObservable = canvas->hasFocus();
@@ -413,13 +354,7 @@ int main(int argc, char *argv[])
     QApplication::setApplicationName(QStringLiteral("syodep"));
     QApplication::setApplicationVersion(QStringLiteral(SYODEP_VERSION));
 
-    // Decide and apply graphics fallbacks (software GL, X11 on WSL, ...) before
-    // the QApplication is constructed — Qt locks the platform plugin and GL
-    // backend in at that point. Silent on a normal launch; `--check` reports it.
     const syodep::diag::PlatformInfo platform = syodep::diag::detectPlatform();
-    const syodep::diag::GraphicsDecision decision =
-        syodep::diag::decideFallbacks(platform);
-    syodep::diag::applyFallbacks(decision);
 
     // --version and --defaults need neither a display nor a GL context, so
     // handle them before constructing QApplication (which would pull in the
@@ -432,6 +367,15 @@ int main(int argc, char *argv[])
         }
         if (arg == "--defaults")
             return writeDefaultsConfig();
+    }
+
+    // Linux is intentionally Wayland-only. Select/reject the QPA before
+    // QApplication locks it in; the headless commands above remain available
+    // even when no compositor is running.
+    QString platformError;
+    if (!syodep::diag::configurePlatform(argc, argv, &platformError)) {
+        std::fprintf(stderr, "syodep: %s\n", qPrintable(platformError));
+        return 2;
     }
 
     QApplication app(argc, argv);
@@ -447,6 +391,12 @@ int main(int argc, char *argv[])
     QCommandLineOption checkOption(QStringLiteral("check"),
                                    QStringLiteral("print graphics/config diagnostics and exit"));
     parser.addOption(checkOption);
+    QCommandLineOption rendererOption(
+        QStringLiteral("renderer"),
+        QStringLiteral("select canvas renderer: auto, opengl, or raster"),
+        QStringLiteral("mode"),
+        QStringLiteral("auto"));
+    parser.addOption(rendererOption);
     QCommandLineOption defaultsOption(
         QStringLiteral("defaults"),
         QStringLiteral("write a documented syodep_defaults.config.toml to the "
@@ -459,9 +409,33 @@ int main(int argc, char *argv[])
     parser.addOption(smokeOption);
     parser.process(app);
 
+    bool rendererOk = false;
+    const syodep::diag::RendererPreference preference =
+        syodep::diag::parseRendererPreference(parser.value(rendererOption), &rendererOk);
+    if (!rendererOk) {
+        std::fprintf(stderr,
+                     "syodep: invalid renderer '%s' (expected auto, opengl, or raster)\n",
+                     qPrintable(parser.value(rendererOption)));
+        return 2;
+    }
+
+    syodep::diag::GlProbe glProbe;
+    if (preference != syodep::diag::RendererPreference::Raster)
+        glProbe = syodep::diag::probeOpenGlWidget();
+    const syodep::diag::RendererDecision renderer =
+        syodep::diag::decideRenderer(preference, glProbe);
+
     if (parser.isSet(checkOption)) {
-        std::fputs(qPrintable(syodep::diag::buildCheckReport(platform, decision)), stdout);
-        return 0;
+        std::fputs(qPrintable(syodep::diag::buildCheckReport(platform, renderer, glProbe)),
+                   stdout);
+        return renderer.usable ? 0 : 2;
+    }
+
+    if (!renderer.usable) {
+        std::fprintf(stderr,
+                     "syodep: OpenGL renderer requested but unavailable: %s\n",
+                     qPrintable(renderer.reason));
+        return 2;
     }
 
     // --defaults is handled in the early argv scan above (no display needed);
@@ -474,10 +448,13 @@ int main(int argc, char *argv[])
             std::fprintf(stderr, "SMOKE FAIL: --smoke-test requires a PDF path\n");
             return 1;
         }
-        return runSmokeTest(args.first());
+        return runSmokeTest(args.first(), renderer.selected);
     }
 
-    syodep::MainWindow window;
+    const QString rendererWarning = renderer.fellBack
+        ? QStringLiteral("OpenGL unavailable; using raster renderer: %1").arg(renderer.reason)
+        : QString();
+    syodep::MainWindow window(renderer.selected, rendererWarning);
     if (!args.isEmpty())
         window.openDocument(args.first());
     if (window.startFullscreen())

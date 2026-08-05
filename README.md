@@ -68,6 +68,19 @@ chmod +x syodep-vX.Y.Z-x86_64.AppImage
 Needs glibc ≥ 2.35 (Ubuntu 22.04+, Debian 12+, Fedora 36+, …). If your
 distro lacks `libfuse2`, run with `--appimage-extract-and-run`.
 
+Linux syodep is **Wayland-only**. It does not run in an Xorg-only session,
+through traditional SSH X forwarding, or against an X11-only VNC server.
+WSLg works as an ordinary Wayland compositor and receives no special-case
+code. Rendering defaults to `--renderer=auto`: syodep verifies a real OpenGL
+frame first and falls back to a CPU-painted raster canvas when that fails. Use
+`--renderer=opengl` to require OpenGL or `--renderer=raster` to skip it.
+
+Raster fallback cannot replace the display server itself. A usable Wayland
+socket and Qt Wayland runtime are always required; if the compositor cannot
+start, its socket is inaccessible, or Qt cannot load the Wayland plugin, the
+application cannot open. Raster mode can also use more CPU and feel less smooth
+on high-DPI displays.
+
 ## Building
 
 Requirements: Rust (stable), CMake ≥ 3.21, Ninja (recommended), Qt 6
@@ -78,8 +91,8 @@ Debian/Ubuntu packages:
 
 ```bash
 sudo apt install build-essential cmake ninja-build qt6-base-dev \
-    libqt6opengl6-dev libgl1-mesa-dev libfontconfig1-dev libfreetype-dev \
-    clang libclang-dev
+    libqt6opengl6-dev qt6-wayland libgl1-mesa-dev libfontconfig1-dev \
+    libfreetype-dev clang libclang-dev
 ```
 
 Build and run:

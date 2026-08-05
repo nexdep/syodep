@@ -1,12 +1,14 @@
 #include "diagnostics.h"
 
+#include <QByteArray>
 #include <QCoreApplication>
-#include <QFile>
+#include <QEventLoop>
 #include <QFileInfo>
 #include <QGuiApplication>
-#include <QOffscreenSurface>
 #include <QOpenGLContext>
 #include <QOpenGLFunctions>
+#include <QOpenGLWidget>
+#include <QTimer>
 #include <QtGlobal>
 
 #include "syodep_ffi.h"
@@ -19,7 +21,6 @@ namespace syodep::diag {
 
 namespace {
 
-// Take ownership of a string returned by the core and free the FFI buffer.
 QString takeSyoString(char *s)
 {
     if (!s)
@@ -29,13 +30,39 @@ QString takeSyoString(char *s)
     return out;
 }
 
-// Read /proc/version once; used to recognise a WSL kernel.
-QString procVersion()
+class ProbeWidget final : public QOpenGLWidget
 {
-    QFile f(QStringLiteral("/proc/version"));
-    if (!f.open(QIODevice::ReadOnly | QIODevice::Text))
-        return {};
-    return QString::fromUtf8(f.readAll());
+public:
+    GlProbe result;
+    bool painted = false;
+
+protected:
+    void initializeGL() override
+    {
+        result.attempted = true;
+        QOpenGLContext *ctx = context();
+        if (!ctx || !ctx->isValid()) {
+            result.error = QStringLiteral("QOpenGLWidget context is invalid");
+            return;
+        }
+        QOpenGLFunctions *functions = ctx->functions();
+        const auto string = [functions](GLenum name) {
+            const GLubyte *value = functions->glGetString(name);
+            return value
+                ? QString::fromUtf8(reinterpret_cast<const char *>(value))
+                : QString();
+        };
+        result.renderer = string(GL_RENDERER);
+        result.version = string(GL_VERSION);
+        result.vendor = string(GL_VENDOR);
+    }
+
+    void paintGL() override { painted = true; }
+};
+
+bool isPlatformArgument(const QString &arg)
+{
+    return arg == QStringLiteral("-platform");
 }
 
 } // namespace
@@ -43,7 +70,6 @@ QString procVersion()
 PlatformInfo detectPlatform()
 {
     PlatformInfo info;
-
 #if defined(Q_OS_WIN)
     info.osName = QStringLiteral("Windows");
 #elif defined(Q_OS_MACOS)
@@ -53,176 +79,199 @@ PlatformInfo detectPlatform()
 #else
     info.osName = QStringLiteral("Unknown");
 #endif
-
-    info.displayValue = qEnvironmentVariable("DISPLAY");
-    info.hasDisplay = !info.displayValue.isEmpty();
-    info.waylandValue = qEnvironmentVariable("WAYLAND_DISPLAY");
-    info.hasWaylandDisplay = !info.waylandValue.isEmpty();
-
-#if defined(Q_OS_LINUX)
-    // WSL exposes WSL_DISTRO_NAME in every distro shell; the kernel string is
-    // the fallback signal. GPU passthrough shows up as /dev/dxg.
-    const QString distro = qEnvironmentVariable("WSL_DISTRO_NAME");
-    if (!distro.isEmpty()) {
-        info.isWsl = true;
-        info.wslSignal = QStringLiteral("WSL_DISTRO_NAME=%1").arg(distro);
-    } else {
-        const QString ver = procVersion();
-        if (ver.contains(QStringLiteral("microsoft"), Qt::CaseInsensitive)
-            || ver.contains(QStringLiteral("WSL"), Qt::CaseInsensitive)) {
-            info.isWsl = true;
-            info.wslSignal = QStringLiteral("/proc/version mentions Microsoft/WSL");
-        }
-    }
-    info.hasDxg = QFileInfo::exists(QStringLiteral("/dev/dxg"));
-#endif
-
+    info.waylandDisplay = qEnvironmentVariable("WAYLAND_DISPLAY");
     return info;
 }
 
-GraphicsDecision decideFallbacks(const PlatformInfo &info)
+bool configurePlatform(int argc, char *argv[], QString *error)
 {
-    GraphicsDecision d;
-
-    // If the user already pinned the platform or GL backend, respect it
-    // entirely and apply nothing of our own.
-    if (qEnvironmentVariableIsSet("QT_QPA_PLATFORM")
-        || qEnvironmentVariableIsSet("LIBGL_ALWAYS_SOFTWARE")
-        || qEnvironmentVariableIsSet("QT_OPENGL")) {
-        d.userOverride = true;
-        d.overrideReason = QStringLiteral("environment override present");
-        return d;
-    }
-
-    // WSL is the one environment that needs help choosing a backend. Prefer
-    // WSLg's native Wayland socket when it is advertised; the AppImage bundles
-    // the matching Wayland EGL client integration. Older/non-WSLg setups keep
-    // the X11 path. Without /dev/dxg there is no GPU to render on either path.
-    if (info.isWsl) {
-        if (info.hasWaylandDisplay) {
-            d.forcePlatform = true;
-            d.platform = QStringLiteral("wayland");
-            d.platformReason = QStringLiteral("WSL: prefer native WSLg Wayland");
-        } else if (info.hasDisplay) {
-            d.forcePlatform = true;
-            d.platform = QStringLiteral("xcb");
-            d.platformReason = QStringLiteral("WSL: no Wayland display; use X11");
-        }
-        if (!info.hasDxg) {
-            d.forceSoftwareGl = true;
-            d.softwareReason = QStringLiteral("WSL: no GPU passthrough (/dev/dxg missing)");
+#if defined(Q_OS_LINUX)
+    QString requested = qEnvironmentVariable("QT_QPA_PLATFORM");
+    for (int i = 1; i < argc; ++i) {
+        const QString arg = QString::fromLocal8Bit(argv[i]);
+        if (isPlatformArgument(arg)) {
+            if (i + 1 >= argc) {
+                if (error)
+                    *error = QStringLiteral("%1 requires a value; Linux syodep supports only '-platform wayland'").arg(arg);
+                return false;
+            }
+            requested = QString::fromLocal8Bit(argv[++i]);
         }
     }
 
-    return d;
+    if (!requested.isEmpty() && requested != QStringLiteral("wayland")) {
+        if (error) {
+            *error = QStringLiteral(
+                         "Linux syodep is Wayland-only; requested Qt platform '%1' is unsupported")
+                         .arg(requested);
+        }
+        return false;
+    }
+    qputenv("QT_QPA_PLATFORM", QByteArrayLiteral("wayland"));
+#else
+    Q_UNUSED(argc);
+    Q_UNUSED(argv);
+    Q_UNUSED(error);
+#endif
+    return true;
 }
 
-void applyFallbacks(const GraphicsDecision &decision)
+RendererPreference parseRendererPreference(const QString &value, bool *ok)
 {
-    if (decision.userOverride)
-        return;
-
-    if (decision.forcePlatform)
-        qputenv("QT_QPA_PLATFORM", decision.platform.toUtf8());
-
-    // AA_UseSoftwareOpenGL is the cross-platform "software" switch: Mesa
-    // llvmpipe on Linux, opengl32sw on Windows. Must be set before QApplication.
-    if (decision.forceSoftwareGl)
-        QCoreApplication::setAttribute(Qt::AA_UseSoftwareOpenGL);
+    const QString normalized = value.trimmed().toLower();
+    if (normalized == QStringLiteral("auto")) {
+        if (ok)
+            *ok = true;
+        return RendererPreference::Auto;
+    }
+    if (normalized == QStringLiteral("opengl")) {
+        if (ok)
+            *ok = true;
+        return RendererPreference::OpenGl;
+    }
+    if (normalized == QStringLiteral("raster")) {
+        if (ok)
+            *ok = true;
+        return RendererPreference::Raster;
+    }
+    if (ok)
+        *ok = false;
+    return RendererPreference::Auto;
 }
 
-GlProbe probeOpenGl()
+QString rendererPreferenceName(RendererPreference preference)
 {
-    GlProbe probe;
-
-    QOpenGLContext ctx;
-    if (!ctx.create()) {
-        probe.error = QStringLiteral("QOpenGLContext::create() failed");
-        return probe;
+    switch (preference) {
+    case RendererPreference::Auto:
+        return QStringLiteral("auto");
+    case RendererPreference::OpenGl:
+        return QStringLiteral("opengl");
+    case RendererPreference::Raster:
+        return QStringLiteral("raster");
     }
-
-    QOffscreenSurface surface;
-    surface.setFormat(ctx.format());
-    surface.create();
-    if (!surface.isValid()) {
-        probe.error = QStringLiteral("offscreen surface invalid");
-        return probe;
-    }
-    if (!ctx.makeCurrent(&surface)) {
-        probe.error = QStringLiteral("makeCurrent failed");
-        return probe;
-    }
-
-    auto *f = ctx.functions();
-    const auto str = [f](GLenum name) {
-        const GLubyte *s = f->glGetString(name);
-        return s ? QString::fromUtf8(reinterpret_cast<const char *>(s)) : QString();
-    };
-    probe.renderer = str(GL_RENDERER);
-    probe.version = str(GL_VERSION);
-    probe.vendor = str(GL_VENDOR);
-    probe.ok = !probe.renderer.isEmpty();
-    ctx.doneCurrent();
-    return probe;
+    return QStringLiteral("unknown");
 }
 
-QString buildCheckReport(const PlatformInfo &info, const GraphicsDecision &decision)
+QString rendererBackendName(RendererBackend backend)
+{
+    return backend == RendererBackend::OpenGl
+        ? QStringLiteral("opengl")
+        : QStringLiteral("raster");
+}
+
+GlProbe probeOpenGlWidget(int timeoutMs)
+{
+    ProbeWidget widget;
+    widget.result.attempted = true;
+    widget.setWindowFlags(Qt::Tool | Qt::FramelessWindowHint);
+    widget.setAttribute(Qt::WA_ShowWithoutActivating);
+    widget.resize(1, 1);
+
+    QEventLoop loop;
+    QTimer timeout;
+    bool frameSwapped = false;
+    timeout.setSingleShot(true);
+    QObject::connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
+    QObject::connect(&widget, &QOpenGLWidget::frameSwapped,
+                     &loop, [&]() {
+                         frameSwapped = true;
+                         loop.quit();
+                     });
+    timeout.start(timeoutMs);
+    widget.show();
+    loop.exec();
+
+    const bool frameCompleted = widget.isValid() && widget.painted && frameSwapped;
+    widget.hide();
+    QCoreApplication::processEvents();
+
+    if (!frameCompleted) {
+        if (widget.result.error.isEmpty()) {
+            widget.result.error = widget.isValid()
+                ? QStringLiteral("timed out waiting for the first composited OpenGL frame")
+                : QStringLiteral("QOpenGLWidget failed to create a valid context");
+        }
+        return widget.result;
+    }
+    if (widget.result.renderer.isEmpty()) {
+        widget.result.error = QStringLiteral("OpenGL context returned no renderer");
+        return widget.result;
+    }
+    widget.result.ok = true;
+    return widget.result;
+}
+
+RendererDecision decideRenderer(RendererPreference preference, const GlProbe &probe)
+{
+    RendererDecision decision;
+    decision.requested = preference;
+
+    if (preference == RendererPreference::Raster) {
+        decision.selected = RendererBackend::Raster;
+        decision.reason = QStringLiteral("raster renderer requested");
+        return decision;
+    }
+    if (probe.ok) {
+        decision.selected = RendererBackend::OpenGl;
+        decision.reason = QStringLiteral("OpenGL probe succeeded");
+        return decision;
+    }
+    if (preference == RendererPreference::OpenGl) {
+        decision.selected = RendererBackend::OpenGl;
+        decision.usable = false;
+        decision.reason = probe.error;
+        return decision;
+    }
+
+    decision.selected = RendererBackend::Raster;
+    decision.fellBack = true;
+    decision.reason = probe.error.isEmpty()
+        ? QStringLiteral("OpenGL probe failed")
+        : probe.error;
+    return decision;
+}
+
+QString buildCheckReport(const PlatformInfo &info,
+                         const RendererDecision &decision,
+                         const GlProbe &probe)
 {
     QString out;
-    const auto line = [&out](const QString &s) { out += s + QLatin1Char('\n'); };
+    const auto line = [&out](const QString &value) { out += value + QLatin1Char('\n'); };
 
     line(QStringLiteral("syodep --check"));
     line({});
-
-    // --- Platform -----------------------------------------------------------
     line(QStringLiteral("Platform"));
-    QString os = info.osName;
-    if (info.isWsl)
-        os += QStringLiteral(" (WSL: %1)").arg(info.wslSignal);
-    line(QStringLiteral("  OS:               %1").arg(os));
+    line(QStringLiteral("  OS:               %1").arg(info.osName));
 #if defined(Q_OS_LINUX)
-    if (info.isWsl)
-        line(QStringLiteral("  GPU passthrough:  %1")
-                 .arg(info.hasDxg ? QStringLiteral("present (/dev/dxg)")
-                                  : QStringLiteral("none (/dev/dxg missing)")));
-    line(QStringLiteral("  Display:          DISPLAY=%1 ; WAYLAND_DISPLAY=%2")
-             .arg(info.hasDisplay ? info.displayValue : QStringLiteral("unset"),
-                  info.hasWaylandDisplay ? info.waylandValue : QStringLiteral("unset")));
+    line(QStringLiteral("  Wayland display:  %1")
+             .arg(info.waylandDisplay.isEmpty()
+                      ? QStringLiteral("default (WAYLAND_DISPLAY unset)")
+                      : info.waylandDisplay));
 #endif
     line({});
 
-    // --- Graphics -----------------------------------------------------------
     line(QStringLiteral("Graphics"));
-    QString platReason;
-    if (decision.userOverride)
-        platReason = QStringLiteral("user override");
-    else if (decision.forcePlatform)
-        platReason = QStringLiteral("forced: %1").arg(decision.platformReason);
-    else
-        platReason = QStringLiteral("auto");
-    line(QStringLiteral("  Qt platform:      %1  (%2)")
-             .arg(QGuiApplication::platformName(), platReason));
-
-    QString glMode;
-    if (decision.userOverride)
-        glMode = QStringLiteral("per environment override");
-    else if (decision.forceSoftwareGl)
-        glMode = QStringLiteral("software (auto fallback: %1)").arg(decision.softwareReason);
-    else
-        glMode = QStringLiteral("hardware (default)");
-    line(QStringLiteral("  OpenGL:           %1").arg(glMode));
-
-    const GlProbe probe = probeOpenGl();
-    if (probe.ok) {
-        line(QStringLiteral("  GL renderer:      %1").arg(probe.renderer));
-        line(QStringLiteral("  GL version:       %1").arg(probe.version));
-        line(QStringLiteral("  Context:          OK"));
+    line(QStringLiteral("  Qt platform:      %1").arg(QGuiApplication::platformName()));
+    line(QStringLiteral("  Requested:        %1")
+             .arg(rendererPreferenceName(decision.requested)));
+    line(QStringLiteral("  Selected:         %1")
+             .arg(rendererBackendName(decision.selected)));
+    if (probe.attempted) {
+        line(QStringLiteral("  OpenGL probe:     %1")
+                 .arg(probe.ok ? QStringLiteral("OK")
+                               : QStringLiteral("FAILED (%1)").arg(probe.error)));
+        if (probe.ok) {
+            line(QStringLiteral("  GL renderer:      %1").arg(probe.renderer));
+            line(QStringLiteral("  GL vendor:        %1").arg(probe.vendor));
+            line(QStringLiteral("  GL version:       %1").arg(probe.version));
+        }
     } else {
-        line(QStringLiteral("  Context:          FAILED (%1)").arg(probe.error));
+        line(QStringLiteral("  OpenGL probe:     skipped"));
     }
+    if (decision.fellBack)
+        line(QStringLiteral("  Fallback:         %1").arg(decision.reason));
     line({});
 
-    // --- Configuration ------------------------------------------------------
     line(QStringLiteral("Configuration"));
     const QString configPath = takeSyoString(syo_default_config_path());
     const bool configExists = !configPath.isEmpty() && QFileInfo::exists(configPath);
@@ -230,10 +279,6 @@ QString buildCheckReport(const PlatformInfo &info, const GraphicsDecision &decis
     line(QStringLiteral("  Config file:      %1")
              .arg(configExists ? QStringLiteral("loaded")
                                : QStringLiteral("not found — using built-in defaults")));
-    // Construct a throwaway core (no persistence) to surface parse warnings and
-    // the resolved Open-dialog directory. This runs in the same process as a
-    // real launch, so the working directory and config match what the dialog
-    // would see.
     SyoApp *app = syo_app_new(configPath.toUtf8().constData(), nullptr);
     const QString warnings = app ? takeSyoString(syo_app_startup_warnings(app)) : QString();
     const QString openDir = app ? takeSyoString(syo_app_open_dir(app)) : QString();
@@ -252,28 +297,22 @@ QString buildCheckReport(const PlatformInfo &info, const GraphicsDecision &decis
     }
     line({});
 
-    // --- Versions -----------------------------------------------------------
     line(QStringLiteral("Versions"));
     line(QStringLiteral("  syodep (shell):   %1").arg(QCoreApplication::applicationVersion()));
     line(QStringLiteral("  syodep (core):    %1").arg(takeSyoString(syo_core_version())));
     line(QStringLiteral("  Qt:               %1 (built) / %2 (runtime)")
              .arg(QStringLiteral(QT_VERSION_STR), QString::fromUtf8(qVersion())));
     line(QStringLiteral("  Build:            %1").arg(QStringLiteral(SYODEP_BUILD_TYPE)));
-
     return out;
 }
 
 QString buildVersionReport(const PlatformInfo &info)
 {
-    QString platform = info.osName.toLower();
-    if (info.isWsl)
-        platform += QStringLiteral(" (wsl)");
-
     QString out;
     out += QStringLiteral("syodep %1\n").arg(QCoreApplication::applicationVersion());
     out += QStringLiteral("  core:      %1\n").arg(takeSyoString(syo_core_version()));
     out += QStringLiteral("  Qt:        %1\n").arg(QString::fromUtf8(qVersion()));
-    out += QStringLiteral("  platform:  %1\n").arg(platform);
+    out += QStringLiteral("  platform:  %1\n").arg(info.osName.toLower());
     out += QStringLiteral("  build:     %1\n").arg(QStringLiteral(SYODEP_BUILD_TYPE));
     return out;
 }

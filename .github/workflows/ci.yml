@@ -96,20 +96,25 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake ninja-build qt6-base-dev \
-            libqt6opengl6-dev libgl1-mesa-dev libfontconfig1-dev \
-            libfreetype-dev xvfb
+            libqt6opengl6-dev qt6-wayland libgl1-mesa-dev libfontconfig1-dev \
+            libfreetype-dev weston
       - name: Configure
         run: cmake -B build -G Ninja
       - name: Build
         run: cmake --build build
-      - name: Smoke test (open + render a PDF offscreen)
+      - name: Smoke test (Wayland OpenGL + raster)
         run: |
           cargo run -p syodep-pdf --features test-support \
             --example make_fixture -- fixture.pdf 5
-          # xvfb gives a real X display so QOpenGLWidget/QTextEdit painting is
-          # less brittle than QT_QPA_PLATFORM=offscreen on the runner's Qt 6.4.
-          xvfb-run -a ./build/ui-qt/syodep --smoke-test fixture.pdf \
-            || { echo '--- smoke-progress.txt ---'; cat smoke-progress.txt 2>/dev/null || true; exit 1; }
+          bash scripts/with-headless-wayland.sh bash -euo pipefail -c '
+            ./build/ui-qt/syodep --renderer=opengl --smoke-test fixture.pdf
+            ./build/ui-qt/syodep --renderer=raster --smoke-test fixture.pdf
+            ./build/ui-qt/syodep --renderer=auto --check | grep -q "Selected:         opengl"
+            if QT_QPA_PLATFORM=xcb ./build/ui-qt/syodep --check; then
+              echo "XCB override was not rejected" >&2
+              exit 1
+            fi
+          ' || { cat smoke-progress.txt 2>/dev/null || true; exit 1; }
 
   qt-build-windows:
     name: Qt shell build + smoke test (Windows)
@@ -195,15 +200,16 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake ninja-build qt6-base-dev \
-            libqt6opengl6-dev libgl1-mesa-dev libfontconfig1-dev \
-            libfreetype-dev xvfb
+            libqt6opengl6-dev qt6-wayland libgl1-mesa-dev libfontconfig1-dev \
+            libfreetype-dev weston
       - name: Build release artifact
         run: |
           cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build build
           cargo run -p syodep-pdf --features test-support \
             --example make_fixture -- fixture.pdf 5
-          xvfb-run -a ./build/ui-qt/syodep --smoke-test fixture.pdf \
+          bash scripts/with-headless-wayland.sh \
+            ./build/ui-qt/syodep --renderer=auto --smoke-test fixture.pdf \
             || { echo '--- smoke-progress.txt ---'; cat smoke-progress.txt 2>/dev/null || true; exit 1; }
       - name: Package artifact
         run: |

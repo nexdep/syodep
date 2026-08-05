@@ -7,6 +7,43 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-08-05 — Linux Wayland-only shell with OpenGL/raster selection
+
+Linux now selects Qt's generic `wayland` QPA before `QApplication` and rejects
+every XCB/offscreen platform override. WSL/WSLg detection, `/dev/dxg` probing,
+and automatic environment rewrites to XCB/software GL are gone: a working WSLg
+instance is treated exactly like any other Wayland compositor. Windows remains
+a native supported target.
+
+`--renderer=auto|opengl|raster` controls the canvas. `auto` maps a one-pixel
+probe `QOpenGLWidget`, requires a valid context and one composited frame, then
+uses OpenGL or falls back to a true raster `QWidget`; `opengl` makes probe
+failure fatal and `raster` skips the probe. The two concrete widgets share all
+painting, overlay, page-cache, DPR, key and wheel code in `CanvasState`, so the
+backend cannot change document behaviour or highlight blending. `--check`
+reports requested/selected renderer, probe failure, and GL strings.
+
+Linux CI and the reusable AppImage builder now run under isolated headless
+Weston instead of Xvfb/offscreen and exercise both renderers. AppImage
+construction retains the separate Wayland EGL client integration, removes
+every QPA plugin except `libqwayland-generic.so` and `libqwayland-egl.so`, then
+verifies XCB/offscreen remain absent after extraction.
+
+Compatibility cost is intentional: Xorg-only desktops, traditional SSH X
+forwarding and X11-only VNC cannot run the Linux build. Raster fallback also
+cannot compensate for a missing/broken Wayland compositor or backing store, and
+uses more CPU than a working GL canvas. A context lost after the startup probe
+may require restarting with `--renderer=raster`.
+
+### Test strategy
+
+Qt shell behavior remains compile + real-window smoke coverage. The Linux job
+runs forced OpenGL and forced raster against the generated PDF, checks that
+`auto` selects GL under Mesa software rendering, and asserts an XCB override is
+rejected. The packaged AppImage repeats both backend smoke tests after plugin
+contents and the Wayland EGL dependency closure are inspected. Rust behavior
+and the C ABI are unchanged.
+
 ## 2026-08-05 — Reusable AppImage preview workflow
 
 The production Linux AppImage builder now lives in a reusable workflow.
@@ -57,10 +94,11 @@ software-OpenGL fallback is unchanged.
 
 Test strategy: the shell smoke test asserts the three backend-decision cases
 and requires a valid canvas OpenGL context on every non-offscreen platform.
-The packaged AppImage keeps its Xvfb/XCB smoke and adds a headless-Weston
-Wayland smoke; each simulates WSL and checks the selected backend in
-`--check` before exercising the real window. This is workflow and shell
-coverage because the failure is Qt plugin deployment, outside the Rust core.
+The packaged AppImage originally kept an Xvfb/XCB smoke and added a
+headless-Weston Wayland smoke. The later Wayland-only renderer milestone above
+replaced that split with forced OpenGL and raster tests under Weston. This is
+workflow and shell coverage because the integration failure is outside the Rust
+core.
 
 ## 2026-08-05 — Modal keybinding-help overlay
 

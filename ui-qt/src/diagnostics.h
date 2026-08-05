@@ -1,47 +1,32 @@
-// Graphics/platform self-diagnosis for the syodep shell.
+// Graphics/platform startup policy and human-readable diagnostics.
 //
-// Two responsibilities:
-//   1. Pick safe graphics fallbacks before the QApplication exists, so the app
-//      still starts on environments without a usable GPU path. WSLg prefers
-//      native Wayland when its socket is present, older WSL falls back to X11,
-//      and either path uses software GL when /dev/dxg is absent. See
-//      decideFallbacks()/applyFallbacks().
-//   2. Produce the human-readable reports for `--check` and `--version`.
-//
-// Detection is heuristic (platform signals), not a live GPU probe: Qt requires
-// the platform plugin and software-GL choice to be made *before* QApplication
-// is constructed, so there is no context to probe yet at decision time.
+// Linux is deliberately Wayland-only. Renderer selection is capability-based
+// and contains no WSL/WSLg detection: a working WSLg instance is simply a
+// Wayland compositor like any other from the application's point of view.
 #pragma once
 
 #include <QString>
+
+#include "canvas_widget.h"
 
 namespace syodep::diag {
 
 struct PlatformInfo
 {
-    QString osName;             // "Windows" / "Linux" / "macOS" / "Unknown"
-    bool isWsl = false;         // running under WSL
-    QString wslSignal;          // how WSL was detected (for the report)
-    bool hasDxg = false;        // /dev/dxg present (WSL GPU passthrough)
-    bool hasDisplay = false;    // X11 DISPLAY set
-    QString displayValue;
-    bool hasWaylandDisplay = false; // WAYLAND_DISPLAY set
-    QString waylandValue;
+    QString osName;
+    QString waylandDisplay;
 };
 
-struct GraphicsDecision
+enum class RendererPreference
 {
-    bool userOverride = false;  // user set the env themselves; we touch nothing
-    QString overrideReason;
-    bool forcePlatform = false; // set QT_QPA_PLATFORM
-    QString platform;           // e.g. "xcb"
-    QString platformReason;
-    bool forceSoftwareGl = false; // set Qt::AA_UseSoftwareOpenGL
-    QString softwareReason;
+    Auto,
+    OpenGl,
+    Raster,
 };
 
 struct GlProbe
 {
+    bool attempted = false;
     bool ok = false;
     QString renderer;
     QString version;
@@ -49,23 +34,33 @@ struct GlProbe
     QString error;
 };
 
-// Detect the host platform from env and filesystem signals.
+struct RendererDecision
+{
+    RendererPreference requested = RendererPreference::Auto;
+    RendererBackend selected = RendererBackend::Raster;
+    bool usable = true;
+    bool fellBack = false;
+    QString reason;
+};
+
 PlatformInfo detectPlatform();
 
-// Pure decision: given the platform, what (if anything) to override.
-GraphicsDecision decideFallbacks(const PlatformInfo &info);
+// On Linux, accept only the generic `wayland` QPA and select it when unset.
+// Returns false with a user-facing error for every X11/offscreen override.
+bool configurePlatform(int argc, char *argv[], QString *error);
 
-// Apply the decision. MUST be called before constructing QApplication.
-void applyFallbacks(const GraphicsDecision &decision);
+RendererPreference parseRendererPreference(const QString &value, bool *ok);
+QString rendererPreferenceName(RendererPreference preference);
+QString rendererBackendName(RendererBackend backend);
 
-// Create a throwaway offscreen GL context and read its strings. Requires a
-// constructed QApplication.
-GlProbe probeOpenGl();
+// Show a tiny real QOpenGLWidget and require one composited frame. This catches
+// failures that an offscreen QOpenGLContext alone cannot predict.
+GlProbe probeOpenGlWidget(int timeoutMs = 1200);
+RendererDecision decideRenderer(RendererPreference preference, const GlProbe &probe);
 
-// Multi-line report for `syodep --check`. Requires a constructed QApplication.
-QString buildCheckReport(const PlatformInfo &info, const GraphicsDecision &decision);
-
-// Multi-line report for `syodep --version`.
+QString buildCheckReport(const PlatformInfo &info,
+                         const RendererDecision &decision,
+                         const GlProbe &probe);
 QString buildVersionReport(const PlatformInfo &info);
 
 } // namespace syodep::diag

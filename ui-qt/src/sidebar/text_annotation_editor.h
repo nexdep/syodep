@@ -63,8 +63,8 @@ private slots:
 
 private:
     // QTextBrowser markdown preview is created on first Preview-tab visit.
-    // Constructing/painting it under QT_QPA_PLATFORM=offscreen with a failed
-    // QOpenGLWidget sibling has segfaulted on CI's Qt 6.4.
+    // Constructing/painting it beside a failed QOpenGLWidget has segfaulted on
+    // CI's Qt 6.4; startup resolves the renderer before MainWindow exists.
     void ensurePreview();
     void updatePreview();
     void updateActions();

@@ -42,9 +42,11 @@ real files. The strategy, in descending order of coverage:
    directly, and the motion tests inject a hand-built `PageContent` rather than
    relying on MuPDF's heuristic — so a change in that heuristic can only ever
    fail the one detection test, never the behavioural suite.
-5. **Shell smoke test** in CI: `syodep --smoke-test file.pdf` with
-   `QT_QPA_PLATFORM=offscreen` constructs the real window, opens a document
-   through the FFI, renders a page and paints one frame.
+5. **Shell smoke test** in CI: an isolated headless Weston compositor runs
+   `syodep --smoke-test file.pdf` once with `--renderer=opengl` and once with
+   `--renderer=raster`. Both construct the real window, open through the FFI,
+   render a page and paint one frame. The same job verifies `auto` selects the
+   working GL path and that an XCB override is rejected before Qt starts.
 
 What is intentionally *not* unit-tested: Qt widget behavior (kept so thin
 that the smoke test plus compilation covers it) and MuPDF internals (we
@@ -68,7 +70,11 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 # shell smoke test (after a CMake build)
 cargo run -p syodep-pdf --features test-support --example make_fixture -- /tmp/f.pdf 5
-QT_QPA_PLATFORM=offscreen ./build/ui-qt/syodep --smoke-test /tmp/f.pdf
+# needs `weston`; the helper creates an isolated compositor + software GL
+bash scripts/with-headless-wayland.sh \
+    ./build/ui-qt/syodep --renderer=opengl --smoke-test /tmp/f.pdf
+bash scripts/with-headless-wayland.sh \
+    ./build/ui-qt/syodep --renderer=raster --smoke-test /tmp/f.pdf
 
 # docs consistency (commands/keybindings/config all documented)
 ./scripts/check-docs.sh
@@ -83,7 +89,7 @@ QT_QPA_PLATFORM=offscreen ./build/ui-qt/syodep --smoke-test /tmp/f.pdf
 | `rust-lint` | `cargo fmt --check`, `clippy -D warnings` |
 | `rust-test-linux` | full `cargo test --workspace` (config, storage/migrations, core, pdf, ffi) |
 | `rust-test-windows` | same on Windows (MSVC) |
-| `qt-build-linux` | CMake configure + build of the Qt shell, then the offscreen smoke test |
+| `qt-build-linux` | CMake configure + build, then OpenGL/raster smoke tests under headless Weston and strict-Wayland checks |
 | `qt-build-windows` | same on Windows (Qt via aqtinstall, MSVC + Ninja); smoke test judged by exit code (GUI-subsystem exe has no stdout) |
 | `docs` | `scripts/check-docs.sh`: required docs exist; every command, default keybinding and config option is documented |
 | `build-artifact` | packages the build as a downloadable CI artifact on every push (see `docs/packaging.md`) |

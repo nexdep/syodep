@@ -20,6 +20,7 @@ on:
       - "crates/**"
       - "ui-qt/**"
       - "packaging/**"
+      - "scripts/**"
       - ".github/workflows/**"
 
 permissions:
@@ -52,7 +53,7 @@ jobs:
             build-essential clang libclang-dev cmake ninja-build \
             qt6-base-dev libqt6opengl6-dev qt6-wayland libgl1-mesa-dev \
             libfontconfig1-dev libfreetype-dev \
-            curl file ca-certificates unzip weston xvfb
+            curl file ca-certificates unzip weston
       - name: Install Rust
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
@@ -71,19 +72,17 @@ jobs:
         run: |
           cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build build
-      # linuxdeploy bundles the binary, Qt libs and platform plugins into
-      # an AppDir; system-integration libs (glibc, libGL, fontconfig) stay
-      # on its exclude list and resolve from the host at runtime.
-      # --appimage-extract-and-run because containers have no FUSE.
+      # Populate the AppDir first, then remove every non-Wayland QPA before a
+      # second linuxdeploy pass creates the AppImage. System-integration libs
+      # (glibc, libGL, fontconfig) stay on linuxdeploy's exclude list and
+      # resolve from the host. --appimage-extract-and-run is set because the
+      # build container has no FUSE.
       - name: Package AppImage (linuxdeploy)
         run: |
           curl -fsSLO https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
           curl -fsSLO https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage
           chmod +x linuxdeploy-x86_64.AppImage linuxdeploy-plugin-qt-x86_64.AppImage
-          # Bundle native Wayland support plus offscreen for the smoke test
-          # below (and headless use generally). linuxdeploy-plugin-qt
-          # deploys libqxcb.so by default.
-          export EXTRA_PLATFORM_PLUGINS="libqoffscreen.so;libqwayland-egl.so;libqwayland-generic.so"
+          export EXTRA_PLATFORM_PLUGINS="libqwayland-egl.so;libqwayland-generic.so"
           export QMAKE=/usr/bin/qmake6
           export APPIMAGE_EXTRACT_AND_RUN=1
           export OUTPUT="syodep-x86_64.AppImage"
@@ -99,18 +98,27 @@ jobs:
             --executable build/ui-qt/syodep \
             --desktop-file packaging/syodep.desktop \
             --icon-file packaging/syodep.svg \
-            --plugin qt \
-            --output appimage
+            --plugin qt
+          platform_dir="$(find AppDir -type d -path '*/plugins/platforms' -print -quit)"
+          test -n "$platform_dir"
+          find "$platform_dir" -mindepth 1 -maxdepth 1 \
+            ! -name 'libqwayland-egl.so' \
+            ! -name 'libqwayland-generic.so' -delete
+          test -f "$platform_dir/libqwayland-egl.so"
+          test -f "$platform_dir/libqwayland-generic.so"
+          test ! -e "$platform_dir/libqxcb.so"
+          test ! -e "$platform_dir/libqoffscreen.so"
+          ./linuxdeploy-x86_64.AppImage --appdir AppDir --output appimage
       - name: Verify bundled Qt platform plugins
         run: |
           chmod +x syodep-x86_64.AppImage
           ./syodep-x86_64.AppImage --appimage-extract
           platform_dir="$(find squashfs-root -type d -path '*/plugins/platforms' -print -quit)"
           test -n "$platform_dir"
-          test -f "$platform_dir/libqxcb.so"
-          test -f "$platform_dir/libqoffscreen.so"
           test -f "$platform_dir/libqwayland-egl.so"
           test -f "$platform_dir/libqwayland-generic.so"
+          test ! -e "$platform_dir/libqxcb.so"
+          test ! -e "$platform_dir/libqoffscreen.so"
           plugin_root="$(dirname "$platform_dir")"
           wayland_egl="$plugin_root/wayland-graphics-integration-client/libqt-plugin-wayland-egl.so"
           test -f "$wayland_egl"
@@ -123,52 +131,26 @@ jobs:
             echo "Wayland EGL client integration has unresolved dependencies" >&2
             exit 1
           fi
-      # Run the actual AppImage so a missing bundled lib fails here, not
-      # on a user's machine (mirrors the Windows staged smoke test).
-      - name: Smoke test the AppImage (XCB)
+      # Run the actual AppImage so a missing bundled lib fails here, not on a
+      # user's machine. Both presentation backends use the shipped Wayland QPA.
+      - name: Smoke test the AppImage (Wayland OpenGL + raster)
         run: |
           cargo run -p syodep-pdf --features test-support \
             --example make_fixture -- fixture.pdf 5
           chmod +x syodep-x86_64.AppImage
-          xvfb-run -a env -u WAYLAND_DISPLAY WSL_DISTRO_NAME=syodep-ci \
-            ./syodep-x86_64.AppImage --appimage-extract-and-run --check \
-            > xcb-check.txt
-          cat xcb-check.txt
-          grep -F "Qt platform:      xcb  (forced: WSL: no Wayland display; use X11)" \
-            xcb-check.txt
-          xvfb-run -a env -u WAYLAND_DISPLAY WSL_DISTRO_NAME=syodep-ci \
+          bash scripts/with-headless-wayland.sh bash -euo pipefail -c '
             ./syodep-x86_64.AppImage --appimage-extract-and-run \
-            --smoke-test fixture.pdf \
-            || { echo '--- smoke-progress.txt ---'; cat smoke-progress.txt 2>/dev/null || true; exit 1; }
-      - name: Smoke test the AppImage (Wayland)
-        run: |
-          runtime_dir="$PWD/wayland-runtime"
-          install -d -m 0700 "$runtime_dir"
-          export XDG_RUNTIME_DIR="$runtime_dir"
-          export WAYLAND_DISPLAY=wayland-syodep
-          unset DISPLAY QT_QPA_PLATFORM LIBGL_ALWAYS_SOFTWARE QT_OPENGL
-          LIBGL_ALWAYS_SOFTWARE=1 weston --backend=headless-backend.so \
-            --use-gl --idle-time=0 --socket="$WAYLAND_DISPLAY" \
-            --log=weston.log &
-          weston_pid=$!
-          trap 'kill "$weston_pid" 2>/dev/null || true; wait "$weston_pid" 2>/dev/null || true' EXIT
-          for _ in $(seq 1 100); do
-            test -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" && break
-            sleep 0.1
-          done
-          if ! test -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY"; then
-            cat weston.log
-            exit 1
-          fi
-          WSL_DISTRO_NAME=syodep-ci ./syodep-x86_64.AppImage \
-            --appimage-extract-and-run --check > wayland-check.txt
-          cat wayland-check.txt
-          grep -F "Qt platform:      wayland  (forced: WSL: prefer native WSLg Wayland)" \
-            wayland-check.txt
-          WSL_DISTRO_NAME=syodep-ci ./syodep-x86_64.AppImage \
-            --appimage-extract-and-run --smoke-test fixture.pdf \
-            || { echo '--- weston.log ---'; cat weston.log; \
-                 echo '--- smoke-progress.txt ---'; cat smoke-progress.txt 2>/dev/null || true; exit 1; }
+              --renderer=opengl --smoke-test fixture.pdf
+            ./syodep-x86_64.AppImage --appimage-extract-and-run \
+              --renderer=raster --smoke-test fixture.pdf
+            ./syodep-x86_64.AppImage --appimage-extract-and-run \
+              --renderer=auto --check | grep -q "Selected:         opengl"
+            if QT_QPA_PLATFORM=xcb ./syodep-x86_64.AppImage \
+                --appimage-extract-and-run --check; then
+              echo "XCB override was not rejected" >&2
+              exit 1
+            fi
+          ' || { echo '--- smoke-progress.txt ---'; cat smoke-progress.txt 2>/dev/null || true; exit 1; }
       - uses: actions/upload-artifact@v4
         with:
           name: syodep-x86_64-appimage

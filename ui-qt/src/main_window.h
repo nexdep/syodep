@@ -4,6 +4,7 @@
 
 #include <QLabel>
 #include <QMainWindow>
+#include <QString>
 
 #include <optional>
 
@@ -19,12 +20,15 @@ namespace syodep {
 class CanvasWidget;
 class CoreController;
 class KeybindingsOverlay;
+enum class RendererBackend;
 
 class MainWindow : public QMainWindow
 {
     Q_OBJECT
 public:
-    explicit MainWindow(QWidget *parent = nullptr);
+    explicit MainWindow(RendererBackend renderer,
+                        const QString &rendererWarning = {},
+                        QWidget *parent = nullptr);
     ~MainWindow() override = default;
 
     bool openDocument(const QString &path);
@@ -39,6 +43,7 @@ public:
     QAction *highlightsToggleAction() const { return m_highlightsAction; }
     QAction *annotationsToggleAction() const { return m_annotationsAction; }
     KeybindingsOverlay *keybindingsOverlay() const { return m_keybindingsOverlay; }
+    QWidget *canvasWidget() const;
 
     // Single read model for which sidebar page is visible (nullopt when hidden).
     std::optional<SidebarPage> visibleSidebarPage() const;
