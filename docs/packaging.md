@@ -175,13 +175,19 @@ a single `YYYYMMDDHHMMSS` stamp overflows that. No `checkver`/`autoupdate`:
 that timestamp is minted by CI and no regex over the releases API can
 reconstruct it.
 
-The continuous bump commit carries **`[skip ci]`**, and it is load-bearing.
-The commit lands on `main`, and a `main` push is exactly what triggers
-`publish-continuous` — without the marker the job would publish, bump, push,
-and trigger itself forever. The tagged-release bump needs no marker because
-its `main` push only ever reached `publish-continuous`, which used to stop
-there. Its push therefore still costs one extra all-platform build per
-release.
+Both bump commits carry **`[skip ci]`**: CI's own manifest commits never
+trigger CI.
+
+For `publish-continuous` the marker is load-bearing. The commit lands on
+`main`, and a `main` push is exactly what triggers `publish-continuous` —
+without it the job would publish, bump, push, and re-trigger itself forever.
+
+For `publish-release` it is only economy. That push used to start a full
+Linux + Windows + installer run over a one-line JSON change, and the rolling
+`continuous` prerelease it rebuilt differed from the previous one by nothing
+else. The cost of marking it: after a tagged release, `continuous` keeps
+pointing at the commit before the manifest bump until the next real merge —
+a JSON-only difference in a prerelease that changes on every merge anyway.
 
 Because `main` can move between `publish-continuous`'s freshness check and its
 push, the bump retries up to three times, rebasing onto the newer `main`. The

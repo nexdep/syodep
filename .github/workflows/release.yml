@@ -285,7 +285,12 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add bucket/syodep.json
-          git commit -m "Scoop: bump manifest to ${GITHUB_REF_NAME}"
+          # [skip ci]: CI's own manifest commits never trigger CI. Here that
+          # only saves a full Linux + Windows + installer rebuild of a
+          # one-line JSON change; in publish-continuous the same marker is
+          # what stops that job from re-triggering itself forever. Both
+          # carry it so the rule is uniform instead of per-job reasoning.
+          git commit -m "Scoop: bump manifest to ${GITHUB_REF_NAME} [skip ci]"
           git push origin HEAD:main
 
   publish-continuous:
@@ -395,11 +400,11 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add bucket/syodep-continuous.json
-          # [skip ci] is load-bearing: this push lands on main, and without it
-          # the push would start another Release run that would publish, bump
-          # and push again, forever. The tagged-release bump needs no such
-          # marker because its own main push only reaches publish-continuous,
-          # which used to stop there.
+          # [skip ci] is load-bearing here rather than economical: this push
+          # lands on main, and a main push is exactly what triggers this job,
+          # so without the marker it would publish, bump and push again,
+          # forever. publish-release marks its bump for the same rule, but
+          # there it only saves a redundant build.
           git commit -m "Scoop: bump continuous manifest to ${GITHUB_SHA:0:12} [skip ci]"
           # main can move between the freshness check above and this push. The
           # bump touches one file nobody edits by hand, so rebasing onto the

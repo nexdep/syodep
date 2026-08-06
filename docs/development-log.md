@@ -7,6 +7,27 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-08-06 — `[skip ci]` on the tagged-release manifest bump
+
+`publish-release`'s Scoop bump now carries `[skip ci]` too, so the rule is
+uniform: CI's own manifest commits never trigger CI. Previously only
+`publish-continuous` marked its bump, where the marker is load-bearing — that
+job is triggered by `main` pushes, so an unmarked bump would re-trigger itself
+forever. The tagged-release bump had no such loop (its `main` push reached
+`publish-continuous`, which produces a marked commit and stops), but it did
+start a full Linux + Windows + installer run over a one-line JSON change once
+per release.
+
+The tradeoff accepted: after a tagged release, the rolling `continuous`
+prerelease keeps pointing at the commit before the manifest bump until the next
+real merge. That is a JSON-only difference in a prerelease that changes on
+every merge anyway.
+
+Not changed: the tagged-release bump still pushes without the rebase-retry loop
+`publish-continuous` uses. Its race window (`main` moving between checkout and
+push) exists but is far narrower — tags are rare and rarely concurrent with
+merges — and adding it was out of scope here.
+
 ## 2026-08-06 — Scoop manifest for the continuous channel
 
 `publish-continuous` now bumps a Scoop manifest of its own, so the rolling main
