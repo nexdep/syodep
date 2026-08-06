@@ -125,7 +125,16 @@ artifact.
 through `release.yml`, which publishes the preview from that build rather than
 running a second, byte-identical one. Nothing is lost by doing so: the AppImage
 job never waited on Windows in the first place — only `publish-continuous`
-does — so the asset appears at the same point it always did. The raw AppImage
+does — so the asset appears at the same point it always did.
+
+`publish-appimage-preview` lives in `release.yml` as a **sibling** of
+`publish-continuous`, not inside the reusable AppImage workflow, and depends
+only on the Linux build. That placement is deliberate. A job inside the
+reusable workflow contributes to the caller's `uses:` job result, so a failing
+preview publisher fails `release-build-linux` and takes the continuous release
+down with it — observed on `a15d15f`, where a preview job that could not get a
+runner skipped `publish-continuous` entirely. A preview is a convenience and
+must never be able to block the real release. The raw AppImage
 lands at
 `https://github.com/nexdep/syodep/releases/tag/appimage-preview` as
 `syodep-appimage-preview-x86_64.AppImage`. This rolling prerelease contains

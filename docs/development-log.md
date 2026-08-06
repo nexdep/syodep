@@ -7,6 +7,36 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-08-06 — Preview publisher must not gate the continuous release
+
+Fixes a regression from the entry below. Folding the preview publisher into the
+release pipeline's AppImage call also folded it into that call's **result**: a
+job inside a reusable workflow contributes to the caller's `uses:` job
+conclusion, so a failing `publish-appimage-preview` failed `release-build-linux`
+and skipped `publish-continuous` behind it.
+
+That is not theoretical — it happened on the very commit that introduced it.
+During the GitHub Actions outage of 2026-08-06 the preview job sat 15 minutes
+without ever being assigned a runner and was cancelled. Both *builds* succeeded
+(Linux 2m23s, Windows 13m58s), yet `a15d15f` published no `continuous` release
+and no Scoop bump, because a convenience job blocked them.
+
+`publish-appimage-preview` therefore moves out of `appimage.yml` into
+`release.yml`, as a sibling of `publish-continuous` that depends only on
+`release-build-linux`. Both now hang off the same build and neither can block
+the other. `appimage.yml` becomes a pure builder needing only `contents: read`.
+
+The move costs nothing in reachability: with `main` excluded from
+`appimage.yml`'s push trigger, that job's `if` could only ever be satisfied
+through the release call, so as a job in `appimage.yml` it was already
+unreachable by any other path.
+
+### Decision
+
+**Preview latency is unchanged.** `needs: release-build-linux` names the Linux
+build alone, so the asset still publishes without waiting on the ~14-minute
+Windows job. That was the entire point of the fast preview and survives intact.
+
 ## 2026-08-06 — One AppImage build per main push, and a Windows Rust cache
 
 `main` pushes were building the AppImage twice: once by `appimage.yml`'s own
