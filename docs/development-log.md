@@ -7,6 +7,46 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-08-06 — Scoop manifest for the continuous channel
+
+`publish-continuous` now bumps a Scoop manifest of its own, so the rolling main
+build is installable and updatable the same way tagged releases already were.
+`bucket/syodep-continuous.json` is a second manifest in the same bucket; it
+shims `syodep-continuous` and names its shortcut "syodep (continuous)" so it
+can sit alongside a stable install instead of fighting it over the shim and
+Start Menu entry. `bucket/syodep.json` keeps tracking tags only — pointing the
+stable manifest at rolling builds would have silently moved every existing
+`scoop update syodep` onto unreleased code.
+
+Only `version` and `hash` move: the `continuous` release assets are clobbered
+in place, so the URL is constant. That makes the version the load-bearing part,
+since Scoop re-downloads on a version change rather than a moved hash. It is
+minted as `<base>-continuous.<YYYYMMDD>.<HHMMSS>+<sha12>`, with the date and
+time split into separate components because Scoop compares numeric version
+parts as 32-bit integers and a single 14-digit stamp overflows that. No
+`checkver`/`autoupdate`, because a CI-minted timestamp is not recoverable from
+the releases API.
+
+### Decisions
+
+- **`[skip ci]` on the bump commit.** The bump lands on `main`, and a `main`
+  push is precisely what triggers `publish-continuous`; without the marker the
+  job would publish, bump, push and re-trigger itself indefinitely. The
+  tagged-release bump has never needed one because its `main` push only reached
+  `publish-continuous`, which stopped there — that is exactly the property this
+  change removes.
+- **Push retries with a rebase.** `main` can move between the job's freshness
+  check and its push. Rebasing is always clean here: nothing else edits that
+  file, and a newer commit gets its own run that overwrites the manifest.
+
+### Test strategy
+
+The bump logic was dry-run locally against the published `continuous` zip; the
+manifest is seeded with that real hash, so it is installable before the first
+CI bump rather than failing verification until one lands. `extract_dir` was
+confirmed against the archive: the asset is renamed at publish time but the
+directory inside it is still `syodep-win64`, shared with the stable manifest.
+
 ## 2026-08-05 — Reliable focused-sidebar toggles and Escape close
 
 Sidebar focus no longer traps the keyboard away from `<leader>a` and

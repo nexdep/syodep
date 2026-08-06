@@ -369,3 +369,49 @@ jobs:
             --clobber \
             syodep-continuous-win64.zip \
             syodep-continuous-x86_64.AppImage
+      # Keep `scoop install/update syodep-continuous` pointing at the asset
+      # that was just clobbered in place. Only the hash actually moves -- the
+      # download URL is fixed -- and Scoop re-downloads solely on a version
+      # change, so the version has to carry the build identity.
+      #
+      # Shape is `<base>-continuous.<YYYYMMDD>.<HHMMSS>+<sha12>`: the date and
+      # time are separate components because Scoop compares numeric version
+      # parts as 32-bit integers, and a single YYYYMMDDHHMMSS stamp overflows
+      # that. Splitting them keeps both parts comparable and the ordering
+      # monotonic. The commit goes in SemVer build metadata, which Scoop may
+      # ignore when comparing -- that is fine, the timestamp already
+      # guarantees every build differs from the last.
+      - name: Bump continuous Scoop manifest
+        if: steps.freshness.outputs.publish == 'true'
+        run: |
+          BASE="$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)"
+          VERSION="${BASE}-continuous.$(date -u +%Y%m%d.%H%M%S)+${GITHUB_SHA:0:12}"
+          HASH=$(sha256sum syodep-continuous-win64.zip | cut -d' ' -f1)
+          jq --indent 4 --arg v "$VERSION" --arg h "$HASH" \
+            '.version = $v
+             | .architecture."64bit".hash = $h' \
+            bucket/syodep-continuous.json > bucket/syodep-continuous.json.tmp
+          mv bucket/syodep-continuous.json.tmp bucket/syodep-continuous.json
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bucket/syodep-continuous.json
+          # [skip ci] is load-bearing: this push lands on main, and without it
+          # the push would start another Release run that would publish, bump
+          # and push again, forever. The tagged-release bump needs no such
+          # marker because its own main push only reaches publish-continuous,
+          # which used to stop there.
+          git commit -m "Scoop: bump continuous manifest to ${GITHUB_SHA:0:12} [skip ci]"
+          # main can move between the freshness check above and this push. The
+          # bump touches one file nobody edits by hand, so rebasing onto the
+          # newer main is always a clean no-op merge; a newer commit gets its
+          # own run and overwrites this manifest anyway.
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            echo "main moved, rebasing the manifest bump (attempt ${attempt})"
+            git fetch origin main
+            git rebase origin/main
+          done
+          echo "could not push the continuous manifest bump" >&2
+          exit 1

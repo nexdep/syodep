@@ -34,6 +34,10 @@ scoop bucket add syodep https://github.com/nexdep/syodep
 scoop install syodep
 ```
 
+For the rolling build from `main` instead of the latest tagged release, install
+`syodep-continuous`. It runs as `syodep-continuous`, so it can sit alongside the
+stable install, and `scoop update syodep-continuous` picks up every new merge.
+
 ### Windows (installer)
 
 Download `syodep-vX.Y.Z-win64-setup.exe` from the
@@ -133,7 +137,7 @@ stored in SQLite at `~/.local/share/syodep/syodep.sqlite3` (Linux) or
 | `ui-qt/`                | Thin Qt 6 desktop shell (window, canvas, dialogs)    |
 | `docs/`                 | Architecture, commands, keybindings, config, roadmap… |
 | `config/`               | Documented sample configuration                      |
-| `bucket/`               | Scoop manifest (this repo is also a Scoop bucket)    |
+| `bucket/`               | Scoop manifests (this repo is also a Scoop bucket)   |
 
 Architecture rule: the Rust core never depends on Qt; the Qt shell contains
 no document logic. Details in `docs/architecture.md`.

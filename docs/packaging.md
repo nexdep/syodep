@@ -143,20 +143,50 @@ gh run download <run-id> -n syodep-x86_64-appimage
 
 ### Scoop (implemented)
 
-The repo doubles as a Scoop bucket: `bucket/syodep.json` points at the
-release zip (with `extract_dir`, `bin`, a Start Menu shortcut, and
-`checkver`/`autoupdate` metadata). Install:
+The repo doubles as a Scoop bucket, with one manifest per channel. Both point
+at the Windows zip (with `extract_dir`, `bin`, a Start Menu shortcut) and both
+are bumped by CI, committed to `main` by `github-actions[bot]`.
 
 ```powershell
 scoop bucket add syodep https://github.com/nexdep/syodep
-scoop install syodep
+scoop install syodep              # tagged releases
+scoop install syodep-continuous   # rolling build from main
 ```
 
-The `publish-release` job rewrites the manifest's `version`/`url`/`hash`
-(via `jq`) and commits the bump to `main` after every tag release, so
-`scoop update syodep` always finds the newest asset. The continuous
-prerelease does not update Scoop metadata. The manifest commit comes from
-`github-actions[bot]`.
+The two can be installed side by side: the continuous manifest shims
+`syodep-continuous` and names its shortcut "syodep (continuous)", so neither
+overwrites the other. They still share `%APPDATA%\syodep`, as every other
+Windows install method does.
+
+**`bucket/syodep.json`** — bumped by `publish-release` after every tag release.
+`jq` rewrites `version`/`url`/`hash`; the URL moves because each release gets
+its own versioned asset. Carries `checkver`/`autoupdate` metadata so Scoop's
+own tooling can also spot a new release.
+
+**`bucket/syodep-continuous.json`** — bumped by `publish-continuous` after
+every push to `main`. Only `version`/`hash` move: the download URL is fixed,
+because the `continuous` release assets are clobbered in place. That is also
+why the version has to change on every build — Scoop re-downloads on a version
+change, not on a moved hash, so a static version would pin every user to
+whatever zip they first fetched. The version is
+`<base>-continuous.<YYYYMMDD>.<HHMMSS>+<sha12>`; date and time are separate
+components because Scoop compares numeric version parts as 32-bit integers and
+a single `YYYYMMDDHHMMSS` stamp overflows that. No `checkver`/`autoupdate`:
+that timestamp is minted by CI and no regex over the releases API can
+reconstruct it.
+
+The continuous bump commit carries **`[skip ci]`**, and it is load-bearing.
+The commit lands on `main`, and a `main` push is exactly what triggers
+`publish-continuous` — without the marker the job would publish, bump, push,
+and trigger itself forever. The tagged-release bump needs no marker because
+its `main` push only ever reached `publish-continuous`, which used to stop
+there. Its push therefore still costs one extra all-platform build per
+release.
+
+Because `main` can move between `publish-continuous`'s freshness check and its
+push, the bump retries up to three times, rebasing onto the newer `main`. The
+rebase is always clean: nothing else edits that file, and a newer commit gets
+its own run that overwrites the manifest regardless.
 
 ### Windows installer (implemented)
 

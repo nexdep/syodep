@@ -108,7 +108,8 @@ the same code. See the development log.
   - ✅ Windows NSIS installer (per-user, silent-capable, opt-in PDF handler)
   - ⬜ Windows code signing (unsigned builds trip SmartScreen)
   - ✅ attach artifacts to GitHub releases on tag push
-  - ✅ Scoop bucket (`bucket/syodep.json`, auto-bumped on release)
+  - ✅ Scoop bucket, auto-bumped: `bucket/syodep.json` on release tags,
+    `bucket/syodep-continuous.json` on every main push
 - ✅ Linux Wayland-only shell with a probed OpenGL canvas, shared-code raster
   fallback, and Weston-based CI/AppImage smoke tests
 - ⬜ Command palette (`:` / `<C-p>`) listing the command registry
