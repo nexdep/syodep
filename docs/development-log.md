@@ -7,6 +7,26 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-08-06 — A manual dispatch could publish `preview` binaries as `continuous`
+
+`publish-continuous` gated on `github.ref == 'refs/heads/main'` alone, while
+both build jobs choose their channel on the event **and** the ref. A
+`workflow_dispatch` on `main` therefore built `preview`-channel binaries and
+then published them as the rolling `continuous` release — a release whose
+binaries report `<base>-preview+<commit>`. The comment above the condition had
+claimed since it was written that "manual dispatches stop at workflow
+artifacts"; the condition never implemented that.
+
+Pre-existing, but the Scoop work sharpened it: the same job now also bumps
+`bucket/syodep-continuous.json`, so a manual dispatch would have pointed
+`scoop install syodep-continuous` at a mislabelled build rather than merely
+mislabelling a release page. The fix adds the missing
+`github.event_name == 'push'`.
+
+Found while looking for a way to trigger a run during the Actions outage —
+dispatching `release.yml` looked like the obvious workaround until the channel
+expression was read alongside the job condition.
+
 ## 2026-08-06 — Preview publisher must not gate the continuous release
 
 Fixes a regression from the entry below. Folding the preview publisher into the
