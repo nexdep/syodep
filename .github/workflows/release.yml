@@ -247,9 +247,12 @@ jobs:
       contents: write
     steps:
       # main, not the tag: the Scoop manifest bump below is committed there.
+      # Full history because that bump rebases when main moves under it, and
+      # the default depth-1 clone has no merge base to rebase onto.
       - uses: actions/checkout@v5
         with:
           ref: main
+          fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
           name: syodep-win64
@@ -291,7 +294,23 @@ jobs:
           # what stops that job from re-triggering itself forever. Both
           # carry it so the rule is uniform instead of per-job reasoning.
           git commit -m "Scoop: bump manifest to ${GITHUB_REF_NAME} [skip ci]"
-          git push origin HEAD:main
+          # main can move between this job's checkout and its push. Rebasing
+          # is safe: nothing else edits this file, and its contents describe
+          # the tag's release assets, not the state of the tree it lands on.
+          # Unlike the continuous bump there is no later run to repair a lost
+          # push -- a dropped bump leaves `scoop install syodep` on the
+          # previous release until someone notices -- so it retries rather
+          # than failing on the first rejection.
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            echo "main moved, rebasing the manifest bump (attempt ${attempt})"
+            git fetch origin main
+            git rebase origin/main
+          done
+          echo "could not push the Scoop manifest bump" >&2
+          exit 1
 
   publish-continuous:
     name: Publish continuous prerelease

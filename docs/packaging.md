@@ -189,10 +189,17 @@ else. The cost of marking it: after a tagged release, `continuous` keeps
 pointing at the commit before the manifest bump until the next real merge —
 a JSON-only difference in a prerelease that changes on every merge anyway.
 
-Because `main` can move between `publish-continuous`'s freshness check and its
-push, the bump retries up to three times, rebasing onto the newer `main`. The
-rebase is always clean: nothing else edits that file, and a newer commit gets
-its own run that overwrites the manifest regardless.
+`main` can also move between a job's checkout and its push, which git rejects.
+Both bumps therefore retry up to three times, rebasing onto the newer `main`.
+The rebase is safe in either case: nothing else edits those files, and a
+manifest describes the assets its own run published, not the state of the tree
+it lands on. Both jobs check out with `fetch-depth: 0`, because the default
+depth-1 clone has no merge base to rebase onto.
+
+The race is much likelier for `publish-continuous`, which runs on every merge,
+but losing the push matters more for `publish-release`: a dropped continuous
+bump is repaired by the next merge's run, whereas a dropped release bump leaves
+`scoop install syodep` on the previous version until someone notices.
 
 ### Windows installer (implemented)
 

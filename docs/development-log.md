@@ -7,6 +7,29 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-08-06 — Rebase-retry on the tagged-release manifest bump
+
+`publish-release` now pushes its Scoop bump through the same three-attempt
+rebase loop `publish-continuous` uses, so both survive `main` moving between a
+job's checkout and its push — which git rejects outright. The rebase is safe in
+either job: nothing else edits those manifests, and a manifest describes the
+assets its own run published, not the state of the tree it lands on.
+
+The race is far likelier for `publish-continuous`, which runs on every merge,
+but a lost push costs more here: the next merge's run repairs a dropped
+continuous bump, whereas a dropped release bump leaves `scoop install syodep`
+on the previous version until a human notices.
+
+`publish-release`'s checkout gained `fetch-depth: 0`, matching
+`publish-continuous`. The default depth-1 clone is shallow, and rebasing needs
+a merge base in local history; the boundary commit usually happens to be the
+one required, but that is an accident of the common case and not something a
+once-per-release path should depend on.
+
+Both loops retry on *any* push failure, not just rejection — a permissions
+failure burns three attempts before exiting 1. Accepted: it terminates and
+fails loudly with git's own error in the log.
+
 ## 2026-08-06 — `[skip ci]` on the tagged-release manifest bump
 
 `publish-release`'s Scoop bump now carries `[skip ci]` too, so the rule is
@@ -23,10 +46,8 @@ prerelease keeps pointing at the commit before the manifest bump until the next
 real merge. That is a JSON-only difference in a prerelease that changes on
 every merge anyway.
 
-Not changed: the tagged-release bump still pushes without the rebase-retry loop
-`publish-continuous` uses. Its race window (`main` moving between checkout and
-push) exists but is far narrower — tags are rare and rarely concurrent with
-merges — and adding it was out of scope here.
+Not changed at the time: the tagged-release bump still pushed without the
+rebase-retry loop `publish-continuous` uses. Addressed in the entry above.
 
 ## 2026-08-06 — Scoop manifest for the continuous channel
 
