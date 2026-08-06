@@ -23,13 +23,13 @@ on:
 jobs:
   release-build-linux:
     name: Release build (Linux AppImage)
-    # The reusable workflow contains the direct-main preview publisher, whose
-    # job-level permission is validated even though release_call skips it.
+    # The reusable workflow publishes the rolling AppImage preview from this
+    # very build on main pushes, which needs write access to create the tag
+    # and release. On tags it publishes nothing and the grant goes unused.
     permissions:
       contents: write
     uses: ./.github/workflows/appimage.yml
     with:
-      release_call: true
       build_channel: ${{ startsWith(github.ref, 'refs/tags/v') && 'release' || (github.event_name == 'push' && github.ref == 'refs/heads/main' && 'continuous' || 'preview') }}
 
   release-build-windows:
@@ -38,6 +38,16 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
+      # CMake drives cargo from the repo root with no --target-dir override, so
+      # the workspace `target/` this caches is the one the build actually uses.
+      # Workspace crates stay uncached so the git-derived build identity is
+      # always recompiled; the win is vendored MuPDF and the dependency graph.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-windows-2022
+          cache-workspace-crates: "false"
+          cache-on-failure: "false"
+          cache-bin: "false"
       - name: Install Qt
         uses: jurplel/install-qt-action@v4
         with:

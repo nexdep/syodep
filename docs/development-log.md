@@ -7,6 +7,47 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-08-06 — One AppImage build per main push, and a Windows Rust cache
+
+`main` pushes were building the AppImage twice: once by `appimage.yml`'s own
+push trigger and once through `release.yml`'s call of the same reusable
+workflow. Same runner, same `ubuntu:22.04` container, same steps, same
+rust-cache key — the only difference was the `SYODEP_BUILD_CHANNEL` string.
+Measured on run 31054274959, the two builds took 2m22s and 2m38s in parallel.
+
+The stated reason for the second build was latency: get an AppImage out
+without waiting for the Windows job. That did not hold up. `release-build-linux`
+never waited on Windows either — only `publish-continuous` does, via its
+`needs:`. The job timings show the release call's build finishing at **2m30s**
+while the standalone run published the preview at **3m04s**, so publishing from
+the release call is if anything slightly *earlier*.
+
+`main` is now excluded from `appimage.yml`'s push trigger, and
+`publish-appimage-preview` no longer refuses to run under a release call. The
+`release_call` input existed only to gate that condition and is gone.
+
+`release-build-windows` also gained `Swatinem/rust-cache@v2`, which it never
+had while CI's Windows jobs did. CMake drives cargo from the repo root with no
+`--target-dir` override (`CMakeLists.txt:180`), so the workspace `target/` that
+rust-cache handles is the one the build uses. For scale: CI's cached Windows Qt
+job ran 11m11s against this job's uncached 13m25s on the same commit.
+
+### Decisions
+
+- **The `main` preview asset changes channel**, `preview` → `continuous`,
+  because it is now cut from the release pipeline's build. That is what it
+  always was in substance — the same binary `continuous` publishes ~11 minutes
+  later. Feature-branch and manual previews stay `preview`.
+- **Docs-only `main` pushes now publish a preview too**, since `release.yml`
+  has no path filter. No extra build: that push already built the AppImage.
+
+### Not verified yet
+
+GitHub Actions was in a major outage when this landed, so the run for the
+preceding commit was cancelled with no runner ever assigned. The before
+numbers above are real, from completed runs; the after numbers still need a
+healthy run to confirm.
+
 ## 2026-08-06 — Rebase-retry on the tagged-release manifest bump
 
 `publish-release` now pushes its Scoop bump through the same three-attempt

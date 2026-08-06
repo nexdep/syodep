@@ -116,18 +116,27 @@ shared-memory backing store still prevents startup. A forced OpenGL renderer
 also exits when the one-frame probe fails; `auto` and `raster` remain usable in
 that case when the Wayland raster path works.
 
-For a Linux-only development build, push a branch change under `crates/`,
-`ui-qt/`, `packaging/`, `scripts/`, or `.github/workflows/`; **AppImage
-Preview** runs
-automatically. On `main`, it intentionally builds alongside the release
-workflow so its downloadable artifact is ready as soon as the Linux job
-finishes, without waiting for the Windows build and `continuous` publication.
-After a successful automatic `main` preview, the raw AppImage is available at
+For a Linux-only development build, push a **feature branch** change under
+`crates/`, `ui-qt/`, `packaging/`, `scripts/`, or `.github/workflows/`;
+**AppImage Preview** runs automatically and leaves a downloadable workflow
+artifact.
+
+`main` is deliberately excluded from that trigger. It reaches the same builder
+through `release.yml`, which publishes the preview from that build rather than
+running a second, byte-identical one. Nothing is lost by doing so: the AppImage
+job never waited on Windows in the first place — only `publish-continuous`
+does — so the asset appears at the same point it always did. The raw AppImage
+lands at
 `https://github.com/nexdep/syodep/releases/tag/appimage-preview` as
 `syodep-appimage-preview-x86_64.AppImage`. This rolling prerelease contains
 only the fast Linux asset; `continuous` remains the later, all-platform
-prerelease. Manual and feature-branch previews remain downloadable workflow
-artifacts.
+prerelease.
+
+One consequence: the `main` preview asset is now built on the `continuous`
+channel, so it reports `<base>-continuous+<commit>` rather than
+`<base>-preview+<commit>`. It is the same binary that reaches `continuous`
+once Windows finishes, published early — which is what the preview always
+was in substance. Feature-branch and manual builds are still `preview`.
 You can also open **Actions → AppImage Preview → Run workflow**, select any
 branch to build, and download the
 `syodep-x86_64-appimage` artifact when the run finishes. The preview is not a
@@ -246,8 +255,8 @@ with a build channel and the first 12 characters of the Git commit:
 |---|---|
 | regular version tag `v0.16.0` | `0.16.0` |
 | versioned prerelease tag `v0.16.0-rc.1` | `0.16.0-rc.1` |
-| rolling `continuous` release | `0.16.0-continuous+012345abcdef` |
-| AppImage/manual preview | `0.16.0-preview+012345abcdef` |
+| rolling `continuous` release, and the `main` AppImage preview cut from it | `0.16.0-continuous+012345abcdef` |
+| feature-branch or manual AppImage preview | `0.16.0-preview+012345abcdef` |
 | ordinary branch or local checkout | `0.16.0-dev+012345abcdef` |
 
 If the Cargo base is already a prerelease, a non-release channel extends it:

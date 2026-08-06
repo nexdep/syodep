@@ -3,24 +3,20 @@ name: AppImage Preview
 on:
   workflow_call:
     inputs:
-      release_call:
-        description: "True when release.yml invokes the shared builder"
-        required: false
-        type: boolean
-        default: false
       build_channel:
         description: "Version identity channel: release, continuous, or preview"
         required: false
         type: string
         default: preview
   workflow_dispatch:
-  # Main also calls this builder through release.yml. Run a second, independent
-  # preview there so a downloadable AppImage is available as soon as Linux
-  # finishes instead of waiting for the Windows release job. Restrict this to
-  # branches: tagged releases use only release.yml's builder.
+  # Feature branches only. main reaches this builder through release.yml, which
+  # publishes the preview from that same build; a standalone run here would
+  # rebuild a byte-identical AppImage for nothing. Neither waits on the Windows
+  # job, so publishing from the release call costs no latency.
   push:
     branches:
       - "**"
+      - "!main"
     paths:
       - "crates/**"
       - "ui-qt/**"
@@ -183,9 +179,11 @@ jobs:
 
   publish-appimage-preview:
     name: Publish raw AppImage preview
-    # Direct main pushes publish a raw release asset. release.yml passes
-    # release_call=true, so its reuse of this builder never races this job.
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && !inputs.release_call
+    # Publishes whichever build of main produced this AppImage -- in practice
+    # release.yml's call, since the push trigger above excludes main. Tag
+    # pushes never match (github.ref is a tag), so a versioned release
+    # publishes no preview, and neither does workflow_dispatch.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: build-appimage
     runs-on: ubuntu-24.04
     permissions:
