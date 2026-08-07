@@ -68,7 +68,7 @@ cargo test -p syodep-core
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 
-# release/continuous/preview/development version formatting
+# release/continuous/development version formatting
 cmake -P scripts/test-build-identity.cmake
 
 # shell smoke test (after a CMake build)

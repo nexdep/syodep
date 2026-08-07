@@ -16,9 +16,6 @@ assert_build_version(
     "0.16.0-continuous+abcdef123456"
     "0.16.0" "continuous" "abcdef123456")
 assert_build_version(
-    "0.16.0-preview+abcdef123456"
-    "0.16.0" "preview" "abcdef123456")
-assert_build_version(
     "0.16.0-dev+abcdef123456"
     "0.16.0" "development" "abcdef123456")
 
@@ -30,7 +27,7 @@ assert_build_version(
     "0.16.0-rc.1.continuous+abcdef123456"
     "0.16.0-rc.1" "continuous" "abcdef123456")
 assert_build_version(
-    "0.16.0-preview+vendor.abcdef123456"
-    "0.16.0+vendor" "preview" "abcdef123456")
+    "0.16.0-dev+vendor.abcdef123456"
+    "0.16.0+vendor" "development" "abcdef123456")
 
 message(STATUS "build identity tests OK")

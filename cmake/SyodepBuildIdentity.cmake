@@ -14,7 +14,6 @@ function(syodep_format_build_version base_version channel commit out_var)
     if(channel STREQUAL "release")
         set(version "${base_version}")
     elseif(channel STREQUAL "continuous"
-            OR channel STREQUAL "preview"
             OR channel STREQUAL "development")
         if(NOT commit MATCHES "^[0-9A-Za-z-]+$")
             message(FATAL_ERROR

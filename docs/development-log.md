@@ -7,6 +7,68 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-08-07 — One rolling channel, published per platform
+
+`main` pushes used to publish the Linux AppImage twice, from a single build, to
+two releases: `appimage-preview` at ~3 min (Linux only) and `continuous` at
+~8.5 min (both assets, gated on the Windows build). Both jobs downloaded the
+same `syodep-x86_64-appimage` artifact and only renamed the file, so the two
+AppImages were byte-identical. The split existed purely to give Linux a fast
+download without waiting on Windows.
+
+It also left the `appimage-preview` tag holding binaries built on the
+`continuous` channel: `release.yml` picks the channel by ref, and the preview
+publisher gated on the identical `push` + `main` condition, so a release named
+"preview" never contained — and never could contain — a `-preview+<sha>` binary.
+The entry below documented that mismatch rather than removing it.
+
+Restructured so the axis is platform, not latency:
+
+- `publish-continuous-linux` needs only the Linux build and uploads
+  `syodep-continuous-x86_64.AppImage`.
+- `publish-continuous-windows` needs only the Windows build, uploads
+  `syodep-continuous-win64.zip`, and keeps the Scoop bump.
+- `publish-appimage-preview` and the `appimage-preview` tag are gone. The
+  AppImage now reaches `continuous` at the speed the preview used to, so the
+  second release earned nothing.
+
+The `preview` build channel goes with it. It only ever reached workflow
+artifacts, and `development` already meant the same thing — "not a release, not
+`main`". Branch and dispatch builds now report `-dev+<sha>`, and the enum is
+`auto | release | continuous | development`. Workflows pass `development`
+explicitly rather than falling back to `auto`, so a build's channel never
+depends on how the runner happened to check the tree out.
+
+Consequence worth remembering: **`continuous` is no longer atomic across
+platforms.** Between the two uploads the release holds a Linux build from this
+push and a Windows build from the previous one, and with pushes closer together
+than the Windows build takes, the zip lags further — its freshness check skips
+any run whose commit is no longer `origin/main`. That is the deliberate trade
+for latency, and in one respect it beats the old behaviour: previously a
+superseded run skipped the whole job and *both* assets went stale together.
+The release notes state it, and every binary carries its own commit.
+
+Both publishers call the new `scripts/ensure-continuous-release.sh` to move the
+tag and create-or-update the release. It has to be idempotent and concurrency
+safe: on a repository with no `continuous` release both callers race to create
+it, so it tolerates losing that race and verifies the result instead of trusting
+its own `gh release create`. The notes it writes deliberately carry no commit
+line — any single one would be wrong for one of the two assets, and a
+read-modify-write of a per-platform line would race between the callers.
+
+Each publisher gets its own `concurrency` group. Sharing one would have the two
+cancelling each other, since both set `cancel-in-progress`.
+
+Asset names and the `continuous` tag are unchanged on purpose:
+`bucket/syodep-continuous.json` hardcodes its download URL and CI's `jq` bump
+rewrites only `version`/`hash`, so renaming either would 404 every installed
+`syodep-continuous` until someone hand-edited the manifest.
+
+Tests: `scripts/test-build-identity.cmake` drops its `preview` assertions, but
+the `0.16.0+vendor` base-metadata case is kept and moved to `development` so
+that path stays covered. `appimage.yml` already greps `--check` output against
+`build/syodep-version.txt`, so a channel mismatch fails the build on its own.
+
 ## 2026-08-06 — A manual dispatch could publish `preview` binaries as `continuous`
 
 `publish-continuous` gated on `github.ref == 'refs/heads/main'` alone, while

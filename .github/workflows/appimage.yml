@@ -1,18 +1,18 @@
-name: AppImage Preview
+name: AppImage Build
 
 on:
   workflow_call:
     inputs:
       build_channel:
-        description: "Version identity channel: release, continuous, or preview"
+        description: "Version identity channel: release, continuous, or development"
         required: false
         type: string
-        default: preview
+        default: development
   workflow_dispatch:
   # Feature branches only. main reaches this builder through release.yml, which
-  # publishes the preview from that same build; a standalone run here would
-  # rebuild a byte-identical AppImage for nothing. Neither waits on the Windows
-  # job, so publishing from the release call costs no latency.
+  # publishes the AppImage from that same build; a standalone run here would
+  # rebuild a byte-identical AppImage for nothing. That publisher waits on this
+  # Linux build alone, so routing main through release.yml costs no latency.
   push:
     branches:
       - "**"
@@ -71,7 +71,7 @@ jobs:
           cache-bin: "false"
       - name: Build (release)
         env:
-          BUILD_CHANNEL: ${{ inputs.build_channel || 'preview' }}
+          BUILD_CHANNEL: ${{ inputs.build_channel || 'development' }}
         run: |
           cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DSYODEP_BUILD_CHANNEL="$BUILD_CHANNEL"
@@ -177,8 +177,8 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-# The preview publisher lives in release.yml, not here. main is the only ref
-# it ever published for, and main no longer triggers this workflow directly --
-# so as a job here it would be unreachable, and as part of this workflow its
-# failure would fail the caller's `uses:` job and block the continuous release
-# behind it. In release.yml it is a sibling of that release instead.
+# The continuous publishers live in release.yml, not here. main is the only ref
+# they ever publish for, and main no longer triggers this workflow directly --
+# so as jobs here they would be unreachable, and as part of this workflow a
+# publish failure would fail the caller's `uses:` job and take the continuous
+# release down with it. In release.yml they are siblings of that build instead.

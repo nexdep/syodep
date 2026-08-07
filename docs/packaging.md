@@ -27,7 +27,7 @@ a debug config links `/MDd` against MuPDF's `/MD` objects and fails.
 Target artifacts are coordinated by `.github/workflows/release.yml` on `v*`
 tags and on pushes to `main` for the rolling continuous prerelease. Its Linux
 job calls the reusable `.github/workflows/appimage.yml` builder; the same
-builder automatically runs on relevant branch pushes, including `main`, and
+builder automatically runs on relevant branch pushes, excluding `main`, and
 can be dispatched manually when only a test AppImage is needed.
 
 | Artifact | Tooling | Status |
@@ -56,10 +56,13 @@ The release job (`release-build-windows` in `release.yml`) additionally:
 
 On `v*` tag pushes a final job (`publish-release`) creates a GitHub
 release and attaches the zip as `syodep-vX.Y.Z-win64.zip` and the
-AppImage as `syodep-vX.Y.Z-x86_64.AppImage`, with generated notes.
-On `main` pushes, `publish-continuous` updates the rolling prerelease at
-`https://github.com/nexdep/syodep/releases/tag/continuous` with
-`syodep-continuous-win64.zip` and `syodep-continuous-x86_64.AppImage`.
+AppImage as `syodep-vX.Y.Z-x86_64.AppImage`, with generated notes. That job
+waits on both builds, because a versioned release has to be complete.
+
+On `main` pushes the rolling prerelease at
+`https://github.com/nexdep/syodep/releases/tag/continuous` is updated by two
+independent jobs, one per platform, neither waiting on the other — see
+[Rolling continuous release](#rolling-continuous-release-implemented).
 Manual `release.yml` runs stop at workflow artifacts.
 
 ### Linux AppImage (implemented)
@@ -118,46 +121,64 @@ that case when the Wayland raster path works.
 
 For a Linux-only development build, push a **feature branch** change under
 `crates/`, `ui-qt/`, `packaging/`, `scripts/`, or `.github/workflows/`;
-**AppImage Preview** runs automatically and leaves a downloadable workflow
-artifact.
-
-`main` is deliberately excluded from that trigger. It reaches the same builder
-through `release.yml`, which publishes the preview from that build rather than
-running a second, byte-identical one. Nothing is lost by doing so: the AppImage
-job never waited on Windows in the first place — only `publish-continuous`
-does — so the asset appears at the same point it always did.
-
-`publish-appimage-preview` lives in `release.yml` as a **sibling** of
-`publish-continuous`, not inside the reusable AppImage workflow, and depends
-only on the Linux build. That placement is deliberate. A job inside the
-reusable workflow contributes to the caller's `uses:` job result, so a failing
-preview publisher fails `release-build-linux` and takes the continuous release
-down with it — observed on `a15d15f`, where a preview job that could not get a
-runner skipped `publish-continuous` entirely. A preview is a convenience and
-must never be able to block the real release. The raw AppImage
-lands at
-`https://github.com/nexdep/syodep/releases/tag/appimage-preview` as
-`syodep-appimage-preview-x86_64.AppImage`. This rolling prerelease contains
-only the fast Linux asset; `continuous` remains the later, all-platform
-prerelease.
-
-One consequence: the `main` preview asset is now built on the `continuous`
-channel, so it reports `<base>-continuous+<commit>` rather than
-`<base>-preview+<commit>`. It is the same binary that reaches `continuous`
-once Windows finishes, published early — which is what the preview always
-was in substance. Feature-branch and manual builds are still `preview`.
-You can also open **Actions → AppImage Preview → Run workflow**, select any
-branch to build, and download the
-`syodep-x86_64-appimage` artifact when the run finishes. The preview is not a
-reduced package: it uses the exact release builder and both smoke tests. The
-artifact is retained for 14 days and does not create or update a GitHub
-release. The equivalent CLI flow is:
+**AppImage Build** runs automatically and leaves a downloadable workflow
+artifact. You can also open **Actions → AppImage Build → Run workflow**, select
+any branch, and download the `syodep-x86_64-appimage` artifact when the run
+finishes. This is not a reduced package: it uses the exact release builder and
+both smoke tests. The artifact is retained for 14 days and does not create or
+update a GitHub release. The equivalent CLI flow is:
 
 ```bash
 gh workflow run appimage.yml --ref <branch>
 gh run watch
 gh run download <run-id> -n syodep-x86_64-appimage
 ```
+
+`main` is deliberately excluded from that trigger. It reaches the same builder
+through `release.yml`, which publishes the AppImage from that build rather than
+running a second, byte-identical one.
+
+### Rolling continuous release (implemented)
+
+Every push to `main` refreshes the prerelease at
+`https://github.com/nexdep/syodep/releases/tag/continuous`, through two jobs
+that are siblings rather than a chain:
+
+| Job | Waits on | Publishes | Typical latency |
+|---|---|---|---|
+| `publish-continuous-linux` | Linux build only | `syodep-continuous-x86_64.AppImage` | ~3 min |
+| `publish-continuous-windows` | Windows build only | `syodep-continuous-win64.zip`, Scoop bump | ~8.5 min |
+
+Both live in `release.yml` rather than inside the reusable AppImage workflow.
+That placement is deliberate: a job inside the reusable workflow contributes to
+the caller's `uses:` job result, so a failing publisher fails
+`release-build-linux` and takes the whole continuous release down with it —
+observed on `a15d15f`, where a publisher that could not get a runner skipped the
+continuous release entirely. Neither half may be able to block the other.
+
+Each job carries its own `concurrency` group. Sharing one would have the two
+cancelling each other, since both set `cancel-in-progress`.
+
+Both call `scripts/ensure-continuous-release.sh` to move the `continuous` tag
+and create-or-update the release before uploading. That script has to be
+idempotent and safe to run concurrently: on a repository with no `continuous`
+release yet both callers race to create it, so it tolerates losing that race and
+verifies the result rather than trusting its own create.
+
+#### The two assets can be from different commits
+
+Publishing each platform as soon as it is ready means the release is no longer
+atomic across platforms. Between the AppImage upload (~3 min) and the zip upload
+(~8.5 min) the release holds a Linux build from this push and a Windows build
+from the previous one. With pushes closer together than the Windows build takes,
+the zip can lag further: its freshness check skips any run whose commit is no
+longer `origin/main`, so it stays put until a run survives to the end.
+
+This is the deliberate trade for latency. Previously the two assets always
+matched each other, but a superseded run skipped the whole job and *both* went
+stale together; now Linux is always as current as possible and Windows may trail
+it. The release notes say so, and every binary reports the commit it was built
+from via `syodep --version`, so an asset's provenance is never ambiguous.
 
 ### Scoop (implemented)
 
@@ -181,8 +202,8 @@ Windows install method does.
 its own versioned asset. Carries `checkver`/`autoupdate` metadata so Scoop's
 own tooling can also spot a new release.
 
-**`bucket/syodep-continuous.json`** — bumped by `publish-continuous` after
-every push to `main`. Only `version`/`hash` move: the download URL is fixed,
+**`bucket/syodep-continuous.json`** — bumped by `publish-continuous-windows`
+after every push to `main`. Only `version`/`hash` move: the download URL is fixed,
 because the `continuous` release assets are clobbered in place. That is also
 why the version has to change on every build — Scoop re-downloads on a version
 change, not on a moved hash, so a static version would pin every user to
@@ -196,9 +217,9 @@ reconstruct it.
 Both bump commits carry **`[skip ci]`**: CI's own manifest commits never
 trigger CI.
 
-For `publish-continuous` the marker is load-bearing. The commit lands on
-`main`, and a `main` push is exactly what triggers `publish-continuous` —
-without it the job would publish, bump, push, and re-trigger itself forever.
+For `publish-continuous-windows` the marker is load-bearing. The commit lands
+on `main`, and a `main` push is exactly what triggers that job — without it it
+would publish, bump, push, and re-trigger itself forever.
 
 For `publish-release` it is only economy. That push used to start a full
 Linux + Windows + installer run over a one-line JSON change, and the rolling
@@ -214,7 +235,8 @@ manifest describes the assets its own run published, not the state of the tree
 it lands on. Both jobs check out with `fetch-depth: 0`, because the default
 depth-1 clone has no merge base to rebase onto.
 
-The race is much likelier for `publish-continuous`, which runs on every merge,
+The race is much likelier for `publish-continuous-windows`, which runs on every
+merge,
 but losing the push matters more for `publish-release`: a dropped continuous
 bump is repaired by the next merge's run, whereas a dropped release bump leaves
 `scoop install syodep` on the previous version until someone notices.
@@ -264,18 +286,20 @@ with a build channel and the first 12 characters of the Git commit:
 |---|---|
 | regular version tag `v0.16.0` | `0.16.0` |
 | versioned prerelease tag `v0.16.0-rc.1` | `0.16.0-rc.1` |
-| rolling `continuous` release, and the `main` AppImage preview cut from it | `0.16.0-continuous+012345abcdef` |
-| feature-branch or manual AppImage preview | `0.16.0-preview+012345abcdef` |
-| ordinary branch or local checkout | `0.16.0-dev+012345abcdef` |
+| rolling `continuous` release, both assets | `0.16.0-continuous+012345abcdef` |
+| feature-branch or manual AppImage build, or a local checkout | `0.16.0-dev+012345abcdef` |
 
 If the Cargo base is already a prerelease, a non-release channel extends it:
 `0.16.0-rc.1.continuous+012345abcdef`. Thus every identity remains valid
-SemVer and a rolling or preview binary cannot claim to be the regular release.
+SemVer and a rolling or development binary cannot claim to be the regular
+release.
 
-`SYODEP_BUILD_CHANNEL` is `auto` for ordinary builds: a clean checkout exactly
-at `v<base-version>` resolves to `release`; everything else resolves to
-`development`. Packaging workflows pass `release`, `continuous`, or `preview`
-explicitly. CMake writes the result to `build/syodep-version.txt`, defines it
+`SYODEP_BUILD_CHANNEL` accepts `auto`, `release`, `continuous` and
+`development`. It is `auto` for ordinary builds: a clean checkout exactly at
+`v<base-version>` resolves to `release`; everything else resolves to
+`development`. Packaging workflows pass `release`, `continuous`, or
+`development` explicitly, so a build's channel never depends on how the runner
+happened to check the tree out. CMake writes the result to `build/syodep-version.txt`, defines it
 for the Qt shell and Windows version-resource strings, and injects the same
 value into the Rust build for `syo_core_version`. The installer reads that
 generated file too, so its DisplayVersion agrees with its binary.
@@ -294,5 +318,5 @@ shipped 0.4.0 binaries reported `syodep 0.3.0` while their own core reported
 `0.4.0`. Nothing caught it.
 
 Tags use `vX.Y.Z` or a Cargo-compatible prerelease such as `vX.Y.Z-rc.1`. The
-non-version `continuous` and `appimage-preview` tags are force-updated by CI to
-point at rolling builds and must not be treated as semantic versions.
+non-version `continuous` tag is force-updated by CI to point at the newest
+rolling build and must not be treated as a semantic version.
