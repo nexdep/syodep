@@ -1,5 +1,7 @@
 # syodep
 
+<!-- ci-timing-test: trivial commit to time the release workflow -->
+
 A keyboard-first, Vim-like academic PDF reader and annotation tool for
 Windows and Linux. Inspired by [Sioyek](https://github.com/ahrm/sioyek)
 as a product, built clean-room on a different architecture.
