@@ -40,12 +40,12 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
 # add a channel and commit to that base so a rolling binary cannot masquerade
 # as the regular release with the same Cargo version.
 set(SYODEP_BUILD_CHANNEL "auto" CACHE STRING
-    "User-visible build channel: auto, release, continuous, preview, or development")
+    "User-visible build channel: auto, release, continuous, or development")
 set_property(CACHE SYODEP_BUILD_CHANNEL PROPERTY STRINGS
-    auto release continuous preview development)
+    auto release continuous development)
 string(TOLOWER "${SYODEP_BUILD_CHANNEL}" _syodep_requested_channel)
 if(NOT _syodep_requested_channel MATCHES
-        "^(auto|release|continuous|preview|development)$")
+        "^(auto|release|continuous|development)$")
     message(FATAL_ERROR
         "unknown SYODEP_BUILD_CHANNEL='${SYODEP_BUILD_CHANNEL}'")
 endif()

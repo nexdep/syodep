@@ -23,13 +23,13 @@ on:
 jobs:
   release-build-linux:
     name: Release build (Linux AppImage)
-    # Pure builder: the preview publisher that used to live inside it is now
-    # publish-appimage-preview below, so this call needs no write access.
+    # Pure builder: the publisher that used to live inside it is now
+    # publish-continuous-linux below, so this call needs no write access.
     permissions:
       contents: read
     uses: ./.github/workflows/appimage.yml
     with:
-      build_channel: ${{ startsWith(github.ref, 'refs/tags/v') && 'release' || (github.event_name == 'push' && github.ref == 'refs/heads/main' && 'continuous' || 'preview') }}
+      build_channel: ${{ startsWith(github.ref, 'refs/tags/v') && 'release' || (github.event_name == 'push' && github.ref == 'refs/heads/main' && 'continuous' || 'development') }}
 
   release-build-windows:
     name: Release build (Windows portable zip)
@@ -64,7 +64,7 @@ jobs:
                     $env:GITHUB_REF -eq 'refs/heads/main') {
             $channel = 'continuous'
           } else {
-            $channel = 'preview'
+            $channel = 'development'
           }
           cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release `
             "-DSYODEP_BUILD_CHANNEL=$channel"
@@ -299,9 +299,9 @@ jobs:
           git add bucket/syodep.json
           # [skip ci]: CI's own manifest commits never trigger CI. Here that
           # only saves a full Linux + Windows + installer rebuild of a
-          # one-line JSON change; in publish-continuous the same marker is
-          # what stops that job from re-triggering itself forever. Both
-          # carry it so the rule is uniform instead of per-job reasoning.
+          # one-line JSON change; in publish-continuous-windows the same
+          # marker is what stops that job from re-triggering itself forever.
+          # Both carry it so the rule is uniform instead of per-job reasoning.
           git commit -m "Scoop: bump manifest to ${GITHUB_REF_NAME} [skip ci]"
           # main can move between this job's checkout and its push. Rebasing
           # is safe: nothing else edits this file, and its contents describe
@@ -321,25 +321,31 @@ jobs:
           echo "could not push the Scoop manifest bump" >&2
           exit 1
 
-  publish-appimage-preview:
-    name: Publish raw AppImage preview
-    # The fast Linux asset: cut from the same build the continuous release will
-    # use, but published as soon as Linux finishes instead of waiting on the
-    # ~14-minute Windows job. Hence `needs` names only the Linux build.
+  publish-continuous-linux:
+    name: Publish continuous prerelease (Linux)
+    # The AppImage half of the rolling release. `needs` names only the Linux
+    # build, so the AppImage goes out as soon as that finishes instead of
+    # waiting on the ~8-minute Windows job.
     #
-    # A sibling of publish-continuous rather than something it depends on. When
-    # this job lived inside the reusable AppImage workflow, a failure here
+    # A sibling of the Windows publisher rather than something it depends on.
+    # When this job lived inside the reusable AppImage workflow, a failure here
     # failed the caller's release-build-linux job and took the whole continuous
-    # release with it -- observed on a15d15f, where an unrunnable preview job
-    # skipped publish-continuous entirely. A preview is a convenience; it must
-    # never be able to block the real release.
+    # release with it -- observed on a15d15f. Neither half may be able to block
+    # the other.
+    #
+    # The event check is load-bearing, not decoration. Both build jobs pick
+    # their channel on event *and* ref, so a workflow_dispatch on main builds
+    # `development` binaries; gating this job on the ref alone would publish
+    # those as `continuous` -- a release whose binaries report `-dev+sha`.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: release-build-linux
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+    # A group of its own. Sharing one with the Windows publisher would have the
+    # two cancelling each other, since both carry cancel-in-progress.
     concurrency:
-      group: appimage-preview
+      group: release-continuous-linux
       cancel-in-progress: true
     steps:
       - uses: actions/checkout@v5
@@ -354,75 +360,47 @@ jobs:
             echo "publish=true" >> "$GITHUB_OUTPUT"
           else
             echo "publish=false" >> "$GITHUB_OUTPUT"
-            echo "Skipping stale AppImage preview for $GITHUB_SHA; latest main is $latest_main."
+            echo "Skipping stale continuous AppImage for $GITHUB_SHA; latest main is $latest_main."
           fi
       - uses: actions/download-artifact@v4
         if: steps.freshness.outputs.publish == 'true'
         with:
           name: syodep-x86_64-appimage
-      - name: Update raw AppImage prerelease
+      - name: Publish the AppImage
         if: steps.freshness.outputs.publish == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          asset="syodep-appimage-preview-x86_64.AppImage"
-          mv syodep-x86_64.AppImage "$asset"
-
-          built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          {
-            echo "Fast Linux AppImage preview from main."
-            echo
-            echo "- Commit: ${GITHUB_SHA}"
-            echo "- Branch: ${GITHUB_REF_NAME}"
-            echo "- Workflow run: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-            echo "- Built at: ${built_at}"
-          } > appimage-preview-notes.md
-
-          git tag -f appimage-preview "$GITHUB_SHA"
-          git push origin refs/tags/appimage-preview --force
-
-          if gh release view appimage-preview --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release edit appimage-preview \
-              --repo "$GITHUB_REPOSITORY" \
-              --title "syodep AppImage preview" \
-              --notes-file appimage-preview-notes.md \
-              --prerelease
-          else
-            gh release create appimage-preview \
-              --repo "$GITHUB_REPOSITORY" \
-              --verify-tag \
-              --title "syodep AppImage preview" \
-              --notes-file appimage-preview-notes.md \
-              --prerelease
-          fi
-
-          release_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/appimage-preview" --jq .id)"
-          gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
-            -f make_latest=false \
-            --silent
-
-          gh release upload appimage-preview \
+          mv syodep-x86_64.AppImage syodep-continuous-x86_64.AppImage
+          scripts/ensure-continuous-release.sh
+          gh release upload continuous \
             --repo "$GITHUB_REPOSITORY" \
             --clobber \
-            "$asset"
+            syodep-continuous-x86_64.AppImage
 
-  publish-continuous:
-    name: Publish continuous prerelease
+  publish-continuous-windows:
+    name: Publish continuous prerelease (Windows)
+    # The zip half of the rolling release, plus the Scoop manifest that points
+    # at it. `needs` names only the Windows build; the AppImage published by
+    # publish-continuous-linux has usually been live for several minutes by the
+    # time this runs, so the two assets can legitimately be from different
+    # commits. The release notes say so.
+    #
     # Only main pushes update the rolling prerelease. Tag pushes use
     # publish-release above; manual dispatches stop at workflow artifacts.
     #
     # The event check is load-bearing, not decoration. Both build jobs pick
     # their channel on event *and* ref, so a workflow_dispatch on main builds
-    # `preview` binaries; gating this job on the ref alone would publish those
-    # as `continuous` -- a release whose binaries report `-preview+sha` -- and
-    # now point the Scoop manifest at them too.
+    # `development` binaries; gating this job on the ref alone would publish
+    # those as `continuous` -- a release whose binaries report `-dev+sha` --
+    # and now point the Scoop manifest at them too.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [release-build-windows, release-build-linux]
+    needs: release-build-windows
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     concurrency:
-      group: release-continuous
+      group: release-continuous-windows
       cancel-in-progress: true
     steps:
       - uses: actions/checkout@v5
@@ -437,62 +415,23 @@ jobs:
             echo "publish=true" >> "$GITHUB_OUTPUT"
           else
             echo "publish=false" >> "$GITHUB_OUTPUT"
-            echo "Skipping stale continuous release for $GITHUB_SHA; latest main is $LATEST_MAIN."
+            echo "Skipping stale continuous Windows zip for $GITHUB_SHA; latest main is $LATEST_MAIN."
           fi
       - uses: actions/download-artifact@v4
         if: steps.freshness.outputs.publish == 'true'
         with:
           name: syodep-win64
-      - uses: actions/download-artifact@v4
-        if: steps.freshness.outputs.publish == 'true'
-        with:
-          name: syodep-x86_64-appimage
-      - name: Update rolling continuous release
+      - name: Publish the Windows zip
         if: steps.freshness.outputs.publish == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           mv syodep-win64.zip syodep-continuous-win64.zip
-          mv syodep-x86_64.AppImage syodep-continuous-x86_64.AppImage
-
-          BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          {
-            echo "Rolling build from main."
-            echo
-            echo "- Commit: ${GITHUB_SHA}"
-            echo "- Branch: ${GITHUB_REF_NAME}"
-            echo "- Workflow run: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-            echo "- Built at: ${BUILT_AT}"
-          } > continuous-notes.md
-
-          git tag -f continuous "${GITHUB_SHA}"
-          git push origin refs/tags/continuous --force
-
-          if gh release view continuous --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            gh release edit continuous \
-              --repo "${GITHUB_REPOSITORY}" \
-              --title "syodep continuous" \
-              --notes-file continuous-notes.md \
-              --prerelease
-          else
-            gh release create continuous \
-              --repo "${GITHUB_REPOSITORY}" \
-              --verify-tag \
-              --title "syodep continuous" \
-              --notes-file continuous-notes.md \
-              --prerelease
-          fi
-
-          RELEASE_ID="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/continuous" --jq .id)"
-          gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" \
-            -f make_latest=false \
-            --silent
-
+          scripts/ensure-continuous-release.sh
           gh release upload continuous \
             --repo "${GITHUB_REPOSITORY}" \
             --clobber \
-            syodep-continuous-win64.zip \
-            syodep-continuous-x86_64.AppImage
+            syodep-continuous-win64.zip
       # Keep `scoop install/update syodep-continuous` pointing at the asset
       # that was just clobbered in place. Only the hash actually moves -- the
       # download URL is fixed -- and Scoop re-downloads solely on a version
