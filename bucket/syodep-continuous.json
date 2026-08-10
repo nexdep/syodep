@@ -1,12 +1,12 @@
 {
-    "version": "0.15.1-continuous.20260810.154622+94c82c2d7d24",
+    "version": "0.15.1-continuous.20260810.163019+b28c5c49bf33",
     "description": "Keyboard-first, Vim-like academic PDF reader (rolling build from main)",
     "homepage": "https://github.com/nexdep/syodep",
     "license": "AGPL-3.0-or-later",
     "architecture": {
         "64bit": {
             "url": "https://github.com/nexdep/syodep/releases/download/continuous/syodep-continuous-win64.zip",
-            "hash": "2af7d2b1ea4abc62604f85fa1f28e01b53ed95e002f62c164cb18a8516958ef9"
+            "hash": "c13c527ff246d564a8e214d4c5f5d37ab7218b55a33996ffda421d29af8a2f03"
         }
     },
     "extract_dir": "syodep-win64",
