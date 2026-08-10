@@ -39,7 +39,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
-for _ in {1..100}; do
+# Cold llvmpipe startup can cross five seconds on a fresh CI runner. Keep the
+# wait bounded, but leave enough headroom for shader/driver initialization.
+for _ in {1..300}; do
     if [[ -S "$runtime_dir/$WAYLAND_DISPLAY" ]]; then
         break
     fi
