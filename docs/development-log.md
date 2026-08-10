@@ -7,6 +7,26 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-08-10 — Restore public repository visibility for distribution
+
+The GitHub repository had been made private, which silently broke both public
+distribution paths that use it directly. Existing Scoop users could not refresh
+the `syodep` bucket, new users could not add it, and unauthenticated downloads
+of the rolling `continuous` release were unavailable. A stale Windows bucket
+therefore still contained only `syodep.json` and reported "Couldn't find
+manifest for 'syodep-continuous'" even though the manifest existed on `main`.
+
+Restored `nexdep/syodep` to public visibility. Public visibility is now recorded
+as a packaging invariant alongside the Scoop bucket documentation: the bucket
+and release assets are intentionally anonymous installation endpoints, not just
+implementation details of CI.
+
+Verification: GitHub reports `visibility: PUBLIC`; an unauthenticated Windows
+`git ls-remote https://github.com/nexdep/syodep refs/heads/main` succeeds;
+`scoop update` refreshes the bucket from one manifest to two, and
+`scoop search syodep-continuous` resolves the rolling manifest from the
+`syodep` bucket. No application source or package contents changed.
+
 ## 2026-08-07 — One rolling channel, published per platform
 
 `main` pushes used to publish the Linux AppImage twice, from a single build, to
