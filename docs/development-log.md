@@ -7,6 +7,38 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-08-10 — Quiet successful raster mapping and Wayland fullscreen startup
+
+Two recoverable Wayland startup paths still leaked alarming diagnostics from
+the continuous AppImage on WSLg.
+
+- `--renderer=raster` correctly skipped Syodep's OpenGL probe, but Qt lazily
+  initialized its only bundled client-buffer integration when the first
+  top-level widget was mapped. Mesa tried Zink, found no Vulkan physical
+  device, printed libEGL/MESA errors, and then Qt successfully used its shared-
+  memory backing store. The existing narrow stderr capture covered only
+  Syodep's explicit GL probe, so it ended before this later attempt.
+- The default fullscreen launch used `QWidget::showFullScreen()`. Bundled Qt
+  6.2 followed that with `QWindow::requestActivate()`, which its Wayland plugin
+  cannot implement because the compositor decides focus, and printed a warning.
+  A windowed launch stayed clean.
+
+The stderr capture is now a reusable bounded operation. The first successful
+top-level mapping filters the same exact libEGL/Zink allow-list as a successful
+probe; a failed mapping replays every captured byte. Fullscreen windows use
+`WA_ShowWithoutActivating` on Linux before mapping, which removes the unsupported
+request without changing effective focus policy. The compositor was already
+ignoring the request.
+
+### Test strategy
+
+The smoke test now maps the main window through the production fullscreen
+helper instead of its old windowed-only path, and it bounds the earlier
+standalone sidebar mapping that initializes the raster Wayland client. Linux CI
+and the final AppImage smoke run both render OpenGL and raster with
+`QT_FATAL_WARNINGS=1`, capture their complete output, and reject any leaked
+`libEGL`, Zink, or `requestActivate` line. Unrelated diagnostics remain visible.
+
 ## 2026-08-10 — Give cold headless OpenGL startup enough time
 
 The branch artifact job exposed a pre-existing race in

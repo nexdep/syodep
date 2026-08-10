@@ -115,8 +115,16 @@ jobs:
           cargo run -p syodep-pdf --features test-support \
             --example make_fixture -- fixture.pdf 5
           bash scripts/with-headless-wayland.sh bash -euo pipefail -c '
-            ./build/ui-qt/syodep --renderer=opengl --smoke-test fixture.pdf
-            ./build/ui-qt/syodep --renderer=raster --smoke-test fixture.pdf
+            for renderer in opengl raster; do
+              output="$(QT_FATAL_WARNINGS=1 ./build/ui-qt/syodep \
+                --renderer="$renderer" --smoke-test fixture.pdf 2>&1)"
+              printf "%s\n" "$output"
+              if grep -Eq "libEGL warning:|MESA: error: ZINK:|requestActivate" \
+                  <<<"$output"; then
+                echo "$renderer startup leaked a recoverable graphics warning" >&2
+                exit 1
+              fi
+            done
             check_data_dir="$(mktemp -d)"
             trap '\''rmdir "$check_data_dir"'\'' EXIT
             check_report="$(XDG_DATA_HOME="$check_data_dir" \
