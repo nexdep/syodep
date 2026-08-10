@@ -68,77 +68,24 @@ protected:
 };
 
 #if defined(Q_OS_LINUX)
-// Mesa and libEGL can print failed-driver attempts directly to stderr even
-// when they subsequently create a valid context with another driver. Keep
-// those implementation details out of ordinary startup, but replay them when
-// the probe genuinely fails so diagnostics are not lost.
-class ProbeStderrCapture final
+QByteArray withoutSuccessfulFallbackNoise(const QByteArray &captured)
 {
-public:
-    ProbeStderrCapture()
-    {
-        if (!m_file.open())
-            return;
-        std::fflush(stderr);
-        m_savedFd = ::dup(STDERR_FILENO);
-        if (m_savedFd < 0)
-            return;
-        if (::dup2(m_file.handle(), STDERR_FILENO) < 0) {
-            ::close(m_savedFd);
-            m_savedFd = -1;
-            return;
-        }
-        m_active = true;
-    }
-
-    ~ProbeStderrCapture() { finish(false); }
-
-    void finish(bool probeSucceeded)
-    {
-        if (!m_active)
-            return;
-
-        std::fflush(stderr);
-        ::dup2(m_savedFd, STDERR_FILENO);
-        ::close(m_savedFd);
-        m_savedFd = -1;
-        m_active = false;
-
-        if (m_file.seek(0)) {
-            const QByteArray captured = m_file.readAll();
-            const QByteArray replay = probeSucceeded
-                ? withoutSuccessfulFallbackNoise(captured)
-                : captured;
-            if (!replay.isEmpty()) {
-                std::fwrite(replay.constData(), 1,
-                            static_cast<size_t>(replay.size()), stderr);
-                std::fflush(stderr);
-            }
+    QByteArray replay;
+    const QList<QByteArray> lines = captured.split('\n');
+    for (const QByteArray &line : lines) {
+        const QByteArray trimmed = line.trimmed();
+        const bool failedDriverAttempt = trimmed.isEmpty()
+            || trimmed.startsWith("libEGL warning:")
+            || trimmed == "MESA: error: ZINK: failed to choose pdev"
+            || trimmed == "qt.qpa.wayland: Wayland does not support "
+                          "QWindow::requestActivate()";
+        if (!failedDriverAttempt) {
+            replay.append(line);
+            replay.append('\n');
         }
     }
-
-private:
-    static QByteArray withoutSuccessfulFallbackNoise(const QByteArray &captured)
-    {
-        QByteArray replay;
-        const QList<QByteArray> lines = captured.split('\n');
-        for (const QByteArray &line : lines) {
-            const QByteArray trimmed = line.trimmed();
-            const bool failedDriverAttempt = trimmed.isEmpty()
-                || trimmed.startsWith("libEGL warning:")
-                || trimmed == "MESA: error: ZINK: failed to choose pdev";
-            if (!failedDriverAttempt) {
-                replay.append(line);
-                replay.append('\n');
-            }
-        }
-        return replay;
-    }
-
-    QTemporaryFile m_file;
-    int m_savedFd = -1;
-    bool m_active = false;
-};
+    return replay;
+}
 #endif
 
 bool isPlatformArgument(const QString &arg)
@@ -147,6 +94,57 @@ bool isPlatformArgument(const QString &arg)
 }
 
 } // namespace
+
+FallbackStderrCapture::FallbackStderrCapture()
+{
+#if defined(Q_OS_LINUX)
+    if (!m_file.open())
+        return;
+    std::fflush(stderr);
+    m_savedFd = ::dup(STDERR_FILENO);
+    if (m_savedFd < 0)
+        return;
+    if (::dup2(m_file.handle(), STDERR_FILENO) < 0) {
+        ::close(m_savedFd);
+        m_savedFd = -1;
+        return;
+    }
+    m_active = true;
+#endif
+}
+
+FallbackStderrCapture::~FallbackStderrCapture()
+{
+    finish(false);
+}
+
+void FallbackStderrCapture::finish(bool operationSucceeded)
+{
+#if defined(Q_OS_LINUX)
+    if (!m_active)
+        return;
+
+    std::fflush(stderr);
+    ::dup2(m_savedFd, STDERR_FILENO);
+    ::close(m_savedFd);
+    m_savedFd = -1;
+    m_active = false;
+
+    if (m_file.seek(0)) {
+        const QByteArray captured = m_file.readAll();
+        const QByteArray replay = operationSucceeded
+            ? withoutSuccessfulFallbackNoise(captured)
+            : captured;
+        if (!replay.isEmpty()) {
+            std::fwrite(replay.constData(), 1,
+                        static_cast<size_t>(replay.size()), stderr);
+            std::fflush(stderr);
+        }
+    }
+#else
+    Q_UNUSED(operationSucceeded);
+#endif
+}
 
 PlatformInfo detectPlatform()
 {
@@ -243,7 +241,7 @@ QString rendererBackendName(RendererBackend backend)
 GlProbe probeOpenGlWidget(int timeoutMs)
 {
 #if defined(Q_OS_LINUX)
-    ProbeStderrCapture probeStderr;
+    FallbackStderrCapture probeStderr;
 #endif
     GlProbe result;
     {
