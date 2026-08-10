@@ -7,6 +7,23 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-08-10 — Give cold headless OpenGL startup enough time
+
+The branch artifact job exposed a pre-existing race in
+`scripts/with-headless-wayland.sh`: it allowed Weston exactly five seconds to
+create its socket, while a cold GitHub runner took about 5.08 seconds to bring
+up Mesa's llvmpipe renderer. Weston completed EGL and GL initialization, but the
+helper reached its deadline just before the socket appeared. The ordinary Linux
+Qt job passed because its earlier work had already warmed the same runner.
+
+Raised the bounded startup wait from 5 to 15 seconds. The helper still exits as
+soon as the socket appears and still fails immediately if Weston dies, so normal
+runs gain no fixed delay and genuine startup failures remain fast.
+
+Test strategy: shell syntax and both local headless OpenGL/raster smoke tests,
+then a complete branch CI run whose separate `Build push artifact` job starts on
+a cold runner. No core behavior changed.
+
 ## 2026-08-10 — Restore public repository visibility for distribution
 
 The GitHub repository had been made private, which silently broke both public
