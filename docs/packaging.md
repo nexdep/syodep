@@ -186,6 +186,11 @@ The repo doubles as a Scoop bucket, with one manifest per channel. Both point
 at the Windows zip (with `extract_dir`, `bin`, a Start Menu shortcut) and both
 are bumped by CI, committed to `main` by `github-actions[bot]`.
 
+The repository must remain public. Scoop clones this repository as a bucket and
+downloads its GitHub release assets without repository credentials; making the
+repository private prevents bucket refreshes and installs even when the
+manifests and assets still exist.
+
 ```powershell
 scoop bucket add syodep https://github.com/nexdep/syodep
 scoop install syodep              # tagged releases
