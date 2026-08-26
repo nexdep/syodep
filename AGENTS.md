@@ -64,10 +64,13 @@ bash scripts/with-headless-wayland.sh \
 
 Every push must produce a CI build artifact after the full test/docs/lint/smoke
 suite passes. Branch pushes produce ephemeral artifacts named with the commit
-SHA. Main pushes also update the rolling `continuous` prerelease with the
-latest AppImage and Windows zip; the two assets are published by separate jobs
-as soon as each platform finishes building, so they can be from different
-commits. Versioned public releases are created by
+SHA. Workflow artifacts from `main` are retained for 3 days; branch, tag, and
+manual-run artifacts are retained for 7 days. The Windows installer is still
+built and tested on `main`, but only the portable zip is uploaded there; tag
+and manual runs upload both. Main pushes also update the rolling `continuous`
+prerelease with the latest AppImage and Windows zip; the two assets are
+published by separate jobs as soon as each platform finishes building, so they
+can be from different commits. Versioned public releases are created by
 `.github/workflows/release.yml` only from `vMAJOR.MINOR.PATCH` tags.
 
 Do not auto-commit version bumps from CI. Development builds derive their

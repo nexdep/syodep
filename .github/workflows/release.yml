@@ -3,7 +3,7 @@
 # Final shape (documented in docs/packaging.md):
 #   - tag push `v*` triggers a versioned release
 #   - push to `main` updates the rolling `continuous` prerelease
-#   - Linux: build in an ubuntu:22.04 container (glibc 2.35 floor) with
+#   - Linux: build in an ubuntu:24.04 container (glibc 2.39 floor) with
 #     distro Qt, bundle as AppImage via the reusable AppImage workflow
 #   - Windows: build with aqtinstall Qt, produce a portable zip
 #     plus an NSIS installer (implemented below)
@@ -238,13 +238,28 @@ jobs:
           # $INSTDIR from .onInit on the runner. CheckWritable therefore
           # remains unexercised by CI; it is reached only through a directory
           # the user chooses interactively.
-      - uses: actions/upload-artifact@v4
+      # The continuous publisher consumes only the portable zip. Keep building
+      # and exercising NSIS on main, but do not retain that duplicate installer
+      # after its tests pass; tagged releases publish it permanently and manual
+      # runs intentionally leave it downloadable for inspection.
+      - name: Upload continuous Windows transfer artifact
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: syodep-win64
+          path: syodep-win64.zip
+          if-no-files-found: error
+          retention-days: 3
+      - name: Upload release or development Windows artifact
+        if: github.event_name != 'push' || github.ref != 'refs/heads/main'
+        uses: actions/upload-artifact@v4
         with:
           name: syodep-win64
           path: |
             syodep-win64.zip
             syodep-setup.exe
           if-no-files-found: error
+          retention-days: 7
 
   publish-release:
     name: Publish GitHub release

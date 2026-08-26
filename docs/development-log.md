@@ -7,6 +7,50 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-08-26 — Short-lived workflow artifacts
+
+Workflow artifacts now have explicit retention instead of allowing the Windows
+package to inherit the repository's 90-day default. Artifacts produced by
+`main` live for 3 days; branch, tag, and manual-run artifacts live for 7. The
+post-validation native Linux tar remains on `main` because every push is
+required to leave an artifact after the full gate, but its lifetime is now
+short. The AppImage and Windows zip are transfer objects whose durable copies
+live on the rolling or versioned GitHub Release.
+
+The Windows builder still compiles and exercises the NSIS installer on every
+`main` push. Its main-only artifact contains just `syodep-win64.zip`, which is
+all the continuous publisher consumes. Tag and manual runs retain both the zip
+and `syodep-setup.exe` for 7 days, and tagged releases still attach the
+installer permanently. `scripts/check-docs.sh` guards the retention expressions,
+the two conditional Windows upload paths, and the packaging documentation.
+
+Test strategy: parse the changed workflow YAML, exercise the documentation
+consistency check, run the full pre-push Rust/lint/Qt smoke suite, then inspect
+the real `main` workflow artifacts after both CI and Release finish. Historical
+artifact cleanup is performed only after those successful runs provide fresh
+replacements and is recorded in the main-push report rather than hidden in CI.
+
+## 2026-08-26 — Move the AppImage build baseline to Ubuntu 24.04
+
+The reusable AppImage builder now uses an `ubuntu:24.04` container on its
+Ubuntu 24.04 runner. This intentionally raises the published Linux package's
+runtime floor from glibc 2.35 to glibc 2.39, so Ubuntu 22.04 is no longer a
+supported AppImage host. The README, packaging specification, roadmap, release
+workflow comments, CMake commentary, and main-push pipeline report now state
+the same Ubuntu 24.04 baseline. `scripts/check-docs.sh` guards the workflow
+container, cache namespace, glibc floor, and active documentation as one
+invariant so a future baseline change cannot update only one of them.
+
+The Rust cache shared key changed from `appimage-ubuntu-22.04` to
+`appimage-ubuntu-24.04`. Native dependencies compiled against the former
+userland must not be restored into the new build environment.
+
+Test strategy: no core behavior changed. Validate the workflow structure with
+the available local GitHub Actions/YAML tooling, run `scripts/check-docs.sh`,
+and let the next AppImage workflow run exercise dependency installation,
+packaging inspection, and the real OpenGL/raster AppImage smoke tests inside
+the new container.
+
 ## 2026-08-10 — Give cold headless OpenGL startup enough time
 
 The branch artifact job exposed a pre-existing race in

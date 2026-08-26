@@ -246,4 +246,7 @@ jobs:
             dist/*.tar.gz
             dist/*.sha256
           if-no-files-found: error
-          retention-days: 14
+          # main already publishes the same commit as an AppImage; keep this
+          # post-validation native artifact only long enough for recent
+          # debugging. Other pushes get a slightly longer investigation window.
+          retention-days: ${{ github.ref == 'refs/heads/main' && 3 || 7 }}

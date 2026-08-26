@@ -4,6 +4,10 @@
 
 **Snapshot date:** 2026-08-10
 
+**Configuration update:** On 2026-08-26, the AppImage build userland moved from
+Ubuntu 22.04 to Ubuntu 24.04. The observed timings, costs, and storage figures
+below remain the 2026-08-10 snapshot.
+
 **Observed push:** commit
 [`94c82c2`](https://github.com/nexdep/syodep/commit/94c82c2d7d24040ddfb944052a5e5c6887ff2f5c),
 an empty commit made specifically to exercise the pipeline after the account was
@@ -56,6 +60,44 @@ long-term design is one orchestrating pipeline that runs validations once,
 builds each platform deliverable once, and publishes those exact deliverables
 only after the required checks pass.
 
+## Pipeline at a glance
+
+```mermaid
+flowchart LR
+    push["Push to main"]
+
+    subgraph ci["CI workflow run"]
+        direction TB
+        ci_checks["Six validation jobs<br/>four Linux, two Windows"]
+        ci_checks --> ci_builder["Native artifact builder<br/>Linux job"]
+        ci_builder --> native_tar[("Native Linux tar<br/>workflow artifact")]
+    end
+
+    subgraph release["Release workflow run"]
+        direction TB
+        linux_builder["Linux builder<br/>Ubuntu 24.04 job + container"]
+        linux_builder --> appimage[("AppImage<br/>workflow artifact")]
+        appimage --> linux_publisher["Linux publisher<br/>Ubuntu job"]
+
+        windows_builder["Windows builder<br/>Windows job"]
+        windows_builder --> windows_packages[("ZIP + installer<br/>workflow artifact")]
+        windows_packages --> windows_publisher["Windows publisher<br/>Ubuntu job"]
+    end
+
+    push --> ci_checks
+    push --> linux_builder
+    push --> windows_builder
+    linux_publisher --> rolling["continuous prerelease"]
+    windows_publisher --> rolling
+    windows_publisher --> scoop["Scoop manifest commit<br/>with [skip ci]"]
+```
+
+Rectangles inside the two large groups are jobs (or, for the Linux builder, a
+reusable workflow presented as a job). Cylinders are temporary workflow
+artifacts; the nodes at the far right are durable repository outputs. The CI
+and Release runs start independently: each Release publisher waits for its own
+platform builder, not for the CI workflow to finish.
+
 ## Beginner's glossary
 
 ### Git and GitHub terms
@@ -106,6 +148,14 @@ only after the required checks pass.
 **Job**
 : A group of steps run on one fresh machine. Separate jobs normally have
   separate filesystems and may run in parallel.
+
+**Builder**
+: An informal name used in this report for a workflow or job whose main purpose
+  is to compile and package a platform deliverable, such as the Linux AppImage
+  or Windows zip and installer. A builder is not a special GitHub Actions
+  primitive: it is still a workflow or job, and it runs on a runner. It is
+  distinct from a publisher, which takes the builder's output and attaches it
+  to a GitHub Release or updates a package manifest.
 
 **Runner**
 : The machine that executes a job. `ubuntu-24.04` and `windows-2022` select
@@ -191,13 +241,13 @@ only after the required checks pass.
 
 The checked-in definitions are:
 
-- [`.github/workflows/ci.yml`](../.github/workflows/ci.yml)
-- [`.github/workflows/release.yml`](../.github/workflows/release.yml)
-- [`.github/workflows/appimage.yml`](../.github/workflows/appimage.yml)
+- [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml)
+- [`.github/workflows/release.yml`](../../.github/workflows/release.yml)
+- [`.github/workflows/appimage.yml`](../../.github/workflows/appimage.yml)
 
 Supporting release behavior also lives in
-[`scripts/ensure-continuous-release.sh`](../scripts/ensure-continuous-release.sh)
-and is explained in [`docs/packaging.md`](packaging.md).
+[`scripts/ensure-continuous-release.sh`](../../scripts/ensure-continuous-release.sh)
+and is explained in [`docs/packaging.md`](../packaging.md).
 
 ### 1. CI
 
@@ -252,7 +302,7 @@ On a `main` push, Release starts the Linux and Windows builders in parallel.
 `release-build-linux` calls the reusable AppImage workflow with the
 `continuous` channel. The called job:
 
-1. starts an Ubuntu 22.04 container on an Ubuntu 24.04 runner;
+1. starts an Ubuntu 24.04 container on an Ubuntu 24.04 runner;
 2. installs the compiler, Qt, Wayland, packaging, and test dependencies;
 3. installs stable Rust;
 4. restores cached Rust dependencies and native build outputs;
@@ -264,9 +314,9 @@ On a `main` push, Release starts the Linux and Windows builders in parallel.
    headless Weston; and
 10. uploads `syodep-x86_64-appimage` for 14 days.
 
-Ubuntu 22.04 is intentional. A Linux binary inherits a minimum glibc version
-from the environment where it is built. Building the distributable in this
-older container lets it run on more still-supported Linux distributions.
+Ubuntu 24.04 is the selected compatibility baseline. A Linux binary inherits a
+minimum glibc version from the environment where it is built, so the AppImage
+now requires glibc 2.39 or newer.
 
 #### Windows builder
 
@@ -721,9 +771,9 @@ recommended merely because a developer says a local build passed.
 
 A normal native build links against the local distribution's glibc, Qt, and
 other system libraries. Building on Ubuntu 26.04 can make the result unusable on
-Ubuntu 22.04 or other older supported distributions.
+Ubuntu 24.04 or other supported distributions with the same runtime baseline.
 
-The official AppImage deliberately builds inside Ubuntu 22.04, bundles selected
+The official AppImage deliberately builds inside Ubuntu 24.04, bundles selected
 Qt/Wayland libraries, removes unsafe/unwanted plugins, fixes an internal
 `RUNPATH`, checks host-library boundaries, extracts the result, and smoke-tests
 the actual package. A bare local `cmake --build` does none of that packaging.
@@ -731,10 +781,10 @@ the actual package. A bare local `cmake --build` does none of that packaging.
 ### Building the AppImage locally
 
 To reproduce the distributable locally, use Docker or Podman and mirror the
-Ubuntu 22.04 container job in `.github/workflows/appimage.yml`. The machine
+Ubuntu 24.04 container job in `.github/workflows/appimage.yml`. The machine
 needs:
 
-- Docker/Podman capable of running an x86-64 Ubuntu 22.04 container;
+- Docker/Podman capable of running an x86-64 Ubuntu 24.04 container;
 - the source checkout mounted into the container;
 - internet access for apt, rustup, Cargo, linuxdeploy, and the Qt linuxdeploy
   plugin;
@@ -755,7 +805,7 @@ that GitHub recognizes as part of the workflow. The setup would require:
 
 1. registering a dedicated Linux runner in repository settings;
 2. installing the GitHub runner service and keeping it online and updated;
-3. installing Docker, because the AppImage job requires an Ubuntu 22.04
+3. installing Docker, because the AppImage job requires an Ubuntu 24.04
    container;
 4. giving it a label such as `syodep-linux` and changing selected `runs-on`
    declarations;
@@ -813,13 +863,13 @@ replacement for the CI artifact.
 
 Repository sources:
 
-- [`ci.yml`](../.github/workflows/ci.yml)
-- [`release.yml`](../.github/workflows/release.yml)
-- [`appimage.yml`](../.github/workflows/appimage.yml)
-- [`ensure-continuous-release.sh`](../scripts/ensure-continuous-release.sh)
-- [`docs/packaging.md`](packaging.md)
-- [`docs/testing.md`](testing.md)
-- [`AGENTS.md`](../AGENTS.md)
+- [`ci.yml`](../../.github/workflows/ci.yml)
+- [`release.yml`](../../.github/workflows/release.yml)
+- [`appimage.yml`](../../.github/workflows/appimage.yml)
+- [`ensure-continuous-release.sh`](../../scripts/ensure-continuous-release.sh)
+- [`docs/packaging.md`](../packaging.md)
+- [`docs/testing.md`](../testing.md)
+- [`AGENTS.md`](../../AGENTS.md)
 
 GitHub references:
 

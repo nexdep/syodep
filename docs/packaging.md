@@ -52,7 +52,11 @@ The release job (`release-build-windows` in `release.yml`) additionally:
 3. re-runs the smoke test from the staged tree **with Qt stripped from
    PATH**, so an incomplete DLL set fails in CI rather than on a user's
    machine,
-4. zips and uploads `syodep-win64.zip` as a workflow artifact.
+4. zips the portable tree, builds the NSIS installer, and exercises a real
+   install/uninstall cycle, and
+5. uploads `syodep-win64.zip` as a workflow artifact; tag and manual runs also
+   include `syodep-setup.exe`, while `main` discards the installer after its
+   tests because the continuous publisher consumes only the zip.
 
 On `v*` tag pushes a final job (`publish-release`) creates a GitHub
 release and attaches the zip as `syodep-vX.Y.Z-win64.zip` and the
@@ -65,15 +69,32 @@ independent jobs, one per platform, neither waiting on the other — see
 [Rolling continuous release](#rolling-continuous-release-implemented).
 Manual `release.yml` runs stop at workflow artifacts.
 
+### Workflow artifact retention
+
+Workflow artifacts are short-lived transfer and debugging objects, not the
+permanent user-facing downloads attached to GitHub Releases. Artifacts produced
+by a `main` push are retained for 3 days. Branch, tag, and manual-run artifacts
+are retained for 7 days. This applies to the post-validation native Linux tar,
+the AppImage passed to its publisher, and `syodep-win64`; every upload declares
+its retention explicitly instead of inheriting the repository default.
+
+The 3-day native tar preserves the policy that every push leaves a CI artifact
+after all required checks pass. The AppImage and Windows zip from `main` need
+only survive long enough for their independent continuous publishers to consume
+them; successful user-facing copies remain on the rolling prerelease. Versioned
+release assets are likewise permanent independently of their 7-day transfer
+artifacts.
+
 ### Linux AppImage (implemented)
 
-The reusable AppImage builder runs in an **`ubuntu:22.04` container** on the
-24.04 runner: an AppImage inherits the glibc floor of its build machine, and
-22.04's glibc 2.35 covers Ubuntu 22.04+, Debian 12+, Fedora 36+ and anything
-newer. Qt (6.2 LTS) comes from the container's apt and is bundled; Rust is
-installed via rustup inside the container. Cargo dependencies and their native
-build outputs are cached across runs, but workspace crates are rebuilt so the
-binary always carries the selected commit's identity.
+The reusable AppImage builder runs in an **`ubuntu:24.04` container** on the
+24.04 runner. An AppImage inherits the glibc floor of its build userland, so the
+published package now requires glibc 2.39 (Ubuntu 24.04 or another distribution
+with an equivalent runtime). Qt comes from the container's apt and is bundled;
+Rust is installed via rustup inside the container. Cargo dependencies and their
+native build outputs are cached across runs under an Ubuntu-24.04-specific key,
+while workspace crates are rebuilt so the binary always carries the selected
+commit's identity.
 
 Packaging uses `linuxdeploy` + `linuxdeploy-plugin-qt` (prebuilt
 binaries, run with `--appimage-extract-and-run` since containers lack
@@ -91,7 +112,7 @@ from the AppDir's `usr/lib`, so a copy installed on the build host cannot mask a
 broken AppImage. The Qt deployment plugin adds XCB by default, so the job
 populates `AppDir` first, deletes every QPA plugin except the two Wayland ones,
 and only then creates the AppImage. `qt6-wayland` is installed in the build
-container so all of these plugins come from the same Qt 6.2.4 installation.
+container so all of these plugins come from the same distro Qt installation.
 The workflow extracts the finished AppImage, asserts XCB/offscreen are absent,
 checks the exact integration plugin and its
 `libQt6WaylandEglClientHwIntegration.so.6` dependency are present, and rejects
@@ -99,10 +120,10 @@ unresolved dynamic-library dependencies.
 Excluded from the bundle and resolved from the host: glibc, libGL, fontconfig,
 and `libxkbcommon.so.0` — libraries that integrate with system drivers, fonts,
 or locale data. In particular, xkbcommon parses the host's X11 Compose table;
-bundling Ubuntu 22.04's older parser while reading a newer host table can emit
-keysym errors and break only the affected compose sequences. Packaging removes
-both xkbcommon and its X11 companion even if the Qt deploy plugin copied them,
-then checks the extracted AppImage still resolves xkbcommon from the host.
+bundling the build container's parser while reading a different host table can
+emit keysym errors and break only the affected compose sequences. Packaging
+removes both xkbcommon and its X11 companion even if the Qt deploy plugin copied
+them, then checks the extracted AppImage still resolves xkbcommon from the host.
 Supported Wayland systems must therefore provide the stable
 `libxkbcommon.so.0` ABI in addition to the graphics libraries.
 
@@ -125,8 +146,8 @@ For a Linux-only development build, push a **feature branch** change under
 artifact. You can also open **Actions → AppImage Build → Run workflow**, select
 any branch, and download the `syodep-x86_64-appimage` artifact when the run
 finishes. This is not a reduced package: it uses the exact release builder and
-both smoke tests. The artifact is retained for 14 days and does not create or
-update a GitHub release. The equivalent CLI flow is:
+both smoke tests. It does not create or update a GitHub release, and branch and
+manual artifacts are retained for 7 days. The equivalent CLI flow is:
 
 ```bash
 gh workflow run appimage.yml --ref <branch>

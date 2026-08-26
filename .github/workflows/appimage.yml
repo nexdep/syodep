@@ -34,10 +34,10 @@ jobs:
   build-appimage:
     name: Build and validate Linux AppImage
     runs-on: ubuntu-24.04
-    # Old userland on purpose: the AppImage inherits the build machine's
-    # glibc floor (22.04 = 2.35), so it runs on Ubuntu 22.04+, Debian 12+,
-    # Fedora 36+ etc. Qt comes from the container's apt and gets bundled.
-    container: ubuntu:22.04
+    # The AppImage inherits the build userland's glibc floor. Ubuntu 24.04
+    # supplies glibc 2.39, so the package targets Ubuntu 24.04+ and other
+    # Wayland distributions with glibc >= 2.39. Distro Qt is bundled.
+    container: ubuntu:24.04
     steps:
       - uses: actions/checkout@v5
       # `unzip` is needed by MuPDF's build: its Makefile runs
@@ -65,7 +65,7 @@ jobs:
       # and native-library compilation (notably vendored MuPDF).
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: appimage-ubuntu-22.04
+          shared-key: appimage-ubuntu-24.04
           cache-workspace-crates: "false"
           cache-on-failure: "false"
           cache-bin: "false"
@@ -175,7 +175,9 @@ jobs:
           name: syodep-x86_64-appimage
           path: syodep-x86_64.AppImage
           if-no-files-found: error
-          retention-days: 14
+          # On main this only transfers the package to the continuous publisher;
+          # branch, tag, and manual builds remain downloadable for a week.
+          retention-days: ${{ github.ref == 'refs/heads/main' && 3 || 7 }}
 
 # The continuous publishers live in release.yml, not here. main is the only ref
 # they ever publish for, and main no longer triggers this workflow directly --

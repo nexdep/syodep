@@ -104,8 +104,10 @@ the same code. See the development log.
 - 🚧 Packaging (spec in `docs/packaging.md`):
   - ✅ Windows CI build + smoke test on every push/PR
   - ✅ Windows portable zip release artifact (windeployqt, staged smoke test)
-  - ✅ Linux AppImage (ubuntu:22.04 container build, linuxdeploy + Qt plugin)
+  - ✅ Linux AppImage (ubuntu:24.04 container build, linuxdeploy + Qt plugin)
   - ✅ Windows NSIS installer (per-user, silent-capable, opt-in PDF handler)
+  - ✅ Short-lived workflow artifacts (3 days on main, 7 otherwise; the tested
+    NSIS installer is uploaded only for tag/manual builds)
   - ⬜ Windows code signing (unsigned builds trip SmartScreen)
   - ✅ attach artifacts to GitHub releases on tag push
   - ✅ Scoop bucket, auto-bumped: `bucket/syodep.json` on release tags,

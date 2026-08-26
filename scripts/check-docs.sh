@@ -5,6 +5,8 @@
 # 2. Every command in the core's command registry is documented.
 # 3. Every default keybinding is documented.
 # 4. Every config option is documented.
+# 5. The AppImage build/runtime baseline is consistent across workflow and docs.
+# 6. Workflow artifact retention is explicit and documented.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -91,6 +93,43 @@ grep -q 'setApplicationVersion(QStringLiteral(SYODEP_BUILD_VERSION))' ui-qt/src/
 
 grep -q 'option_env!("SYODEP_BUILD_VERSION")' crates/syodep-ffi/src/lib.rs \
     || err "syodep-ffi must report the injected build identity"
+
+# The AppImage build userland determines the package's glibc floor. A distro
+# bump must update the cache boundary and every active compatibility statement
+# in the same change.
+grep -qF 'container: ubuntu:24.04' .github/workflows/appimage.yml \
+    || err "AppImage workflow must use the documented Ubuntu 24.04 container"
+grep -qF 'shared-key: appimage-ubuntu-24.04' .github/workflows/appimage.yml \
+    || err "AppImage cache key must identify the Ubuntu 24.04 userland"
+grep -qF 'glibc ≥ 2.39' README.md \
+    || err "README must document the AppImage glibc 2.39 floor"
+grep -qF '`ubuntu:24.04` container' docs/packaging.md \
+    || err "packaging docs must document the Ubuntu 24.04 AppImage container"
+grep -qF 'glibc 2.39' docs/packaging.md \
+    || err "packaging docs must document the AppImage glibc 2.39 floor"
+grep -qF 'ubuntu:24.04 container build' docs/roadmap.md \
+    || err "roadmap must record the Ubuntu 24.04 AppImage baseline"
+
+# Workflow artifacts are transfers/debugging aids; release assets are the
+# durable downloads. Keep the short-retention policy and conditional Windows
+# installer upload synchronized with the packaging documentation.
+retention_expression="retention-days: \${{ github.ref == 'refs/heads/main' && 3 || 7 }}"
+grep -qF "$retention_expression" .github/workflows/ci.yml \
+    || err "CI artifact must use the documented 3/7-day retention policy"
+grep -qF "$retention_expression" .github/workflows/appimage.yml \
+    || err "AppImage artifact must use the documented 3/7-day retention policy"
+grep -qF 'name: Upload continuous Windows transfer artifact' .github/workflows/release.yml \
+    || err "release workflow must have a main-only Windows transfer upload"
+grep -qF 'name: Upload release or development Windows artifact' .github/workflows/release.yml \
+    || err "release workflow must preserve tag/manual installer artifacts"
+grep -qF 'retention-days: 3' .github/workflows/release.yml \
+    || err "main Windows transfer artifact must be retained for 3 days"
+grep -qF 'retention-days: 7' .github/workflows/release.yml \
+    || err "tag/manual Windows artifacts must be retained for 7 days"
+grep -qF 'a `main` push are retained for 3 days.' docs/packaging.md \
+    || err "packaging docs must explain main artifact retention"
+grep -qF 'Branch, tag, and manual-run artifacts' docs/packaging.md \
+    || err "packaging docs must explain non-main artifact retention"
 
 # The installer script is a shipped artifact source, not a doc, but losing it
 # would silently drop the Windows installer from releases.

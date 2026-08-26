@@ -69,8 +69,9 @@ chmod +x syodep-vX.Y.Z-x86_64.AppImage
 ./syodep-vX.Y.Z-x86_64.AppImage document.pdf
 ```
 
-Needs glibc ≥ 2.35 (Ubuntu 22.04+, Debian 12+, Fedora 36+, …). If your
-distro lacks `libfuse2`, run with `--appimage-extract-and-run`.
+Needs glibc ≥ 2.39 (Ubuntu 24.04+ or another distribution with an equivalent
+runtime). If your distro lacks `libfuse2`, run with
+`--appimage-extract-and-run`.
 
 Linux syodep is **Wayland-only**. It does not run in an Xorg-only session,
 through traditional SSH X forwarding, or against an X11-only VNC server.
