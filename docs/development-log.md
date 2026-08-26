@@ -7,6 +7,19 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-08-26 — Keep the PDF renderer clean on Rust 1.98
+
+Rust 1.98 added the `chunks_exact_to_as_chunks` Clippy lint. The first live
+verification of the Ubuntu 24.04 and retention changes exposed it because CI
+tracks the current stable toolchain while the development machine was still on
+Rust 1.97. Replaced the renderer's constant-size RGB/RGBA chunk iteration with
+the equivalent fixed-array slice API; rendered bytes and application behavior
+are unchanged.
+
+Test strategy: the existing rendered-page test continues to verify the RGBA
+buffer and visible ink, and the full workspace Clippy gate was reproduced with
+Rust 1.98.0 and `-D warnings` before rerunning the complete pre-push suite.
+
 ## 2026-08-26 — Short-lived workflow artifacts
 
 Workflow artifacts now have explicit retention instead of allowing the Windows
@@ -26,9 +39,11 @@ the two conditional Windows upload paths, and the packaging documentation.
 
 Test strategy: parse the changed workflow YAML, exercise the documentation
 consistency check, run the full pre-push Rust/lint/Qt smoke suite, then inspect
-the real `main` workflow artifacts after both CI and Release finish. Historical
-artifact cleanup is performed only after those successful runs provide fresh
-replacements and is recorded in the main-push report rather than hidden in CI.
+the real `main` workflow artifacts after both CI and Release finish. The
+historical inventory was captured before removing superseded artifacts; one
+newest artifact per known family and all release assets were preserved. The
+before/after measurements are recorded in the main-push report rather than
+hidden in CI.
 
 ## 2026-08-26 — Move the AppImage build baseline to Ubuntu 24.04
 

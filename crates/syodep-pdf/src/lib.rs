@@ -600,7 +600,7 @@ impl Document {
             )));
         }
         let mut data = Vec::with_capacity(width as usize * height as usize * 4);
-        for rgb in samples[..expected].chunks_exact(3) {
+        for rgb in samples[..expected].as_chunks::<3>().0 {
             data.extend_from_slice(&[rgb[0], rgb[1], rgb[2], 0xff]);
         }
         Ok(Bitmap {
@@ -3589,7 +3589,7 @@ mod tests {
         // Mostly white page: the first pixel is blank paper, opaque.
         assert_eq!(&bitmap.data[..4], &[0xff, 0xff, 0xff, 0xff]);
         // Some ink exists somewhere (the text).
-        assert!(bitmap.data.chunks_exact(4).any(|px| px[0] < 0x80));
+        assert!(bitmap.data.as_chunks::<4>().0.iter().any(|px| px[0] < 0x80));
     }
 
     #[test]
