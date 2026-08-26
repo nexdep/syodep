@@ -40,7 +40,7 @@ can be dispatched manually when only a test AppImage is needed.
 
 CI (`qt-build-windows` in `ci.yml`) builds the Qt shell on every push/PR:
 Qt 6.7.3 via `jurplel/install-qt-action` (`win64_msvc2019_64`), MSVC
-environment via `ilammy/msvc-dev-cmd`, `cmake -G Ninja`, then the offscreen
+environment via `step-security/msvc-dev-cmd`, `cmake -G Ninja`, then the offscreen
 smoke test. The exe is a GUI-subsystem binary, so the smoke test is judged
 by exit code (stdout is invisible on Windows).
 

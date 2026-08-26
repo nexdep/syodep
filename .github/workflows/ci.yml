@@ -145,7 +145,7 @@ jobs:
           arch: win64_msvc2019_64
           cache: true
       - name: Set up MSVC environment
-        uses: ilammy/msvc-dev-cmd@v1
+        uses: step-security/msvc-dev-cmd@v1
       # Built before CMake so a Rust-side failure is distinguishable from a
       # C++ shell failure in the job overview.
       - name: Build Rust core

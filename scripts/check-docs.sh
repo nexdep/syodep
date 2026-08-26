@@ -151,12 +151,21 @@ grep -qF 'actions/upload-artifact@v6' .github/workflows/release.yml \
     || err "release workflow must retain its Node 24 artifact uploads"
 grep -qF 'actions/download-artifact@v7' .github/workflows/release.yml \
     || err "release workflow must retain its Node 24 artifact downloads"
+if rg -nF 'ilammy/msvc-dev-cmd@' .github/workflows; then
+    err "Windows MSVC setup must not use the Node 20 ilammy action"
+fi
+grep -qF 'step-security/msvc-dev-cmd@v1' .github/workflows/ci.yml \
+    || err "CI Windows build must use the Node 24 MSVC setup action"
+grep -qF 'step-security/msvc-dev-cmd@v1' .github/workflows/release.yml \
+    || err "release Windows build must use the Node 24 MSVC setup action"
 
 # The installer script is a shipped artifact source, not a doc, but losing it
 # would silently drop the Windows installer from releases.
 [ -s packaging/syodep.nsi ] || err "missing or empty: packaging/syodep.nsi"
 grep -q "NSIS" docs/packaging.md \
     || err "docs/packaging.md no longer documents the NSIS installer"
+grep -qF 'step-security/msvc-dev-cmd' docs/packaging.md \
+    || err "packaging docs must name the Node 24 MSVC setup action"
 
 if [ "$fail" -eq 0 ]; then
     echo "docs check OK"

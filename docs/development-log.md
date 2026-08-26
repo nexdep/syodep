@@ -7,19 +7,22 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
-## 2026-08-26 — Move artifact transfers to Node 24
+## 2026-08-26 — Move CI actions to Node 24
 
 GitHub has begun retiring Node 20 for JavaScript actions. All workflow artifact
 transfers now use `actions/upload-artifact@v6` and
 `actions/download-artifact@v7`, the first corresponding majors that run on
-Node 24 by default. This changes neither artifact names, paths, retention, nor
-the conditional continuous-release publishing flow. GitHub-hosted runners meet
-the actions' minimum runner version (2.327.1).
+Node 24 by default. The unmaintained `ilammy/msvc-dev-cmd` action also still
+ran on Node 20, so both Windows jobs now use its input-compatible, Node-24
+`step-security/msvc-dev-cmd` replacement. This changes neither artifact names,
+paths, retention, MSVC target selection, nor the conditional continuous-release
+publishing flow. GitHub-hosted runners meet the actions' minimum runner version
+(2.327.1).
 
-`scripts/check-docs.sh` now rejects a non-Node-24 artifact-action reference
-and verifies that each upload/download path remains present. This makes a
-future dependency downgrade fail the documentation CI check before it reaches
-GitHub's deprecation deadline.
+`scripts/check-docs.sh` now rejects non-Node-24 artifact actions and the
+deprecated MSVC setup action, while verifying that every upload/download and
+Windows setup path remains present. This makes a future dependency downgrade
+fail the documentation CI check before it reaches GitHub's deprecation deadline.
 
 Test strategy: parse the edited workflow YAML, run the documentation check,
 run the full local pre-push suite, then confirm the live CI and Release jobs

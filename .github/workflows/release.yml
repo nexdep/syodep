@@ -54,7 +54,7 @@ jobs:
           arch: win64_msvc2019_64
           cache: true
       - name: Set up MSVC environment
-        uses: ilammy/msvc-dev-cmd@v1
+        uses: step-security/msvc-dev-cmd@v1
       - name: Build (release)
         shell: pwsh
         run: |
