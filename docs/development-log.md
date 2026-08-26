@@ -7,6 +7,24 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-08-26 — Move artifact transfers to Node 24
+
+GitHub has begun retiring Node 20 for JavaScript actions. All workflow artifact
+transfers now use `actions/upload-artifact@v6` and
+`actions/download-artifact@v7`, the first corresponding majors that run on
+Node 24 by default. This changes neither artifact names, paths, retention, nor
+the conditional continuous-release publishing flow. GitHub-hosted runners meet
+the actions' minimum runner version (2.327.1).
+
+`scripts/check-docs.sh` now rejects a non-Node-24 artifact-action reference
+and verifies that each upload/download path remains present. This makes a
+future dependency downgrade fail the documentation CI check before it reaches
+GitHub's deprecation deadline.
+
+Test strategy: parse the edited workflow YAML, run the documentation check,
+run the full local pre-push suite, then confirm the live CI and Release jobs
+upload, download, and publish their artifacts without a Node 20 annotation.
+
 ## 2026-08-26 — Keep the PDF renderer clean on Rust 1.98
 
 Rust 1.98 added the `chunks_exact_to_as_chunks` Clippy lint. The first live

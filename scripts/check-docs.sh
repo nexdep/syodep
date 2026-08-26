@@ -6,7 +6,8 @@
 # 3. Every default keybinding is documented.
 # 4. Every config option is documented.
 # 5. The AppImage build/runtime baseline is consistent across workflow and docs.
-# 6. Workflow artifact retention is explicit and documented.
+# 6. Workflow artifact retention and Node 24 action runtimes are explicit and
+#    documented.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -130,6 +131,26 @@ grep -qF 'a `main` push are retained for 3 days.' docs/packaging.md \
     || err "packaging docs must explain main artifact retention"
 grep -qF 'Branch, tag, and manual-run artifacts' docs/packaging.md \
     || err "packaging docs must explain non-main artifact retention"
+
+# GitHub is retiring Node 20 on Actions runners. The first artifact-action
+# majors that run on Node 24 by default are upload v6 and download v7. Keep
+# every transfer path on those majors: the continuous publishers depend on
+# successful downloads as much as the builders depend on successful uploads.
+artifact_workflows=(.github/workflows/ci.yml .github/workflows/appimage.yml .github/workflows/release.yml)
+if rg -nP 'actions/upload-artifact@(?!v6\b)' "${artifact_workflows[@]}"; then
+    err "artifact uploads must use actions/upload-artifact@v6 (Node 24)"
+fi
+if rg -nP 'actions/download-artifact@(?!v7\b)' "${artifact_workflows[@]}"; then
+    err "artifact downloads must use actions/download-artifact@v7 (Node 24)"
+fi
+grep -qF 'actions/upload-artifact@v6' .github/workflows/ci.yml \
+    || err "CI must retain its Node 24 artifact upload"
+grep -qF 'actions/upload-artifact@v6' .github/workflows/appimage.yml \
+    || err "AppImage workflow must retain its Node 24 artifact upload"
+grep -qF 'actions/upload-artifact@v6' .github/workflows/release.yml \
+    || err "release workflow must retain its Node 24 artifact uploads"
+grep -qF 'actions/download-artifact@v7' .github/workflows/release.yml \
+    || err "release workflow must retain its Node 24 artifact downloads"
 
 # The installer script is a shipped artifact source, not a doc, but losing it
 # would silently drop the Windows installer from releases.

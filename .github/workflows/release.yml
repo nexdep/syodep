@@ -244,7 +244,7 @@ jobs:
       # runs intentionally leave it downloadable for inspection.
       - name: Upload continuous Windows transfer artifact
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: syodep-win64
           path: syodep-win64.zip
@@ -252,7 +252,7 @@ jobs:
           retention-days: 3
       - name: Upload release or development Windows artifact
         if: github.event_name != 'push' || github.ref != 'refs/heads/main'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: syodep-win64
           path: |
@@ -277,10 +277,10 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           name: syodep-win64
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           name: syodep-x86_64-appimage
       - name: Create release with versioned assets
@@ -377,7 +377,7 @@ jobs:
             echo "publish=false" >> "$GITHUB_OUTPUT"
             echo "Skipping stale continuous AppImage for $GITHUB_SHA; latest main is $latest_main."
           fi
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         if: steps.freshness.outputs.publish == 'true'
         with:
           name: syodep-x86_64-appimage
@@ -432,7 +432,7 @@ jobs:
             echo "publish=false" >> "$GITHUB_OUTPUT"
             echo "Skipping stale continuous Windows zip for $GITHUB_SHA; latest main is $LATEST_MAIN."
           fi
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         if: steps.freshness.outputs.publish == 'true'
         with:
           name: syodep-win64

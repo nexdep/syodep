@@ -239,7 +239,7 @@ jobs:
           cd dist
           sha256sum "syodep-linux-x86_64-${GITHUB_SHA::12}.tar.gz" > "syodep-linux-x86_64-${GITHUB_SHA::12}.tar.gz.sha256"
       - name: Upload push artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: syodep-linux-x86_64-${{ github.sha }}
           path: |
