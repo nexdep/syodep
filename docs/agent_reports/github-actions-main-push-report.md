@@ -4,10 +4,10 @@
 
 **Snapshot date:** 2026-08-27
 
-**Observed baseline push:** commit
-[`8cd0256`](https://github.com/nexdep/syodep/commit/8cd0256fcf2ca05ee9619ab73515cab7a0e91af4),
-which contains the Rust 1.98 lint correction on top of the Ubuntu 24.04 and
-artifact-retention implementation.
+**Observed green push:** commit
+[`6cd9210`](https://github.com/nexdep/syodep/commit/6cd921096378a41695d8cf2548c2080319f7282c),
+which implements workflow-level cancellation (Priority 2) and the consolidated
+Linux validation job (Priority 4).
 
 This report explains the pipeline from first principles, records what the live
 push did, and measures the completed Priority 1 storage work. Times are UTC and
@@ -30,23 +30,22 @@ now cancels an older main-push run when a newer one enters the same workflow:
 The separate **AppImage Build** workflow is reusable. On `main`, Release calls
 it as a nested job; it does not start a third top-level run.
 
-The detailed timings below remain the pre-consolidation baseline until the
-first live run of the new graph completes. For that observed green push:
+For the observed green push:
 
-- [CI run 32995413552](https://github.com/nexdep/syodep/actions/runs/32995413552)
-  succeeded in **12m 54s**.
-- [Release run 32995414281](https://github.com/nexdep/syodep/actions/runs/32995414281)
-  succeeded in **4m 36s**.
-- The rolling AppImage was replaced about **3m 27s** after the push; the
-  Windows zip followed at about **4m 29s**.
+- [CI run 33114068867](https://github.com/nexdep/syodep/actions/runs/33114068867)
+  succeeded in **7m 35s**.
+- [Release run 33114069084](https://github.com/nexdep/syodep/actions/runs/33114069084)
+  succeeded in **5m 38s**.
+- The rolling AppImage was replaced about **3m 10s** after Release registered
+  the push; the Windows zip followed at about **5m 33s**.
 - The first matching continuous binary was installable through an up-to-date
-  Scoop bucket by **4m 34s after Actions registered the push** (**4m 48s after
+  Scoop bucket by **5m 34s after Actions registered the push** (**5m 48s after
   the source commit timestamp**). That boundary includes both uploading the
   Windows zip and pushing the manifest with its new version and SHA256.
-- Eleven jobs ran and one tag-only publication job was skipped.
-- Jobs occupied runners for **27m 26s** in aggregate. Per-job rounding gives
-  **21 Linux minutes + 13 Windows minutes = 34 runner-minutes**.
-- The standard private-runner list-price equivalent is about **$0.26**, but
+- Nine jobs ran and one tag-only publication job was skipped.
+- Jobs occupied runners for **24m 20s** in aggregate. Per-job rounding gives
+  **16 Linux minutes + 12 Windows minutes = 28 runner-minutes**.
+- The standard private-runner list-price equivalent is about **$0.22**, but
   standard GitHub-hosted compute is free and unlimited here because the
   repository is public.
 - The push created **149.95 MiB** of workflow artifacts, all with three-day
@@ -58,8 +57,8 @@ first live run of the new graph completes. For that observed green push:
   releasing **21.748 GiB**. The newest member of each known family and every
   GitHub Release asset were preserved.
 
-Priority 1 is complete. The largest remaining design concern is correctness,
-not storage: Release publishers do not wait for CI. The first two live
+Priorities 1, 2 and 4 are complete. The largest remaining design concern is
+correctness, not storage: Release publishers do not wait for CI. The first two
 verification commits proved this by publishing their packages even though
 their independent CI runs failed a newly introduced Rust 1.98 Clippy lint. The
 latest rolling assets now come from the green observed commit.
@@ -74,47 +73,45 @@ The easiest mental model is three layers:
 
 ```mermaid
 flowchart TB
-    push["Push 8cd0256 to main<br/>Release run registered 17:39:02 UTC = T+0"]
+    push["Push 6cd9210 to main<br/>Release run registered 20:35:29 UTC = T+0"]
+    ciConcurrency{"CI workflow concurrency<br/>workflow + event + ref<br/>newer main push cancels older main push"}
+    releaseConcurrency{"Release workflow concurrency<br/>workflow + event + ref<br/>newer main push cancels older main push"}
 
-    subgraph ci["CI workflow — run 32995413552"]
+    subgraph ci["CI workflow — run 33114068867"]
         direction LR
-        lint["Rust formatting and clippy<br/>2m47s · done T+2m48s"]
-        rtl["Rust tests (Linux)<br/>34s · done T+36s"]
-        rtw["Rust tests (Windows)<br/>2m31s · done T+2m33s"]
-        qtl["Qt shell build + smoke test (Linux)<br/>1m23s · done T+1m24s"]
-        qtw["Qt shell build + smoke test (Windows)<br/>4m13s · done T+4m15s"]
-        docs["Documentation checks<br/>7s · done T+9s"]
-        ciGate{"Gate: all 6 needs jobs succeeded<br/>and event is push"}
-        native["Build push artifact<br/>8m35s · done T+12m52s"]
+        linuxValidation["Linux validation<br/>5m45s · done CI T+5m49s<br/>fmt + docs + Clippy + Linux tests + NSIS"]
+        rtw["Rust tests (Windows)<br/>1m37s · done CI T+1m40s"]
+        qtl["Qt shell build + smoke test (Linux)<br/>2m52s · done CI T+2m56s"]
+        qtw["Qt shell build + smoke test (Windows)<br/>3m47s · done CI T+3m50s"]
+        ciGate{"Gate: all 4 needs jobs succeeded<br/>and event is push"}
+        native["Build push artifact<br/>1m43s · done CI T+7m34s"]
         nativeArtifact[("syodep-linux-x86_64-&lt;SHA&gt;<br/>native tar + SHA256 · 56.57 MiB · 3 days")]
 
-        lint --> ciGate
-        rtl --> ciGate
+        linuxValidation --> ciGate
         rtw --> ciGate
         qtl --> ciGate
         qtw --> ciGate
-        docs --> ciGate
         ciGate --> native --> nativeArtifact
     end
 
-    subgraph release["Release workflow — run 32995414281"]
+    subgraph release["Release workflow — run 33114069084"]
         direction LR
-        linuxBuild["Release build (Linux AppImage) /<br/>Build and validate Linux AppImage<br/>2m34s · done T+2m36s"]
+        linuxBuild["Release build (Linux AppImage) /<br/>Build and validate Linux AppImage<br/>2m46s · done T+2m50s"]
         appArtifact[("syodep-x86_64-appimage<br/>workflow artifact · 35.04 MiB · 3 days")]
         linuxGate{"Gate: Linux build succeeded<br/>main push · latest-main freshness"}
-        linuxPublish["Publish continuous prerelease (Linux)<br/>12s · done T+3m29s"]
-        linuxAsset[("syodep-continuous-x86_64.AppImage<br/>release asset · 35.59 MiB · live by ~T+3m28s")]
+        linuxPublish["Publish continuous prerelease (Linux)<br/>19s · done T+3m12s"]
+        linuxAsset[("syodep-continuous-x86_64.AppImage<br/>release asset · 35.59 MiB · live by T+3m10s")]
 
-        windowsBuild["Release build (Windows portable zip)<br/>4m13s · done T+4m15s"]
+        windowsBuild["Release build (Windows portable zip)<br/>5m03s · done T+5m05s"]
         installer["syodep-setup.exe<br/>built + end-to-end tested<br/>not retained on main"]
         winArtifact[("syodep-win64<br/>zip-only workflow artifact · 58.34 MiB · 3 days")]
         windowsGate{"Gate: Windows build succeeded<br/>main push · latest-main freshness"}
-        windowsPublish["Publish continuous prerelease (Windows)<br/>17s · done T+4m35s"]
-        windowsAsset[("syodep-continuous-win64.zip<br/>release asset · 58.38 MiB · live by T+4m32s")]
-        scoop[("bucket/syodep-continuous.json<br/>version + matching SHA256 · [skip ci]<br/>public by T+4m34s")]
+        windowsPublish["Publish continuous prerelease (Windows)<br/>28s · done T+5m37s"]
+        windowsAsset[("syodep-continuous-win64.zip<br/>release asset · 58.38 MiB · live by T+5m33s")]
+        scoop[("bucket/syodep-continuous.json<br/>version + matching SHA256 · [skip ci]<br/>public by T+5m34s")]
 
         tagGate{"Gate: ref starts refs/tags/v<br/>false on main"}
-        tagPublish["Publish GitHub release<br/>skipped at T+4m16s"]
+        tagPublish["Publish GitHub release<br/>skipped at T+5m06s"]
 
         linuxBuild --> appArtifact --> linuxGate --> linuxPublish --> linuxAsset
         windowsBuild --> installer
@@ -126,14 +123,14 @@ flowchart TB
         tagGate -.->|"main: skipped"| tagPublish
     end
 
-    push --> lint
-    push --> rtl
-    push --> rtw
-    push --> qtl
-    push --> qtw
-    push --> docs
-    push --> linuxBuild
-    push --> windowsBuild
+    push --> ciConcurrency
+    push --> releaseConcurrency
+    ciConcurrency --> linuxValidation
+    ciConcurrency --> rtw
+    ciConcurrency --> qtl
+    ciConcurrency --> qtw
+    releaseConcurrency --> linuxBuild
+    releaseConcurrency --> windowsBuild
 ```
 
 Rectangles with exact Actions display names are jobs (the Linux label includes
@@ -141,8 +138,9 @@ both the caller job and its reusable-workflow job). Diamonds are explicit
 `needs`/event/freshness gates. Cylinders are stored artifacts, release assets,
 or the published Scoop manifest. The three temporary workflow artifacts are
 intentionally short-lived; the `continuous` release assets are the durable
-user-facing downloads. Times are measured from the Release run's `created_at`,
-17:39:02 UTC; runner scheduling accounts for the gaps between dependent jobs.
+user-facing downloads. Release times are measured from that run's `created_at`,
+20:35:29 UTC; CI offsets use its 20:35:28 UTC `created_at`. Runner scheduling
+accounts for the gaps between dependent jobs.
 
 The CI and Release groups are independent. A builder failure blocks its own
 publisher, but a CI failure does not currently block either Release publisher.
@@ -157,20 +155,20 @@ in that order:
 
 | Observed milestone | UTC | From Actions registration |
 |---|---:|---:|
-| Release run registered | 17:39:02 | T+0m00s |
-| Windows build and `syodep-win64` transfer artifact complete | 17:43:17 | T+4m15s |
-| `Publish the Windows zip` step complete | 17:43:34 | T+4m32s |
-| Manifest commit `f02221d` created | 17:43:34 | T+4m32s |
-| `Bump continuous Scoop manifest` step, including its push, complete | 17:43:36 | **T+4m34s** |
+| Release run registered | 20:35:29 | T+0m00s |
+| Windows build and `syodep-win64` transfer artifact complete | 20:40:34 | T+5m05s |
+| `Publish the Windows zip` step complete | 20:41:02 | T+5m33s |
+| Manifest commit `f8ff0a9` created | 20:41:02 | T+5m33s |
+| `Bump continuous Scoop manifest` step, including its push, complete | 20:41:03 | **T+5m34s** |
 
 Therefore a fresh bucket checkout, or an existing bucket after `scoop update`,
-could resolve and download commit `8cd0256` with
-`scoop install syodep-continuous` by **T+4m34s**. Measured from the source
-commit's 17:38:48 UTC timestamp instead of Actions registration, the end-to-end
-time was **4m48s**. The two-second interval between creation of manifest commit
-[`f02221d`](https://github.com/nexdep/syodep/commit/f02221d04ec1c9ef45f99b9bad5c9ab3cb4ec82c)
+could resolve and download commit `6cd9210` with
+`scoop install syodep-continuous` by **T+5m34s**. Measured from the source
+commit's 20:35:15 UTC timestamp instead of Actions registration, the end-to-end
+time was **5m48s**. The one-second interval between creation of manifest commit
+[`f8ff0a9`](https://github.com/nexdep/syodep/commit/f8ff0a9a83d234e2d9d1a53403b71efff51bad01)
 and completion of its push is why the conservative availability figure is
-4m34s, not 4m32s. A user's own download time comes after this server-side
+5m34s, not 5m33s. A user's own download time comes after this server-side
 availability boundary and depends on their connection and Scoop cache state.
 
 ## Beginner's glossary
@@ -330,7 +328,7 @@ On `main`, only `syodep-win64.zip` is uploaded as the three-day
 permanently.
 
 The observed artifact was downloaded and inspected: it contained exactly one
-file, `syodep-win64.zip` (61,219,765 bytes), and no installer.
+file, `syodep-win64.zip` (61,219,763 bytes), and no installer.
 
 #### Publishers
 
@@ -359,18 +357,18 @@ called `main` artifact expires after three.
 The dependency graph was:
 
 ```text
-push 8cd0256 to main
+push 6cd9210 to main
 |
-+-- CI run 32995413552
-|   +-- six validations ----------------------+
++-- CI run 33114068867
+|   +-- four validations ---------------------+
 |                                             +--> native Linux tar (3 days)
 |
-+-- Release run 32995414281
++-- Release run 33114069084
     +-- Ubuntu 24.04 AppImage --> Linux continuous asset
     +-- Windows zip + tested installer
         +-- zip-only artifact --> Windows continuous asset
                               +--> matching Scoop manifest [skip ci]
-                                   (installable by T+4m34s)
+                                   (installable by T+5m34s)
     +-- versioned publisher: skipped
 ```
 
@@ -383,26 +381,24 @@ usage. Parallel jobs reduce human wait but not aggregate runner occupancy.
 
 | Workflow / job | Runner OS | Actual time | Rounded minutes |
 |---|---:|---:|---:|
-| CI: `Documentation checks` | Linux | 0m 07s | 1 |
-| CI: `Rust tests (Linux)` | Linux | 0m 34s | 1 |
-| CI: `Rust formatting and clippy` | Linux | 2m 47s | 3 |
-| CI: `Qt shell build + smoke test (Linux)` | Linux | 1m 23s | 2 |
-| CI: `Build push artifact` | Linux | 8m 35s | 9 |
-| CI: `Rust tests (Windows)` | Windows | 2m 31s | 3 |
-| CI: `Qt shell build + smoke test (Windows)` | Windows | 4m 13s | 5 |
-| Release: `Release build (Linux AppImage) / Build and validate Linux AppImage` | Linux | 2m 34s | 3 |
-| Release: `Publish continuous prerelease (Linux)` | Linux | 0m 12s | 1 |
-| Release: `Publish continuous prerelease (Windows)` | Linux | 0m 17s | 1 |
-| Release: `Release build (Windows portable zip)` | Windows | 4m 13s | 5 |
-| **Total** |  | **27m 26s** | **21 Linux + 13 Windows = 34** |
+| CI: `Linux validation` | Linux | 5m 45s | 6 |
+| CI: `Qt shell build + smoke test (Linux)` | Linux | 2m 52s | 3 |
+| CI: `Build push artifact` | Linux | 1m 43s | 2 |
+| CI: `Rust tests (Windows)` | Windows | 1m 37s | 2 |
+| CI: `Qt shell build + smoke test (Windows)` | Windows | 3m 47s | 4 |
+| Release: `Release build (Linux AppImage) / Build and validate Linux AppImage` | Linux | 2m 46s | 3 |
+| Release: `Publish continuous prerelease (Linux)` | Linux | 0m 19s | 1 |
+| Release: `Publish continuous prerelease (Windows)` | Linux | 0m 28s | 1 |
+| Release: `Release build (Windows portable zip)` | Windows | 5m 03s | 6 |
+| **Total** |  | **24m 20s** | **16 Linux + 12 Windows = 28** |
 
-The twelfth visible job, Release's `Publish GitHub release`, was skipped by its
+The tenth visible job, Release's `Publish GitHub release`, was skipped by its
 tag-only `if` condition and consumed no runner time.
 
 At GitHub's current standard rates, the private-runner list-price equivalent is:
 
 ```text
-21 x $0.006 + 13 x $0.010 = $0.256, approximately $0.26
+16 x $0.006 + 12 x $0.010 = $0.216, approximately $0.22
 ```
 
 This repository is public, so its actual standard GitHub-hosted compute charge
@@ -412,15 +408,21 @@ and publishes the per-OS
 [runner rates](https://docs.github.com/en/enterprise-cloud@latest/billing/reference/actions-runner-pricing).
 Artifact storage remains metered separately.
 
-The unusually long final native-artifact job rebuilt after the six-job gate
-with cold Rust 1.98 outputs. Cache state and hosted network speed vary, so one
-push is evidence, not a performance guarantee.
+Compared with the `8cd0256` baseline, the graph ran two fewer jobs, aggregate
+occupancy fell by **3m06s**, rounded usage fell by **6 runner-minutes**, and CI
+wall time fell by **5m19s**. Those differences are not all attributable to the
+merge: the new `Linux validation` job took 5m45s (six rounded minutes), while
+the three old jobs totaled 3m28s (five rounded minutes), and the native artifact
+job happened to fall from 8m35s to 1m43s. The first consolidated run therefore
+proves the new graph shape and shared-job wiring, not a steady-state speedup.
+Cache state and hosted network speed vary, so one push is evidence rather than
+a performance guarantee.
 
 ### Objects created by the green push
 
 | Stored object | Purpose | Stored size | Expiry / lifetime |
 |---|---|---:|---|
-| `syodep-linux-x86_64-8cd0256...` | Native post-gate tar + checksum | 56.57 MiB | 3 days |
+| `syodep-linux-x86_64-6cd9210...` | Native post-gate tar + checksum | 56.57 MiB | 3 days |
 | `syodep-x86_64-appimage` | Transfer to Linux publisher | 35.04 MiB | 3 days |
 | `syodep-win64` | Zip-only transfer to Windows publisher | 58.34 MiB | 3 days |
 | `syodep-continuous-x86_64.AppImage` | Rolling Linux release asset | 35.59 MiB | Replaced by next successful Linux publication |
@@ -503,6 +505,7 @@ GitHub later registered both pairs, out of push order:
 | `ce677f6` | [failed](https://github.com/nexdep/syodep/actions/runs/32992578522) | [succeeded](https://github.com/nexdep/syodep/actions/runs/32992578672) |
 | `2120aeb` | [failed](https://github.com/nexdep/syodep/actions/runs/32993649539) | [succeeded](https://github.com/nexdep/syodep/actions/runs/32993649851) |
 | `8cd0256` | [succeeded](https://github.com/nexdep/syodep/actions/runs/32995413552) | [succeeded](https://github.com/nexdep/syodep/actions/runs/32995414281) |
+| `6cd9210` | [succeeded](https://github.com/nexdep/syodep/actions/runs/33114068867) | [succeeded](https://github.com/nexdep/syodep/actions/runs/33114069084) |
 
 The failed CI jobs tracked Rust stable and received Rust 1.98, while the local
 stable toolchain was still 1.97. Rust 1.98 introduced
@@ -519,6 +522,11 @@ this report does not claim causation.
 More importantly, both failed-CI commits still published rolling packages
 because Release is a separate workflow. The green `8cd0256` assets replaced
 them, but publication should eventually depend on a common validation gate.
+
+The `6cd9210` verification did not deliberately overlap two pushes, so it
+proves that the new concurrency declarations are accepted by GitHub and that
+the optimized graph completes; cancellation of an in-flight main run remains
+an operational behavior to observe during a naturally rapid push sequence.
 
 ## Follow-up priorities
 
@@ -567,8 +575,11 @@ This would:
 
 Formatting, docs, Clippy, Linux tests and NSIS syntax now share the `Linux
 validation` job: one checkout, dependency installation, cache and runner.
-Named steps retain clear failure reporting. The measured change in wall time
-and rounded runner minutes will be filled from the first live green push.
+Named steps retain clear failure reporting. In the first live run, the merged
+job took 5m45s (six rounded minutes); the three old jobs took 3m28s (five
+rounded minutes) on the warmer baseline. The consolidation is therefore
+structurally complete, while additional runs are needed before claiming a
+steady-state timing improvement.
 
 ### Priority 5: optionally skip binaries for non-binary changes
 
