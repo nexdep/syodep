@@ -20,6 +20,13 @@ on:
       - "v*"
   workflow_dispatch:
 
+# Cancel builders from superseded main pushes before they reach the publisher
+# freshness checks. Event is part of the group so a main push cannot cancel an
+# intentional manual development build; tags are never auto-cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
 jobs:
   release-build-linux:
     name: Release build (Linux AppImage)

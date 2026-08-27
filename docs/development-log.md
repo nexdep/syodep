@@ -7,6 +7,28 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-08-27 — Cancel superseded main runs and consolidate Linux validation
+
+CI and Release now use workflow-level concurrency keyed by workflow, event and
+ref. A newer `main` push cancels an older main-push run before its builders
+consume more runner time. Including the event keeps intentional manual builds
+independent, and cancellation is disabled for tags and non-main refs. The
+existing per-platform publisher groups remain as a final publication-race
+guard.
+
+CI's formatting, documentation, Clippy, Linux workspace tests and early NSIS
+syntax check now run as named steps in one `Linux validation` job. They share a
+checkout, stable toolchain, Rust cache, native dependencies and compiled MuPDF
+outputs. `Build push artifact` consequently waits on four validation jobs
+instead of six; Windows tests and both native Qt smoke jobs remain independent.
+
+Test strategy: `scripts/check-docs.sh` enforces the concurrency expressions,
+consolidated job and new artifact gate. Run the full local Rust/fmt/Clippy/docs
+and Linux Qt smoke gate, then push to `main` and inspect both live workflow
+graphs, every artifact transfer, both continuous assets and the Scoop manifest.
+Measured timings and runner-minute changes belong in the main-push Actions
+report.
+
 ## 2026-08-26 — Move CI actions to Node 24
 
 GitHub has begun retiring Node 20 for JavaScript actions. All workflow artifact

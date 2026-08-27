@@ -177,8 +177,12 @@ the caller's `uses:` job result, so a failing publisher fails
 observed on `a15d15f`, where a publisher that could not get a runner skipped the
 continuous release entirely. Neither half may be able to block the other.
 
-Each job carries its own `concurrency` group. Sharing one would have the two
-cancelling each other, since both set `cancel-in-progress`.
+The Release workflow has a workflow-level concurrency group keyed by workflow,
+event and ref. A newer `main` push cancels the older run before its builders
+spend more runner time, while tags, feature branches and manual builds are not
+auto-cancelled. Each publisher also carries its own per-platform concurrency
+group. Sharing that publisher group would have Linux and Windows cancel each
+other, since both set `cancel-in-progress`.
 
 Both call `scripts/ensure-continuous-release.sh` to move the `continuous` tag
 and create-or-update the release before uploading. That script has to be
@@ -298,9 +302,9 @@ writes registry entries is a poor fit for a build that changes on every merge.
   can never accrue any. Users who would rather avoid the prompt should install
   via Scoop, which downloads the zip programmatically.
 
-The script is syntax-checked on **Linux** in the `rust-lint` CI job -- `makensis`
-is cross-platform, so a broken script fails in about a minute instead of after
-the twelve-minute Windows build.
+The script is syntax-checked on **Linux** in the `Linux validation` CI job --
+`makensis` is cross-platform, so a broken script fails before the longer
+Windows release build completes.
 
 ## Versioning
 

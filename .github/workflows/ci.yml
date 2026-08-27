@@ -8,6 +8,13 @@ on:
     tags:
       - "v*"
 
+# Stop obsolete main pushes before they spend more runner time. Include the
+# event in the group so a push cannot cancel an intentional workflow of another
+# kind on the same ref; tags and feature branches are never auto-cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
 permissions:
   contents: read
 
@@ -15,8 +22,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  rust-lint:
-    name: Rust formatting and clippy
+  linux-validation:
+    name: Linux validation
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
@@ -24,20 +31,26 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      # clippy --all-targets compiles native deps (MuPDF, font discovery),
-      # which need the fontconfig headers just like the test job.
-      - name: Build dependencies for MuPDF
-        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
+      # Clippy and tests share the expensive MuPDF build on this runner. NSIS
+      # and ImageMagick keep the early cross-platform installer syntax check in
+      # the same validation gate instead of starting another Linux machine.
+      - name: Install validation dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfontconfig1-dev nsis imagemagick
       - name: rustfmt
         run: cargo fmt --all --check
+      - name: Documentation checks
+        run: ./scripts/check-docs.sh
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
-      # makensis is cross-platform, so the Windows installer script is
-      # syntax-checked here in ~1 minute rather than only in the 12-minute
-      # Windows release build. -WX makes warnings (e.g. a section referenced
-      # before it is defined) fail the job.
-      - name: Install NSIS and ImageMagick
-        run: sudo apt-get install -y nsis imagemagick
+      # Covers config parsing, keymap/input, layout, storage/migrations,
+      # PDF open/render/text extraction and the FFI surface. Running after
+      # Clippy reuses dependency and native-library outputs from that step.
+      - name: Rust tests (Linux)
+        run: cargo test --workspace
+      # makensis is cross-platform, so a broken installer fails here rather
+      # than only in the longer Windows release build. -WX promotes warnings.
       - name: Compile the installer script
         run: |
           mkdir -p /tmp/stub/platforms
@@ -60,20 +73,6 @@ jobs:
             -DOUTFILE=/tmp/syodep-setup.exe \
             packaging/syodep.nsi
           test -s /tmp/syodep-setup.exe
-
-  rust-test-linux:
-    name: Rust tests (Linux)
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Build dependencies for MuPDF
-        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
-      # Covers config parsing, keymap/input, layout, storage/migrations,
-      # PDF open/render/text extraction and the FFI surface.
-      - name: cargo test
-        run: cargo test --workspace
 
   rust-test-windows:
     name: Rust tests (Windows)
@@ -188,24 +187,14 @@ jobs:
             exit 1
           }
 
-  docs:
-    name: Documentation checks
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v5
-      - name: Required docs exist and commands/config are documented
-        run: ./scripts/check-docs.sh
-
   build-artifact:
     name: Build push artifact
     runs-on: ubuntu-24.04
     needs:
-      - rust-lint
-      - rust-test-linux
+      - linux-validation
       - rust-test-windows
       - qt-build-linux
       - qt-build-windows
-      - docs
     if: github.event_name == 'push'
     steps:
       - uses: actions/checkout@v5

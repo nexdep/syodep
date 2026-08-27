@@ -132,6 +132,31 @@ grep -qF 'a `main` push are retained for 3 days.' docs/packaging.md \
 grep -qF 'Branch, tag, and manual-run artifacts' docs/packaging.md \
     || err "packaging docs must explain non-main artifact retention"
 
+# Main pushes supersede older runs, but tags/manual runs must be preserved.
+# CI's small Linux checks share one checkout/cache/runner so compiled MuPDF
+# outputs and per-job rounding are not duplicated.
+workflow_concurrency_group='group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}'
+workflow_cancel_main="cancel-in-progress: \${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}"
+for workflow in .github/workflows/ci.yml .github/workflows/release.yml; do
+    grep -qF "$workflow_concurrency_group" "$workflow" \
+        || err "$workflow must isolate concurrency by workflow, event and ref"
+    grep -qF "$workflow_cancel_main" "$workflow" \
+        || err "$workflow must cancel only superseded main pushes"
+done
+grep -q '^  linux-validation:$' .github/workflows/ci.yml \
+    || err "CI must retain the consolidated Linux validation job"
+grep -qF 'name: Linux validation' .github/workflows/ci.yml \
+    || err "CI must expose the consolidated Linux validation check"
+for removed_job in rust-lint rust-test-linux docs; do
+    if grep -q "^  ${removed_job}:$" .github/workflows/ci.yml; then
+        err "CI must not restore the standalone ${removed_job} job"
+    fi
+done
+grep -qF '      - linux-validation' .github/workflows/ci.yml \
+    || err "the post-validation artifact must wait for Linux validation"
+grep -qF '`Linux validation` CI job' docs/packaging.md \
+    || err "packaging docs must name the consolidated Linux validation job"
+
 # GitHub is retiring Node 20 on Actions runners. The first artifact-action
 # majors that run on Node 24 by default are upload v6 and download v7. Keep
 # every transfer path on those majors: the continuous publishers depend on
