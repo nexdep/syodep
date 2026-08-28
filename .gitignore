@@ -4,6 +4,7 @@
 .cache/
 compile_commands.json
 crates/syodep-ffi/include/syodep_ffi.h
+/smoke-progress.txt
 
 # Installer built from packaging/syodep.nsi (generated, never committed).
 packaging/*.exe

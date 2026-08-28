@@ -8,6 +8,7 @@
 # 5. The AppImage build/runtime baseline is consistent across workflow and docs.
 # 6. Workflow artifact retention and Node 24 action runtimes are explicit and
 #    documented.
+# 7. Local development build outputs remain ignored by Git.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -191,6 +192,17 @@ grep -q "NSIS" docs/packaging.md \
     || err "docs/packaging.md no longer documents the NSIS installer"
 grep -qF 'step-security/msvc-dev-cmd' docs/packaging.md \
     || err "packaging docs must name the Node 24 MSVC setup action"
+
+# The development helper deliberately runs from build/dev so generated
+# fixtures and process-relative files cannot dirty the worktree. Keep both
+# generated roots and the smoke-test failure sentinel ignored.
+[ -x scripts/dev-build.sh ] || err "scripts/dev-build.sh must exist and be executable"
+git check-ignore -q build/dev/dev-fixture.pdf \
+    || err "build/dev outputs must remain ignored"
+git check-ignore -q target/debug/libsyodep_ffi.a \
+    || err "development Cargo outputs must remain ignored"
+git check-ignore -q smoke-progress.txt \
+    || err "the root smoke-test progress sentinel must remain ignored"
 
 if [ "$fail" -eq 0 ]; then
     echo "docs check OK"

@@ -57,6 +57,20 @@ before the fix.
 
 ## Running
 
+For a quick incremental shell build, generated fixture, and interactive launch:
+
+```bash
+./scripts/dev-build.sh
+# Open a real document instead of the generated fixture:
+./scripts/dev-build.sh path/to/document.pdf
+# Build without launching, or run both headless renderer smoke tests:
+./scripts/dev-build.sh --build-only
+./scripts/dev-build.sh --smoke
+```
+
+The helper keeps its CMake tree, fixture, and process-relative output below the
+Git-ignored `build/dev` directory. Smoke mode requires Weston.
+
 ```bash
 # everything (needs no Qt, no display)
 cargo test --workspace

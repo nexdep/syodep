@@ -7,6 +7,24 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-08-28 — Add an incremental local development build helper
+
+`scripts/dev-build.sh` now configures and reuses a Debug C++/development Rust
+build under `build/dev`. Its default invocation creates a five-page PDF fixture
+and launches it, an optional PDF argument opens a real document, and explicit
+build-only and OpenGL/raster smoke modes cover non-interactive use.
+
+The script changes into the ignored build tree before starting syodep, so even
+process-relative files left by a failed smoke test cannot appear as untracked
+repository files. The generated fixture, CMake output and Cargo output all live
+under existing ignored roots; the smoke progress sentinel is additionally
+ignored at the repository root for manually invoked smoke tests.
+
+Test strategy: shell syntax, help and invalid-input paths, a real incremental
+build, both headless renderer smoke tests, explicit `git check-ignore` checks
+for every generated path, and the standard workspace formatting, tests,
+Clippy and documentation-consistency gates.
+
 ## 2026-08-27 — Cancel superseded main runs and consolidate Linux validation
 
 CI and Release now use workflow-level concurrency keyed by workflow, event and

@@ -108,6 +108,21 @@ cmake --build build
 ./build/ui-qt/syodep path/to/document.pdf
 ```
 
+For an incremental local development build, use the helper script. With no
+arguments it builds into the Git-ignored `build/dev` directory, generates a
+five-page fixture there, and opens it:
+
+```bash
+./scripts/dev-build.sh
+./scripts/dev-build.sh path/to/document.pdf
+./scripts/dev-build.sh --build-only
+./scripts/dev-build.sh --smoke
+```
+
+The smoke mode requires Weston and exercises both the OpenGL and raster
+renderers. All generated files remain below `build/dev` (or the already
+ignored Cargo `target` directory).
+
 The Rust core builds and tests standalone, without Qt:
 
 ```bash
