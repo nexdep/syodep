@@ -61,6 +61,22 @@ void smokeStep(const char *msg)
     std::exit(1);
 }
 
+void showMainWindow(syodep::MainWindow &window)
+{
+    if (window.startFullscreen()) {
+#if defined(Q_OS_LINUX)
+        // Wayland compositors decide which newly mapped window receives focus.
+        // Qt 6.2 otherwise issues an unsupported requestActivate() while
+        // mapping a fullscreen window and prints a warning, with no change in
+        // compositor behaviour.
+        window.setAttribute(Qt::WA_ShowWithoutActivating);
+#endif
+        window.showFullScreen();
+    } else {
+        window.show();
+    }
+}
+
 int runSmokeTest(const QString &pdfPath, syodep::RendererBackend renderer)
 {
     std::remove("smoke-progress.txt");
@@ -182,9 +198,13 @@ int runSmokeTest(const QString &pdfPath, syodep::RendererBackend renderer)
                          sidebar.hide();
                      });
     sidebar.resize(720, 500);
-    sidebar.show();
-    sidebar.focusList();
-    QApplication::processEvents();
+    {
+        syodep::diag::FallbackStderrCapture startupStderr;
+        sidebar.show();
+        sidebar.focusList();
+        QApplication::processEvents();
+        startupStderr.finish(sidebar.isVisible());
+    }
     QKeyEvent sidebarLeaderA1(QEvent::KeyPress, Qt::Key_Space,
                               Qt::NoModifier, QStringLiteral(" "));
     QKeyEvent sidebarLeaderA2(QEvent::KeyPress, Qt::Key_A,
@@ -336,8 +356,10 @@ int runSmokeTest(const QString &pdfPath, syodep::RendererBackend renderer)
         smokeFail(QStringLiteral("unexpected sidebar state after open"));
     }
 
-    window.show();
+    syodep::diag::FallbackStderrCapture windowStderr;
+    showMainWindow(window);
     QApplication::processEvents();
+    windowStderr.finish(window.isVisible());
     smokeStep("mainwindow shown");
 
     // The real Qt key encoder and modal overlay: Ctrl+Shift+? is represented
@@ -589,12 +611,17 @@ int main(int argc, char *argv[])
     const QString rendererWarning = renderer.fellBack
         ? QStringLiteral("OpenGL unavailable; using raster renderer: %1").arg(renderer.reason)
         : QString();
+    // The renderer probe is already bounded by its own capture. The actual
+    // first window mapping is a separate operation: raster startup can make
+    // Wayland-EGL try Zink before falling back to shared memory, and Qt 6.2
+    // can request unsupported activation for a fullscreen mapping. Keep every
+    // diagnostic if startup fails; otherwise discard only those known lines.
+    syodep::diag::FallbackStderrCapture startupStderr;
     syodep::MainWindow window(renderer.selected, rendererWarning);
     if (!args.isEmpty())
         window.openDocument(args.first());
-    if (window.startFullscreen())
-        window.showFullScreen();
-    else
-        window.show();
+    showMainWindow(window);
+    QApplication::processEvents();
+    startupStderr.finish(window.isVisible());
     return app.exec();
 }

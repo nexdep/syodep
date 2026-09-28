@@ -5,6 +5,7 @@
 // Wayland compositor like any other from the application's point of view.
 #pragma once
 
+#include <QTemporaryFile>
 #include <QString>
 
 #include "canvas_widget.h"
@@ -41,6 +42,26 @@ struct RendererDecision
     bool usable = true;
     bool fellBack = false;
     QString reason;
+};
+
+// Mesa/libEGL and old Qt Wayland plugins can print recoverable startup
+// attempts directly to stderr. Capture only the bounded operation and discard
+// a narrow allow-list after it succeeds; failures replay every diagnostic.
+class FallbackStderrCapture final
+{
+public:
+    FallbackStderrCapture();
+    ~FallbackStderrCapture();
+
+    FallbackStderrCapture(const FallbackStderrCapture &) = delete;
+    FallbackStderrCapture &operator=(const FallbackStderrCapture &) = delete;
+
+    void finish(bool operationSucceeded);
+
+private:
+    QTemporaryFile m_file;
+    int m_savedFd = -1;
+    bool m_active = false;
 };
 
 PlatformInfo detectPlatform();
