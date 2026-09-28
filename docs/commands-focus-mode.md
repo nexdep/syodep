@@ -29,7 +29,7 @@ Counts work here too (`5l`, `3j`).
 | `focus_enter_line` | focus line by line | — |
 | `focus_enter_sentence` | focus sentence by sentence | — |
 | `focus_enter_paragraph` | focus paragraph by paragraph | — |
-| `focus_exit` | leave focus mode (the position and scope are remembered) | — |
+| `focus_exit` | leave focus mode (the position is remembered; scope resets to char) | — |
 
 Bound to `fc` / `fw` / `fe` / `fs` / `fp`. Line scope is `fe`, not `cl`: `l` is
 the forward motion in every mode.

@@ -7,6 +7,13 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-09-28 — Clarify focus navigation documentation
+
+The merge review corrected two stale descriptions: leaving Focus remembers the
+position but resets its scope to character, and backward sentence/paragraph
+motion uses `k` after `fs`/`fp`. Checked against the core mode transition and
+scope motion dispatch; no application behavior changed.
+
 ## 2026-08-28 — Add an incremental local development build helper
 
 `scripts/dev-build.sh` now configures and reuses a Debug C++/development Rust

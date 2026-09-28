@@ -213,7 +213,7 @@ keeping the goal column `hjkl` was aiming for.
 **These are motions, not scope changes.** In word focus, `s` jumps to the first
 word of the next sentence and the highlight stays word-sized; `fs` stays put and
 makes the highlight a whole sentence. There is no backward sentence or
-paragraph key — use `fs`/`fp` and then `h`.
+paragraph key — use `fs`/`fp` and then `k`.
 
 **The entry chords also change the scope, in place.** Pressing `fe` while
 already focused on a word highlights the line you are on — it does not move
