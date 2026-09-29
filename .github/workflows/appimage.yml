@@ -43,6 +43,11 @@ jobs:
     env:
       QT_VERSION: "6.8.3"
       QT_ROOT: /opt/Qt/6.8.3/gcc_64
+      # The bare container has no locale. Qt 6.8 warns about the non-UTF-8
+      # "C" locale, which QT_FATAL_WARNINGS in the smoke test turns into an
+      # abort; the hosted runners already default to C.UTF-8.
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
     steps:
       - uses: actions/checkout@v5
       # `unzip` is needed by MuPDF's build: its Makefile runs

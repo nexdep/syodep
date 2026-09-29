@@ -36,7 +36,14 @@ Two changes, either of which alone fixes the reported symptom:
   resolves while deploying platform plugins, in place of `qt6-base-dev`/
   `qt6-wayland`. `QMAKE` and `CMAKE_PREFIX_PATH` point at the new Qt, and the
   AppImage smoke step now also asserts `--check` reports `QT_VERSION` at both
-  build and run time. Windows stays on 6.7.3.
+  build and run time. The job sets `LANG`/`LC_ALL` to `C.UTF-8`: the bare
+  container has no locale, and Qt 6.8's warning about the "C" locale aborted
+  the smoke test under `QT_FATAL_WARNINGS`. Windows stays on 6.7.3.
+
+Both Linux smoke steps now print the captured output before failing. Under
+`set -e`, a failing `output="$(...)"` assignment used to exit the step before
+the output was printed, which left that locale abort with nothing to diagnose
+in the log.
 
 ### Tests
 
