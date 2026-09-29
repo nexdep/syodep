@@ -90,8 +90,15 @@ artifacts.
 The reusable AppImage builder runs in an **`ubuntu:24.04` container** on the
 24.04 runner. An AppImage inherits the glibc floor of its build userland, so the
 published package now requires glibc 2.39 (Ubuntu 24.04 or another distribution
-with an equivalent runtime). Qt comes from the container's apt and is bundled;
-Rust is installed via rustup inside the container. Cargo dependencies and their
+with an equivalent runtime). Qt is the official Qt 6.8.3 LTS binary release
+(`QT_VERSION` in the workflow), installed with a pinned `aqtinstall` into
+`/opt/Qt`, cached under a version key, and bundled; the job asserts that the
+finished AppImage reports that Qt at both build and run time. Ubuntu 24.04's
+own Qt 6.4.2 is not used: its OpenGL paint engine drew every highlight patch
+after the first in a frame as solid black. The container still installs the
+GL/EGL/xkbcommon development headers Qt's CMake packages need, plus the
+Wayland and XCB runtime libraries linuxdeploy must resolve while it deploys the
+platform plugins. Rust is installed via rustup inside the container. Cargo dependencies and their
 native build outputs are cached across runs under an Ubuntu-24.04-specific key,
 while workspace crates are rebuilt so the binary always carries the selected
 commit's identity.
@@ -111,8 +118,8 @@ plugin a RUNPATH relative to the AppDir root, packaging corrects it to
 from the AppDir's `usr/lib`, so a copy installed on the build host cannot mask a
 broken AppImage. The Qt deployment plugin adds XCB by default, so the job
 populates `AppDir` first, deletes every QPA plugin except the two Wayland ones,
-and only then creates the AppImage. `qt6-wayland` is installed in the build
-container so all of these plugins come from the same distro Qt installation.
+and only then creates the AppImage. All of these plugins come from the same
+official Qt installation, which ships the Wayland client in its base install.
 The workflow extracts the finished AppImage, asserts XCB/offscreen are absent,
 checks the exact integration plugin and its
 `libQt6WaylandEglClientHwIntegration.so.6` dependency are present, and rejects
@@ -129,7 +136,8 @@ Supported Wayland systems must therefore provide the stable
 
 The job starts headless Weston and smoke-tests the actual AppImage with both
 `--renderer=opengl` (Mesa software GL on the GPU-less runner) and
-`--renderer=raster`. It also checks that `auto` selects OpenGL there and that
+`--renderer=raster`; the smoke test paints two highlights and fails if either
+patch reads back black. It also checks that `auto` selects OpenGL there and that
 an XCB override is rejected before Qt starts. An incomplete bundle or a
 backend-specific paint failure therefore fails before upload.
 

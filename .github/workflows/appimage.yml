@@ -36,25 +36,53 @@ jobs:
     runs-on: ubuntu-24.04
     # The AppImage inherits the build userland's glibc floor. Ubuntu 24.04
     # supplies glibc 2.39, so the package targets Ubuntu 24.04+ and other
-    # Wayland distributions with glibc >= 2.39. Distro Qt is bundled.
+    # Wayland distributions with glibc >= 2.39. Qt itself comes from the
+    # official Qt binaries (see QT_VERSION), not the distro: Ubuntu 24.04's
+    # Qt 6.4.2 painted every OpenGL highlight patch after the first black.
     container: ubuntu:24.04
+    env:
+      QT_VERSION: "6.8.3"
+      QT_ROOT: /opt/Qt/6.8.3/gcc_64
     steps:
       - uses: actions/checkout@v5
       # `unzip` is needed by MuPDF's build: its Makefile runs
       # docx_template_build.py when python3 is present (skipping it only when
       # python3 is *missing*), and that script shells out to unzip to unpack an
-      # ODT template. python3 is not requested here but arrives transitively
-      # through the recommends chain of these packages, so the unzip dependency
-      # is invisible until it fires. Pull it in explicitly rather than relying
-      # on apt recommends staying as they are.
+      # ODT template. python3 is always present here (python3-venv, for
+      # aqtinstall), so the unzip dependency always fires.
+      # The official Qt binaries bring only Qt itself, so the container needs
+      # the system libraries they link against: GL/EGL and xkbcommon headers
+      # for Qt's CMake packages, and the Wayland/XCB runtime libraries that
+      # linuxdeploy resolves while deploying every platform plugin (XCB is
+      # pruned from the AppDir afterwards, but must still resolve first).
       - name: Install build dependencies
         run: |
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y \
             build-essential clang libclang-dev cmake ninja-build \
-            qt6-base-dev libqt6opengl6-dev qt6-wayland libgl1-mesa-dev \
-            libfontconfig1-dev libfreetype-dev \
+            libgl1-mesa-dev libegl-dev libxkbcommon-dev libxkbcommon-x11-0 \
+            libwayland-dev libdbus-1-3 libglib2.0-0t64 libgbm1 \
+            libx11-xcb1 libxcb-cursor0 libxcb-glx0 libxcb-icccm4 \
+            libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 \
+            libxcb-shape0 libxcb-shm0 libxcb-sync1 libxcb-util1 \
+            libxcb-xfixes0 libxcb-xkb1 \
+            libfontconfig1-dev libfreetype-dev python3-venv \
             curl file ca-certificates git unzip patchelf weston
+      - uses: actions/cache@v4
+        id: qt-cache
+        with:
+          path: /opt/Qt
+          key: qt-${{ env.QT_VERSION }}-linux_gcc_64-aqt3.3.0
+      - name: Install Qt ${{ env.QT_VERSION }}
+        if: steps.qt-cache.outputs.cache-hit != 'true'
+        run: |
+          python3 -m venv /opt/aqt
+          /opt/aqt/bin/pip install aqtinstall==3.3.0
+          /opt/aqt/bin/aqt install-qt linux desktop "$QT_VERSION" linux_gcc_64 -O /opt/Qt
+      - name: Check Qt installation
+        run: |
+          test -x "$QT_ROOT/bin/qmake"
+          "$QT_ROOT/bin/qmake" -query QT_VERSION | grep -Fqx "$QT_VERSION"
       - name: Install Rust
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
@@ -74,6 +102,7 @@ jobs:
           BUILD_CHANNEL: ${{ inputs.build_channel || 'development' }}
         run: |
           cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$QT_ROOT" \
             -DSYODEP_BUILD_CHANNEL="$BUILD_CHANNEL"
           cmake --build build
       # Populate the AppDir first, then remove every non-Wayland QPA before a
@@ -87,7 +116,7 @@ jobs:
           curl -fsSLO https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage
           chmod +x linuxdeploy-x86_64.AppImage linuxdeploy-plugin-qt-x86_64.AppImage
           export EXTRA_PLATFORM_PLUGINS="libqwayland-egl.so;libqwayland-generic.so"
-          export QMAKE=/usr/bin/qmake6
+          export QMAKE="$QT_ROOT/bin/qmake"
           export APPIMAGE_EXTRACT_AND_RUN=1
           export OUTPUT="syodep-x86_64.AppImage"
           # EXTRA_PLATFORM_PLUGINS deploys the Wayland QPA plugin but not the
@@ -170,6 +199,8 @@ jobs:
             grep -Fqx "  syodep (shell):   $SYODEP_EXPECTED_BUILD_VERSION" \
               <<<"$check_report"
             grep -Fqx "  syodep (core):    $SYODEP_EXPECTED_BUILD_VERSION" \
+              <<<"$check_report"
+            grep -Fqx "  Qt:               $QT_VERSION (built) / $QT_VERSION (runtime)" \
               <<<"$check_report"
             if QT_QPA_PLATFORM=xcb ./syodep-x86_64.AppImage \
                 --appimage-extract-and-run --check; then
