@@ -183,10 +183,17 @@ jobs:
           export SYODEP_EXPECTED_BUILD_VERSION="$(tr -d '\r\n' < build/syodep-version.txt)"
           bash scripts/with-headless-wayland.sh bash -euo pipefail -c '
             for renderer in opengl raster; do
+              # Print the output before failing: under `set -e` a failed
+              # assignment would otherwise exit with nothing in the log.
+              status=0
               output="$(QT_FATAL_WARNINGS=1 ./syodep-x86_64.AppImage \
                 --appimage-extract-and-run --renderer="$renderer" \
-                --smoke-test fixture.pdf 2>&1)"
+                --smoke-test fixture.pdf 2>&1)" || status=$?
               printf "%s\n" "$output"
+              if [[ $status -ne 0 ]]; then
+                echo "$renderer smoke test exited with status $status" >&2
+                exit "$status"
+              fi
               if grep -Eq "libEGL warning:|MESA: error: ZINK:|requestActivate" \
                   <<<"$output"; then
                 echo "$renderer startup leaked a recoverable graphics warning" >&2

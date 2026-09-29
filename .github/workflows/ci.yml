@@ -115,9 +115,16 @@ jobs:
             --example make_fixture -- fixture.pdf 5
           bash scripts/with-headless-wayland.sh bash -euo pipefail -c '
             for renderer in opengl raster; do
+              # Print the output before failing: under `set -e` a failed
+              # assignment would otherwise exit with nothing in the log.
+              status=0
               output="$(QT_FATAL_WARNINGS=1 ./build/ui-qt/syodep \
-                --renderer="$renderer" --smoke-test fixture.pdf 2>&1)"
+                --renderer="$renderer" --smoke-test fixture.pdf 2>&1)" || status=$?
               printf "%s\n" "$output"
+              if [[ $status -ne 0 ]]; then
+                echo "$renderer smoke test exited with status $status" >&2
+                exit "$status"
+              fi
               if grep -Eq "libEGL warning:|MESA: error: ZINK:|requestActivate" \
                   <<<"$output"; then
                 echo "$renderer startup leaked a recoverable graphics warning" >&2
