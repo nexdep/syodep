@@ -18,12 +18,15 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <memory>
 
 #include <QAction>
 #include <QDockWidget>
 #include <QListView>
 #include <QKeyEvent>
+#include <QOpenGLWidget>
 #include <QPlainTextEdit>
+#include <QtMath>
 
 #include "canvas_widget.h"
 #include "core_controller.h"
@@ -131,6 +134,51 @@ int runSmokeTest(const QString &pdfPath, syodep::RendererBackend renderer)
     if (coreHighlightCount != 2)
         smokeFail(QStringLiteral("expected 2 core highlights, got %1")
                       .arg(coreHighlightCount));
+
+    // Paint those highlights on the selected backend and read the frame back.
+    // Two rectangles in one frame is the case that matters: Qt 6.4's OpenGL
+    // engine drew every highlight patch after the first as solid black.
+    {
+        std::unique_ptr<syodep::CanvasWidget> canvas(
+            syodep::createCanvasWidget(renderer, &annotationCore));
+        canvas->widget()->resize(800, 600);
+        {
+            syodep::diag::FallbackStderrCapture canvasStderr;
+            canvas->widget()->show();
+            QApplication::processEvents();
+            canvasStderr.finish(canvas->widget()->isVisible());
+        }
+        const QImage frame = renderer == syodep::RendererBackend::OpenGl
+            ? static_cast<QOpenGLWidget *>(canvas->widget())->grabFramebuffer()
+            : canvas->widget()->grab().toImage();
+        const QVector<syodep::CoreHighlightOverlay> groups =
+            annotationCore.highlightOverlays();
+        int checked = 0;
+        for (const syodep::CoreHighlightOverlay &group : groups) {
+            for (const QRectF &rect : group.pixelRects) {
+                // Just inside the corner: page background under the tint,
+                // never a glyph. White paper multiplied by the yellow keeps
+                // red near 255 (about 222 under the focus overlay, which is
+                // still painted on top); a black patch under that overlay
+                // reads about (74, 90, 96).
+                const QPoint probe(qCeil(rect.x()) + 2, qCeil(rect.y()) + 2);
+                if (!frame.rect().contains(probe))
+                    continue;
+                const QColor c = frame.pixelColor(probe);
+                if (c.red() < 160) {
+                    smokeFail(QStringLiteral("highlight patch %1 painted black (%2)")
+                                  .arg(checked)
+                                  .arg(c.name()));
+                }
+                ++checked;
+            }
+        }
+        if (checked < 2)
+            smokeFail(QStringLiteral("expected 2 visible highlight patches, got %1")
+                          .arg(checked));
+        canvas->widget()->hide();
+    }
+    smokeStep("highlight overlay pixels ok");
 
     syodep::AnnotationSidebar sidebar(&annotationCore);
     sidebar.refreshAnnotations(true);
