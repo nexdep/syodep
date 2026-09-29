@@ -95,6 +95,9 @@ public:
         // Focus/visual rectangles share one simplified path so overlap is
         // painted once. Highlight Multiply blending is performed on QImage
         // patches, where Qt's raster engine is dependable on both backends.
+        // Every patch stays alive until this paint returns: Qt 6.4's OpenGL
+        // engine draws each short-lived image after the first as solid black
+        // when it is destroyed straight after drawImage().
         const auto addRect = [dpr](QPainterPath &path, const QRectF &pixelRect) {
             QRectF box(pixelRect.x() / dpr,
                        pixelRect.y() / dpr,
@@ -118,6 +121,7 @@ public:
         };
 
         const QVector<CoreHighlightOverlay> groups = m_core->highlightOverlays();
+        QVector<QImage> patches;
         for (const CoreHighlightOverlay &group : groups) {
             for (const QRectF &rect : group.pixelRects) {
                 for (const CoreVisiblePage &vp : pages) {
@@ -144,6 +148,7 @@ public:
                                         local.width() / dpr,
                                         local.height() / dpr);
                     painter.drawImage(target, patch);
+                    patches.push_back(patch);
                 }
             }
         }

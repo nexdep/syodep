@@ -7,6 +7,59 @@ then `docs/roadmap.md` for what to build next.
 
 ---
 
+## 2026-09-29 — Black highlight patches on the OpenGL canvas; AppImage moves to Qt 6.8.3
+
+On WSL, the continuous AppImage drew a multi-line highlight with its first line
+correct and every later line as a solid black box. `--renderer=raster` was fine;
+OpenGL and `auto` were not. The black was already in the canvas framebuffer, so
+the WSLg compositor was not involved, and a 15-line standalone `QOpenGLWidget`
+reproduction pinned it on Qt rather than syodep. With the AppImage's bundled
+Qt 6.4.2, a `QImage` drawn through the OpenGL paint engine and destroyed
+straight after `drawImage()` renders correctly only the first time in a paint;
+every later such image comes out black. Qt 6.8.3 and 6.10.2 do not do this.
+The Multiply-on-`QImage` highlight compositing from 2026-07-30 is exactly that
+pattern, one temporary patch per highlight rectangle, so a highlight spanning
+several lines (several rectangles in one frame) hit it. The CPU-side patches
+were correct right up to `drawImage()`.
+
+Two changes, either of which alone fixes the reported symptom:
+
+- **The shell keeps every patch alive until the paint returns.**
+  `CanvasState::paint` collects them in a local `QVector<QImage>`. This keeps
+  syodep correct on any Qt 6.4 it is built against (the native Linux CI
+  artifact and distro builds still use apt's 6.4.2).
+- **The AppImage bundles official Qt 6.8.3 LTS instead of Ubuntu 24.04's
+  6.4.2.** It is installed with a pinned `aqtinstall` into `/opt/Qt` in the
+  same `ubuntu:24.04` container, so the glibc 2.39 floor is unchanged, and
+  cached by version. The container now installs the GL/EGL/xkbcommon headers
+  Qt's CMake packages need and the Wayland/XCB runtime libraries linuxdeploy
+  resolves while deploying platform plugins, in place of `qt6-base-dev`/
+  `qt6-wayland`. `QMAKE` and `CMAKE_PREFIX_PATH` point at the new Qt, and the
+  AppImage smoke step now also asserts `--check` reports `QT_VERSION` at both
+  build and run time. The job sets `LANG`/`LC_ALL` to `C.UTF-8`: the bare
+  container has no locale, and Qt 6.8's warning about the "C" locale aborted
+  the smoke test under `QT_FATAL_WARNINGS`. Windows stays on 6.7.3.
+
+Both Linux smoke steps now print the captured output before failing. Under
+`set -e`, a failing `output="$(...)"` assignment used to exit the step before
+the output was printed, which left that locale abort with nothing to diagnose
+in the log.
+
+### Tests
+
+The smoke test (`--smoke-test`, run for both renderers in `qt-build-linux` and
+against the AppImage) now paints the two highlights it already commits on the
+annotation core through a real canvas, reads the frame back, and fails if the
+paper just inside either patch's corner has lost its red channel. Yellow over
+white keeps red near 255, and about 222 under the focus overlay painted on top.
+A black patch under that overlay reads about (74, 90, 96), which is why the
+check is on red rather than overall darkness. Verified red-then-green: built
+against Qt 6.4.2 without the fix, OpenGL fails with "highlight patch 1 painted
+black" while raster passes; with the fix both pass on 6.4.2 and 6.10.2. The
+full AppImage packaging, verify and smoke steps were replayed locally against
+Qt 6.8.3, and the original multi-line case was checked on screen under WSLg
+with the fixed canvas.
+
 ## 2026-09-28 — Clarify focus navigation documentation
 
 The merge review corrected two stale descriptions: leaving Focus remembers the
